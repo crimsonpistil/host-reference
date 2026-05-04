@@ -3,26 +3,31 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>6B74.dev// Host Threat Hunt Reference</title>
+<title>[6B74] Host Threat Hunt Reference</title>
 <meta name="description" content="MITRE ATT&CK host-based detection reference. Sysmon, Kibana, PowerShell hunts, registry artifacts, open-source detection mappings.">
 <link rel="stylesheet" href="css/style.css">
 <style>
-  body { background: var(--bg); color: var(--text); }
-  .index-hero {
-    background: var(--bg2);
-    border-bottom: 1px solid var(--border);
-    padding: 28px 20px;
-    text-align: center;
-    position: relative;
-  }
-  .index-hero .site-switcher {
-    position: absolute;
-    top: 16px;
-    right: 20px;
-    margin: 0;
-  }
-  .index-title { font-family: var(--mono); font-size: 22px; font-weight: 700; color: #a371f7; margin-bottom: 4px; }
-  .index-sub { font-size: 13px; color: var(--text3); }
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+  .index-hero { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 40px 20px; text-align: center; position: relative; }
+  .index-hero .site-switcher { position: absolute; top: 16px; right: 20px; margin: 0; }
+  .index-title { font-family: var(--mono); font-size: 24px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+  .index-sub { font-size: 13px; color: var(--text3); margin-bottom: 24px; }
+  .index-search-wrap { max-width: 480px; margin: 0 auto; position: relative; }
+  .index-search-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text3); pointer-events: none; }
+  #tactic-search { width: 100%; background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px; color: var(--text); font-family: var(--sans); font-size: 13px; padding: 10px 14px 10px 36px; outline: none; transition: border-color .15s; }
+  #tactic-search:focus { border-color: var(--accent2); }
+  #tactic-search::placeholder { color: var(--text3); }
+  .section-label { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: .08em; padding: 20px 20px 8px; max-width: 1200px; margin: 0 auto; display: block; }
+  .tactic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; padding: 0 20px 28px; max-width: 1200px; margin: 0 auto; }
+  .tactic-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 20px; text-decoration: none; transition: all .2s; display: block; }
+  .tactic-card:hover { background: var(--bg3); transform: translateY(-2px); }
+  .tactic-card.soon { opacity: .4; pointer-events: none; }
+  .card-id { font-family: var(--mono); font-size: 11px; font-weight: 700; margin-bottom: 6px; }
+  .card-name { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .card-desc { font-size: 11px; color: var(--text3); line-height: 1.6; margin-bottom: 12px; }
+  .card-count { font-family: var(--mono); font-size: 10px; color: var(--text2); }
+  .card-pill { display: inline-block; font-family: var(--mono); font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 3px; margin-bottom: 10px; }
+
   .info-section { max-width: 1200px; margin: 16px auto 0; padding: 0 20px 32px; }
   .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   .info-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
@@ -34,11 +39,8 @@
   .info-card code { font-family: var(--mono); font-size: 11px; background: var(--bg3); padding: 1px 5px; border-radius: 3px; color: var(--text); }
   .info-callout { background: var(--bg3); border-left: 2px solid var(--accent2); padding: 10px 14px; border-radius: 0 4px 4px 0; font-size: 11px; color: var(--text2); line-height: 1.6; margin-top: 10px; }
   .info-callout code { background: var(--bg2); }
-  footer.site-footer {
-    margin-top: auto; padding: 22px 20px;
-    border-top: 1px solid var(--border); background: var(--bg2);
-    text-align: center;
-  }
+
+  footer.site-footer { margin-top: auto; padding: 22px 20px; border-top: 1px solid var(--border); background: var(--bg2); text-align: center; }
   footer.site-footer p { font-size: 11px; color: var(--text3); line-height: 1.6; margin: 0 0 4px; }
   footer.site-footer p:last-child { margin-bottom: 0; }
   footer.site-footer code { font-family: var(--mono); font-size: 10px; color: var(--text2); }
@@ -53,10 +55,10 @@
   </div>
   <div class="index-title">MITRE ATT&amp;CK // Host Analyst Reference</div>
   <div class="index-sub">Host analyst threat hunting: indicators, detection syntax, and APT attribution across the attack lifecycle</div>
-</div>
-
-<div style="padding:20px;max-width:1400px;margin:0 auto">
-  <input type="text" id="tactic-search" placeholder="Filter tactics..." style="width:100%;max-width:420px;padding:9px 13px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;font-family:var(--mono);outline:none">
+  <div class="index-search-wrap">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
+    <input id="tactic-search" type="text" placeholder="Filter tactics..." autocomplete="off">
+  </div>
 </div>
 
 <span class="section-label">Available</span>
@@ -64,7 +66,7 @@
 
   <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
     <div class="card-id" style="color:#a371f7">TA0002</div>
-    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">4 indicators · 1 of 13 techniques built</span>
+    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">4 indicators · 1 of 13 techniques built</span>
     <div class="card-name">Execution</div>
     <div class="card-desc">Code execution via interpreters and signed binaries - PowerShell encoded commands, suspicious Office-spawned children, ScriptBlock content patterns, ExecutionPolicy bypass. T1059.001 PowerShell built; remaining 12 techniques (cmd, VB, JS, WMI, scheduled tasks, services, Mshta, Rundll32, Regsvr32, Native API, Shared Modules, User Execution) coming next sessions.</div>
     <div class="card-count">&#9654; Open reference</div>
@@ -77,7 +79,7 @@
 
   <div class="tactic-card soon" data-tags="persistence">
     <div class="card-id" style="color:#39d353">TA0003</div>
-    <span class="card-pill" style="background:rgba(57,211,83,.12);color:#39d353;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">In progress</span>
+    <span class="card-pill" style="background:rgba(57,211,83,.12);color:#39d353">In progress</span>
     <div class="card-name">Persistence</div>
     <div class="card-desc">Registry run keys, scheduled tasks, WMI subscriptions, startup folders, services, DLL hijacking - the canonical host-side persistence techniques.</div>
     <div class="card-count">Coming soon</div>
@@ -85,7 +87,7 @@
 
   <div class="tactic-card soon" data-tags="privilege escalation">
     <div class="card-id" style="color:#ffa600">TA0004</div>
-    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">Planned</span>
     <div class="card-name">Privilege Escalation</div>
     <div class="card-desc">Token manipulation, UAC bypass, named pipe impersonation, exploitation patterns. Builds on Execution telemetry.</div>
     <div class="card-count">Coming soon</div>
@@ -93,7 +95,7 @@
 
   <div class="tactic-card soon" data-tags="defense evasion">
     <div class="card-id" style="color:#f85149">TA0005</div>
-    <span class="card-pill" style="background:rgba(248,81,73,.12);color:#f85149;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <span class="card-pill" style="background:rgba(248,81,73,.12);color:#f85149">Planned</span>
     <div class="card-name">Defense Evasion</div>
     <div class="card-desc">Process injection (CreateRemoteThread, APC, PE injection), parent PID spoofing, unsigned drivers, LOLBin abuse.</div>
     <div class="card-count">Coming soon</div>
@@ -101,7 +103,7 @@
 
   <div class="tactic-card soon" data-tags="credential access">
     <div class="card-id" style="color:#ff7b72">TA0006</div>
-    <span class="card-pill" style="background:rgba(255,123,114,.12);color:#ff7b72;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <span class="card-pill" style="background:rgba(255,123,114,.12);color:#ff7b72">Planned</span>
     <div class="card-name">Credential Access</div>
     <div class="card-desc">LSASS access patterns, SAM/NTDS extraction, DPAPI abuse, Mimikatz process indicators. Host-side complement to network credential access detections.</div>
     <div class="card-count">Coming soon</div>
@@ -109,7 +111,7 @@
 
   <div class="tactic-card soon" data-tags="discovery">
     <div class="card-id" style="color:#58a6ff">TA0007</div>
-    <span class="card-pill" style="background:rgba(88,166,255,.12);color:#58a6ff;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <span class="card-pill" style="background:rgba(88,166,255,.12);color:#58a6ff">Planned</span>
     <div class="card-name">Discovery</div>
     <div class="card-desc">Host enumeration commands, registry queries, network/system discovery. Complements network-side discovery detections.</div>
     <div class="card-count">Coming soon</div>
