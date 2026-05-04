@@ -61,7 +61,7 @@
   </div>
 </div>
 
-<span class="section-label">Available</span>
+<span class="section-label">Tactics</span>
 <div class="tactic-grid">
 
   <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
@@ -125,8 +125,8 @@
 
     <div class="info-card">
       <h3>What this is</h3>
-      <p>The <strong>host-side</strong> companion to the <a href="https://hunt.6b74.dev" style="color:var(--accent)">network hunt reference</a>. Where the network reference covers what adversaries do across the wire, this site covers what they do inside the endpoint &mdash; process execution, persistence, privilege escalation, host-side credential theft.</p>
-      <p>Each indicator includes Sysmon Event IDs, paste-ready Kibana KQL, PowerShell hunt scripts, registry/file artifacts, adversary tool attribution, and references to open-source detection projects (Sigma, Velociraptor, Hayabusa, Atomic Red Team).</p>
+      <p>The <strong>host-side</strong> companion to the <a href="https://hunt.6b74.dev" style="color:var(--accent)">network threat hunt reference</a>. Where the network reference covers what adversaries do across the wire, this site covers what they do inside the endpoint: process execution, persistence, privilege escalation, host-side credential theft.</p>
+      <p>Each indicator includes Sysmon Event IDs, paste-ready Kibana KQL, PowerShell hunt scripts, registry/file artifacts, adversary tool attribution, and references to open-source detection projects (Sigma, Velociraptor, Hayabusa, etc.).</p>
     </div>
 
     <div class="info-card">
@@ -146,7 +146,7 @@
     <div class="info-card">
       <h3>Schema notes</h3>
       <p>The host schema differs from network because host telemetry has more dimensions. Same indicator can have evidence in: process events (Sysmon EID 1), registry modifications (EID 12/13), file creation (EID 11), network connections from process (EID 3), image loads (EID 7), and process access (EID 10).</p>
-      <p>PowerShell hunt scripts are designed to run directly against Windows event logs &mdash; useful for both proactive hunting and during incident response when you need to triage without a SIEM.</p>
+      <p>PowerShell hunt scripts are designed to run directly against Windows event logs - useful for both proactive hunting and during incident response when you need to triage without a SIEM.</p>
     </div>
 
     <div class="info-card">
