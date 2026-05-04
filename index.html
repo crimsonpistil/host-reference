@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Host Hunt Reference — host.6b74.dev</title>
+<meta name="description" content="MITRE ATT&CK host-based detection reference. Sysmon, Kibana, PowerShell hunts, registry artifacts, open-source detection mappings.">
+<link rel="stylesheet" href="css/style.css">
+<style>
+  body { background: var(--bg); color: var(--text); }
+  .index-hero {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 28px 20px;
+    text-align: center;
+    position: relative;
+  }
+  .index-hero .site-switcher {
+    position: absolute;
+    top: 16px;
+    right: 20px;
+    margin: 0;
+  }
+  .index-title { font-family: var(--mono); font-size: 22px; font-weight: 700; color: #a371f7; margin-bottom: 4px; }
+  .index-sub { font-size: 13px; color: var(--text3); }
+  .info-section { max-width: 1200px; margin: 16px auto 0; padding: 0 20px 32px; }
+  .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .info-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; }
+  .info-card h3 { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 10px; }
+  .info-card p { font-size: 12px; color: var(--text2); line-height: 1.65; margin: 0 0 8px; }
+  .info-card p:last-child { margin-bottom: 0; }
+  .info-card ul { margin: 0; padding: 0 0 0 16px; font-size: 12px; color: var(--text2); line-height: 1.7; }
+  .info-card ul li { margin-bottom: 4px; }
+  .info-card code { font-family: var(--mono); font-size: 11px; background: var(--bg3); padding: 1px 5px; border-radius: 3px; color: var(--text); }
+  .info-callout { background: var(--bg3); border-left: 2px solid var(--accent2); padding: 10px 14px; border-radius: 0 4px 4px 0; font-size: 11px; color: var(--text2); line-height: 1.6; margin-top: 10px; }
+  .info-callout code { background: var(--bg2); }
+  footer.site-footer {
+    margin-top: auto; padding: 22px 20px;
+    border-top: 1px solid var(--border); background: var(--bg2);
+    text-align: center;
+  }
+  footer.site-footer p { font-size: 11px; color: var(--text3); line-height: 1.6; margin: 0 0 4px; }
+  footer.site-footer p:last-child { margin-bottom: 0; }
+  footer.site-footer code { font-family: var(--mono); font-size: 10px; color: var(--text2); }
+</style>
+</head>
+<body>
+
+<div class="index-hero">
+  <div class="site-switcher">
+    <a href="https://hunt.6b74.dev" class="switcher-side">NETWORK</a>
+    <span class="switcher-side active">HOST</span>
+  </div>
+  <div class="index-title">~/host-reference</div>
+  <div class="index-sub">MITRE ATT&amp;CK host-based detection reference · Sysmon · Kibana (KQL) · PowerShell · Registry · OSS Detections</div>
+</div>
+
+<div style="padding:20px;max-width:1400px;margin:0 auto">
+  <input type="text" id="tactic-search" placeholder="Filter tactics..." style="width:100%;max-width:420px;padding:9px 13px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px;font-family:var(--mono);outline:none">
+</div>
+
+<span class="section-label">Available</span>
+<div class="tactic-grid">
+
+  <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
+    <div class="card-id" style="color:#a371f7">TA0002</div>
+    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">4 indicators · 1 of 13 techniques built</span>
+    <div class="card-name">Execution</div>
+    <div class="card-desc">Code execution via interpreters and signed binaries — PowerShell encoded commands, suspicious Office-spawned children, ScriptBlock content patterns, ExecutionPolicy bypass. T1059.001 PowerShell built; remaining 12 techniques (cmd, VB, JS, WMI, scheduled tasks, services, Mshta, Rundll32, Regsvr32, Native API, Shared Modules, User Execution) coming next sessions.</div>
+    <div class="card-count">&#9654; Open reference</div>
+  </a>
+
+</div>
+
+<span class="section-label">Coming Soon</span>
+<div class="tactic-grid">
+
+  <div class="tactic-card soon" data-tags="persistence">
+    <div class="card-id" style="color:#39d353">TA0003</div>
+    <span class="card-pill" style="background:rgba(57,211,83,.12);color:#39d353;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">In progress</span>
+    <div class="card-name">Persistence</div>
+    <div class="card-desc">Registry run keys, scheduled tasks, WMI subscriptions, startup folders, services, DLL hijacking — the canonical host-side persistence techniques.</div>
+    <div class="card-count">Coming soon</div>
+  </div>
+
+  <div class="tactic-card soon" data-tags="privilege escalation">
+    <div class="card-id" style="color:#ffa600">TA0004</div>
+    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <div class="card-name">Privilege Escalation</div>
+    <div class="card-desc">Token manipulation, UAC bypass, named pipe impersonation, exploitation patterns. Builds on Execution telemetry.</div>
+    <div class="card-count">Coming soon</div>
+  </div>
+
+  <div class="tactic-card soon" data-tags="defense evasion">
+    <div class="card-id" style="color:#f85149">TA0005</div>
+    <span class="card-pill" style="background:rgba(248,81,73,.12);color:#f85149;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <div class="card-name">Defense Evasion</div>
+    <div class="card-desc">Process injection (CreateRemoteThread, APC, PE injection), parent PID spoofing, unsigned drivers, LOLBin abuse.</div>
+    <div class="card-count">Coming soon</div>
+  </div>
+
+  <div class="tactic-card soon" data-tags="credential access">
+    <div class="card-id" style="color:#ff7b72">TA0006</div>
+    <span class="card-pill" style="background:rgba(255,123,114,.12);color:#ff7b72;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <div class="card-name">Credential Access</div>
+    <div class="card-desc">LSASS access patterns, SAM/NTDS extraction, DPAPI abuse, Mimikatz process indicators. Host-side complement to network credential access detections.</div>
+    <div class="card-count">Coming soon</div>
+  </div>
+
+  <div class="tactic-card soon" data-tags="discovery">
+    <div class="card-id" style="color:#58a6ff">TA0007</div>
+    <span class="card-pill" style="background:rgba(88,166,255,.12);color:#58a6ff;display:inline-block;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px;margin-bottom:10px">Planned</span>
+    <div class="card-name">Discovery</div>
+    <div class="card-desc">Host enumeration commands, registry queries, network/system discovery. Complements network-side discovery detections.</div>
+    <div class="card-count">Coming soon</div>
+  </div>
+
+</div>
+
+<span class="section-label">About this reference</span>
+<section class="info-section">
+  <div class="info-grid">
+
+    <div class="info-card">
+      <h3>What this is</h3>
+      <p>The <strong>host-side</strong> companion to the <a href="https://hunt.6b74.dev" style="color:var(--accent)">network hunt reference</a>. Where the network reference covers what adversaries do across the wire, this site covers what they do inside the endpoint &mdash; process execution, persistence, privilege escalation, host-side credential theft.</p>
+      <p>Each indicator includes Sysmon Event IDs, paste-ready Kibana KQL, PowerShell hunt scripts, registry/file artifacts, adversary tool attribution, and references to open-source detection projects (Sigma, Velociraptor, Hayabusa, Atomic Red Team).</p>
+    </div>
+
+    <div class="info-card">
+      <h3>How to use it</h3>
+      <ul>
+        <li>Pick a tactic card to open its reference page</li>
+        <li>Search or filter to narrow indicators by technique or APT actor</li>
+        <li>Each row has tabs for Sysmon · Kibana · PowerShell · Registry/Artifacts · Tools · OSS Detections · Notes · APT</li>
+        <li>Click the &#9733; star to add to your hunt list (persisted across sessions)</li>
+        <li>Open <strong>My Hunts</strong> to review and export your hunt as TXT or CSV with a CMS-ready template</li>
+      </ul>
+      <div class="info-callout">
+        Use the <strong>NETWORK</strong> / <strong>HOST</strong> switcher in the header to jump to the network reference for the complementary lens on the same techniques.
+      </div>
+    </div>
+
+    <div class="info-card">
+      <h3>Schema notes</h3>
+      <p>The host schema differs from network because host telemetry has more dimensions. Same indicator can have evidence in: process events (Sysmon EID 1), registry modifications (EID 12/13), file creation (EID 11), network connections from process (EID 3), image loads (EID 7), and process access (EID 10).</p>
+      <p>PowerShell hunt scripts are designed to run directly against Windows event logs &mdash; useful for both proactive hunting and during incident response when you need to triage without a SIEM.</p>
+    </div>
+
+    <div class="info-card">
+      <h3>Build status</h3>
+      <p>Currently building <strong>Execution (TA0002)</strong>: 1 of 13 techniques fully built (T1059.001 PowerShell with 4 indicators). Remaining 12 techniques in Execution are stubbed and will be filled out in future sessions.</p>
+      <p>Tactic build order: Execution &rarr; Persistence &rarr; Defense Evasion &rarr; Privilege Escalation &rarr; Credential Access &rarr; Discovery, then completionist coverage of the rest.</p>
+    </div>
+
+  </div>
+</section>
+
+<footer class="site-footer">
+  <p>Built on the MITRE ATT&amp;CK<sup>&reg;</sup> framework. ATT&amp;CK is a registered trademark of The MITRE Corporation.</p>
+  <p><code>~/host-reference</code> &middot; offline-first host-based threat hunting reference</p>
+</footer>
+
+<script>
+document.getElementById('tactic-search').addEventListener('input', function() {
+  const q = this.value.toLowerCase().trim();
+  document.querySelectorAll('.tactic-card').forEach(card => {
+    const text = (card.textContent + ' ' + (card.dataset.tags || '')).toLowerCase();
+    card.style.display = !q || text.includes(q) ? '' : 'none';
+  });
+});
+</script>
+</body>
+</html>
