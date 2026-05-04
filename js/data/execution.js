@@ -1,17 +1,17 @@
-// TA0002 — Execution
+// TA0002 - Execution
 // 13 techniques planned · ~32 indicators total when complete
 // Currently built: T1059.001 (4 indicators)
-// Other 12 techniques stubbed — see widgets in build session for headline indicators
+// Other 12 techniques stubbed - see widgets in build session for headline indicators
 
 const DATA = [
   {
     id: "T1059.001",
     name: "Command and Scripting Interpreter: PowerShell",
-    desc: "Encoded commands, suspicious parents, in-memory IEX patterns, ExecutionPolicy bypass — the full PS detection stack",
+    desc: "Encoded commands, suspicious parents, in-memory IEX patterns, ExecutionPolicy bypass - the full PS detection stack",
     rows: [
       {
-        sub: "T1059.001 — Encoded Command Execution",
-        indicator: "powershell.exe with -EncodedCommand argument — base64-obfuscated payload",
+        sub: "T1059.001 - Encoded Command Execution",
+        indicator: "powershell.exe with -EncodedCommand argument - base64-obfuscated payload",
         sysmon: `EventID=1
 Image=*\\powershell.exe
 CommandLine=*-enc*
@@ -34,7 +34,7 @@ payload writes to disk or registry on execution.
 
 Investigation pivots:
 - Decode the base64 payload (visible in CommandLine field)
-- Check parent process for context — Office/Outlook/Acrobat
+- Check parent process for context - Office/Outlook/Acrobat
   spawning powershell with -enc is highly suspicious
 - Look for outbound network connections from the PowerShell
   process (Sysmon EID 3) within the same session
@@ -70,7 +70,7 @@ Velociraptor artifacts:
 
 YARA:
 - Florian Roth's signature-base PowerShell rules`,
-        notes: "Encoded PowerShell remains the most common adversary execution method even in 2026 because it (a) defeats simple keyword-matching detection, (b) handles arbitrary script content including special characters, and (c) is built into PowerShell itself with no additional tooling. Detection sweet spot: combine the -EncodedCommand arg with parent-process context. Office app spawning powershell -enc = high-confidence phish chain. Service spawning powershell -enc = potential persistence. svchost spawning powershell -enc = likely WMI-based execution. The encoded payload itself is base64; decoding requires UTF-16LE encoding (not ASCII) — a common pitfall in incident response.",
+        notes: "Encoded PowerShell remains the most common adversary execution method even in 2026 because it (a) defeats simple keyword-matching detection, (b) handles arbitrary script content including special characters, and (c) is built into PowerShell itself with no additional tooling. Detection sweet spot: combine the -EncodedCommand arg with parent-process context. Office app spawning powershell -enc = high-confidence phish chain. Service spawning powershell -enc = potential persistence. svchost spawning powershell -enc = likely WMI-based execution. The encoded payload itself is base64; decoding requires UTF-16LE encoding (not ASCII) - a common pitfall in incident response.",
         apt: [
           { cls: "apt-mul", name: "Red Team", note: "Universal in Cobalt Strike, Empire, and most C2 framework default stagers." },
           { cls: "apt-mul", name: "Ransomware", note: "Universal across modern ransomware affiliate operations for staging." },
@@ -82,8 +82,8 @@ YARA:
         cite: "MITRE ATT&CK T1059.001"
       },
       {
-        sub: "T1059.001 — Suspicious Parent Process",
-        indicator: "powershell.exe spawned by Office, Adobe, or other unusual parent — phishing chain indicator",
+        sub: "T1059.001 - Suspicious Parent Process",
+        indicator: "powershell.exe spawned by Office, Adobe, or other unusual parent - phishing chain indicator",
         sysmon: `EventID=1
 Image=*\\powershell.exe
 ParentImage=
@@ -138,14 +138,14 @@ Modern observation: Microsoft's "Mark of the Web"
 mitigations broke macro-based phishing in 2022.
 Adversaries pivoted to ISO/IMG containers (no MOTW),
 LNK files, and OneNote (.one) files. The parent-spawn
-pattern still holds — just check additional parents.`,
+pattern still holds - just check additional parents.`,
         ossdetect: `Sigma:
 - proc_creation_win_office_outlook_spawn_susp.yml
 - proc_creation_win_office_susp_child.yml
 - Many variants per Office app
 
 Atomic Red Team:
-- T1566.001 (phishing — linked technique)
+- T1566.001 (phishing - linked technique)
 - Various tests reproduce Office→PowerShell chain
 
 Hayabusa:
@@ -160,7 +160,7 @@ event_simpleName=ProcessRollup2
 ParentBaseFileName IN ("WINWORD.EXE","EXCEL.EXE",
   "POWERPNT.EXE","OUTLOOK.EXE","AcroRd32.exe")
 ImageFileName IN ("powershell.exe","cmd.exe")`,
-        notes: "Office-spawning-PowerShell is one of the highest-fidelity initial-access detections in modern environments. The technique pre-dates ATT&CK itself — 'macro spawns shell' has been a phishing detection target for over a decade. Modern phishing increasingly uses container-types (ISO/IMG/ONE) to bypass MOTW, but the ultimate execution still goes through PowerShell or CMD eventually. Tune by user role: developers and admins legitimately spawn PowerShell from various contexts; finance/HR/sales users almost never do, especially from Office apps. Pair with: outbound network connections in the PowerShell child process, file writes to %TEMP% / %APPDATA%, subsequent persistence creation (scheduled tasks, registry run keys).",
+        notes: "Office-spawning-PowerShell is one of the highest-fidelity initial-access detections in modern environments. The technique pre-dates ATT&CK itself - 'macro spawns shell' has been a phishing detection target for over a decade. Modern phishing increasingly uses container-types (ISO/IMG/ONE) to bypass MOTW, but the ultimate execution still goes through PowerShell or CMD eventually. Tune by user role: developers and admins legitimately spawn PowerShell from various contexts; finance/HR/sales users almost never do, especially from Office apps. Pair with: outbound network connections in the PowerShell child process, file writes to %TEMP% / %APPDATA%, subsequent persistence creation (scheduled tasks, registry run keys).",
         apt: [
           { cls: "apt-mul", name: "Phishing", note: "Universal in phishing-based initial access operations." },
           { cls: "apt-mul", name: "Initial Access", note: "Standard pattern across initial access broker operations." },
@@ -172,8 +172,8 @@ ImageFileName IN ("powershell.exe","cmd.exe")`,
         cite: "MITRE ATT&CK T1059.001, T1566.001"
       },
       {
-        sub: "T1059.001 — Suspicious ScriptBlock Content",
-        indicator: "PowerShell ScriptBlock containing IEX/DownloadString/Invoke-Expression — fileless execution patterns",
+        sub: "T1059.001 - Suspicious ScriptBlock Content",
+        indicator: "PowerShell ScriptBlock containing IEX/DownloadString/Invoke-Expression - fileless execution patterns",
         sysmon: `[ScriptBlockLogging required - separate event channel]
 EventID=4104 in
 Microsoft-Windows-PowerShell/Operational
@@ -245,7 +245,7 @@ Hayabusa:
 Velociraptor:
 - Windows.EventLogs.PowerShell
 - Built-in IOC matching for known IOCs in script content`,
-        notes: "ScriptBlock logging (Event 4104) captures the actual code being executed AFTER PowerShell de-obfuscates it — meaning even if the command-line shows -EncodedCommand <base64>, the 4104 event shows the decoded script. This is the most powerful PowerShell visibility you can get. Caveat: it must be enabled via GPO. Many environments don't have it on by default. Detection signal-to-noise is high: legitimate PowerShell use rarely contains IEX + DownloadString + Net.WebClient in the same script. AMSI integration with PowerShell 5+ further enhances this — when AMSI flags a ScriptBlock as malicious, you get Event ID 4104 with content + Event ID 5061 from Microsoft-Windows-PowerShell/Admin. Combine for highest fidelity. Adversary countermove: AMSI bypass via memory patching (Patriot, AMSI.fail) — detection shifts to Sysmon EID 7 (Image Load) of amsi.dll into PowerShell, which is itself suspicious.",
+        notes: "ScriptBlock logging (Event 4104) captures the actual code being executed AFTER PowerShell de-obfuscates it - meaning even if the command-line shows -EncodedCommand <base64>, the 4104 event shows the decoded script. This is the most powerful PowerShell visibility you can get. Caveat: it must be enabled via GPO. Many environments don't have it on by default. Detection signal-to-noise is high: legitimate PowerShell use rarely contains IEX + DownloadString + Net.WebClient in the same script. AMSI integration with PowerShell 5+ further enhances this - when AMSI flags a ScriptBlock as malicious, you get Event ID 4104 with content + Event ID 5061 from Microsoft-Windows-PowerShell/Admin. Combine for highest fidelity. Adversary countermove: AMSI bypass via memory patching (Patriot, AMSI.fail) - detection shifts to Sysmon EID 7 (Image Load) of amsi.dll into PowerShell, which is itself suspicious.",
         apt: [
           { cls: "apt-mul", name: "Red Team", note: "Universal in red team post-exploitation." },
           { cls: "apt-mul", name: "Ransomware", note: "Standard staging pattern across ransomware operations." },
@@ -257,8 +257,8 @@ Velociraptor:
         cite: "MITRE ATT&CK T1059.001"
       },
       {
-        sub: "T1059.001 — Execution Policy Bypass",
-        indicator: "powershell.exe with -ExecutionPolicy Bypass — script restrictions disabled",
+        sub: "T1059.001 - Execution Policy Bypass",
+        indicator: "powershell.exe with -ExecutionPolicy Bypass - script restrictions disabled",
         sysmon: `EventID=1
 Image=*\\powershell.exe
 CommandLine matches:
@@ -281,7 +281,7 @@ AND process.command_line: (*ExecutionPolicy*Bypass* OR *-ep\\ bypass* OR *-ep\\ 
   @{n='User';e={$_.Properties[12].Value}},
   @{n='Parent';e={$_.Properties[20].Value}},
   @{n='CmdLine';e={$_.Properties[10].Value}}`,
-        registry: `No persistent artifact — the bypass is per-session.
+        registry: `No persistent artifact - the bypass is per-session.
 
 Investigation pivots:
 - Process ancestry: who called PowerShell with -ep bypass?
@@ -321,7 +321,7 @@ Hayabusa:
 
 Velociraptor:
 - Windows.Detection.PowerShell.SuspiciousFlags`,
-        notes: "ExecutionPolicy is one of the most misunderstood security features in PowerShell — it's not a security boundary. Microsoft documents it explicitly as 'not a security feature' but as a 'safety guardrail.' Adversaries bypass it trivially with -ExecutionPolicy Bypass, but ALSO with: -EncodedCommand (no script file = no policy check), running PowerShell scripts via Get-Content + IEX, or just calling powershell.exe -Command directly. The detection value of catching -ep bypass isn't in stopping the bypass — it's that legitimate IT scripts rarely need it (they sign their scripts) while adversary tooling almost always uses it. False-positive sources: software installers that bundle PowerShell scripts, vendor monitoring agents, some legitimate sysadmin one-liners. Build allowlists by source/parent process. Pair with combined-flag detection: -nop -w hidden -ep bypass is essentially an adversary fingerprint when seen together.",
+        notes: "ExecutionPolicy is one of the most misunderstood security features in PowerShell - it's not a security boundary. Microsoft documents it explicitly as 'not a security feature' but as a 'safety guardrail.' Adversaries bypass it trivially with -ExecutionPolicy Bypass, but ALSO with: -EncodedCommand (no script file = no policy check), running PowerShell scripts via Get-Content + IEX, or just calling powershell.exe -Command directly. The detection value of catching -ep bypass isn't in stopping the bypass - it's that legitimate IT scripts rarely need it (they sign their scripts) while adversary tooling almost always uses it. False-positive sources: software installers that bundle PowerShell scripts, vendor monitoring agents, some legitimate sysadmin one-liners. Build allowlists by source/parent process. Pair with combined-flag detection: -nop -w hidden -ep bypass is essentially an adversary fingerprint when seen together.",
         apt: [
           { cls: "apt-mul", name: "Red Team", note: "Universal flag pattern in red team operations." },
           { cls: "apt-mul", name: "Ransomware", note: "Standard in ransomware staging." },
@@ -342,7 +342,7 @@ Velociraptor:
     desc: "cmd.exe LOLBin chains, recon command bursts, parent-process anomalies, DOSfuscation",
     rows: [
       {
-        sub: "T1059.003 — Coming Soon",
+        sub: "T1059.003 - Coming Soon",
         indicator: "Full content for T1059.003 cmd.exe (3+ indicators) coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -364,7 +364,7 @@ Velociraptor:
     desc: "VBA macros, vbscript via wscript/cscript, Office-driven script execution",
     rows: [
       {
-        sub: "T1059.005 — Coming Soon",
+        sub: "T1059.005 - Coming Soon",
         indicator: "Full content for T1059.005 VBA/VBScript coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -384,7 +384,7 @@ Velociraptor:
     desc: "JScript via Windows Script Host, mshta+JS chains, fileless JS loaders",
     rows: [
       {
-        sub: "T1059.007 — Coming Soon",
+        sub: "T1059.007 - Coming Soon",
         indicator: "Full content for T1059.007 JavaScript coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -392,7 +392,7 @@ Velociraptor:
         registry: "(coming soon)",
         tools: "(coming soon)",
         ossdetect: "(coming soon)",
-        notes: "Planned coverage: WSH (wscript/cscript) executing .js/.jse, mshta JS chain. 2 indicators planned. JScript is a quieter alternative to PowerShell — fewer defenders watch it closely.",
+        notes: "Planned coverage: WSH (wscript/cscript) executing .js/.jse, mshta JS chain. 2 indicators planned. JScript is a quieter alternative to PowerShell - fewer defenders watch it closely.",
         apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
         cite: "MITRE ATT&CK T1059.007"
       }
@@ -404,7 +404,7 @@ Velociraptor:
     desc: "wmic.exe process create, remote WMI execution, WMI subscription persistence",
     rows: [
       {
-        sub: "T1047 — Coming Soon",
+        sub: "T1047 - Coming Soon",
         indicator: "Full content for T1047 WMI coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -424,7 +424,7 @@ Velociraptor:
     desc: "schtasks.exe creation, COM-based task creation, remote scheduled tasks",
     rows: [
       {
-        sub: "T1053.005 — Coming Soon",
+        sub: "T1053.005 - Coming Soon",
         indicator: "Full content for T1053.005 Scheduled Tasks coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -444,7 +444,7 @@ Velociraptor:
     desc: "sc.exe service creation, PsExec service signature, suspicious binPath patterns",
     rows: [
       {
-        sub: "T1569.002 — Coming Soon",
+        sub: "T1569.002 - Coming Soon",
         indicator: "Full content for T1569.002 Service Execution coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -464,7 +464,7 @@ Velociraptor:
     desc: "mshta.exe HTA execution, URL invocation, inline VBS/JS payloads",
     rows: [
       {
-        sub: "T1218.005 — Coming Soon",
+        sub: "T1218.005 - Coming Soon",
         indicator: "Full content for T1218.005 Mshta coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -472,7 +472,7 @@ Velociraptor:
         registry: "(coming soon)",
         tools: "(coming soon)",
         ossdetect: "(coming soon)",
-        notes: "Planned coverage: mshta with HTTP URL, mshta with inline vbscript:/javascript: payload. 2 indicators planned. mshta.exe is a signed Microsoft binary — bypasses many script-based defenses.",
+        notes: "Planned coverage: mshta with HTTP URL, mshta with inline vbscript:/javascript: payload. 2 indicators planned. mshta.exe is a signed Microsoft binary - bypasses many script-based defenses.",
         apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
         cite: "MITRE ATT&CK T1218.005"
       }
@@ -484,7 +484,7 @@ Velociraptor:
     desc: "rundll32.exe DLL execution abuse, javascript: invocation, no-args anomaly",
     rows: [
       {
-        sub: "T1218.011 — Coming Soon",
+        sub: "T1218.011 - Coming Soon",
         indicator: "Full content for T1218.011 Rundll32 coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -504,7 +504,7 @@ Velociraptor:
     desc: "regsvr32.exe Squiblydoo technique, scriptlet abuse, AppLocker bypass",
     rows: [
       {
-        sub: "T1218.010 — Coming Soon",
+        sub: "T1218.010 - Coming Soon",
         indicator: "Full content for T1218.010 Regsvr32 coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -521,10 +521,10 @@ Velociraptor:
   {
     id: "T1106",
     name: "Native API",
-    desc: "Direct API calls bypassing CLI — process creation without command-line context",
+    desc: "Direct API calls bypassing CLI - process creation without command-line context",
     rows: [
       {
-        sub: "T1106 — Coming Soon",
+        sub: "T1106 - Coming Soon",
         indicator: "Full content for T1106 Native API coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -544,7 +544,7 @@ Velociraptor:
     desc: "DLL side-loading, search-order hijacking, suspicious-path module loads",
     rows: [
       {
-        sub: "T1129 — Coming Soon",
+        sub: "T1129 - Coming Soon",
         indicator: "Full content for T1129 Shared Modules coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
@@ -561,10 +561,10 @@ Velociraptor:
   {
     id: "T1204.002",
     name: "User Execution: Malicious File",
-    desc: "User clicks .exe/.lnk/.iso/.one — file launched from email or download path",
+    desc: "User clicks .exe/.lnk/.iso/.one - file launched from email or download path",
     rows: [
       {
-        sub: "T1204.002 — Coming Soon",
+        sub: "T1204.002 - Coming Soon",
         indicator: "Full content for T1204.002 User Execution coming in next build session",
         sysmon: "(see widget summary in build session for headline indicator)",
         kibana: "(coming soon)",
