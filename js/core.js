@@ -312,7 +312,7 @@ function render() {
     const tocItem = document.createElement('div');
     tocItem.className = 'toc-item';
     tocItem.dataset.tech = tech.id;
-    tocItem.innerHTML = `<span class="toc-id">${tech.id}</span><span class="toc-name">${tech.name.split(' ').slice(0,3).join(' ')}</span><span class="toc-count">${tech.rows.length}</span>`;
+    tocItem.innerHTML = `<span class="toc-id">${tech.id}</span><span class="toc-count">${tech.rows.length}</span>`;
     tocItem.addEventListener('click', () => {
       document.querySelectorAll('.fbtn[data-tech]').forEach(b => b.classList.remove('active'));
       const btn = document.querySelector(`.fbtn[data-tech="${tech.id}"]`);
