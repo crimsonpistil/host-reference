@@ -2406,17 +2406,188 @@ Sysinternals autoruns.exe:
     desc: "Direct API calls bypassing CLI - process creation without command-line context",
     rows: [
       {
-        sub: "T1106 - Coming Soon",
-        indicator: "Full content for T1106 Native API coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: process creation without expected CLI signature. 1 indicator planned. Detection requires module load monitoring + memory access monitoring (Sysmon EID 7/8/10).",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
-        cite: "MITRE ATT&CK T1106"
+        sub: "T1106 - Native API Process Creation and Memory Injection Artifacts",
+        indicator: "Process spawned with empty command line, suspicious cross-process memory access, or remote thread injection - Native API execution bypassing Win32 layer",
+        sysmon: `// Three Sysmon event IDs cover Native API abuse:
+
+// EID 1 - Process creation with empty/missing CommandLine:
+EventID=1
+CommandLine="" OR CommandLine IS NULL
+// Legitimate processes rarely have empty command lines.
+// Exceptions: some system processes (smss.exe, csrss.exe)
+// Flag when: standard user-space processes appear
+// with no command line context
+
+// EID 8 - CreateRemoteThread (cross-process injection):
+EventID=8
+// All fields relevant - no filtering needed initially.
+// Key fields:
+//   SourceImage = injecting process
+//   TargetImage = process being injected into
+//   StartAddress = memory address of injected thread
+//   StartModule  = DLL containing start address
+//     (blank StartModule = shellcode, not a known DLL)
+//   StartFunction = function name if resolvable
+
+// EID 10 - ProcessAccess (handle to another process):
+EventID=10
+GrantedAccess=0x1fffff
+  OR GrantedAccess=0x1f0fff
+  OR GrantedAccess=0x143a
+// These access masks include PROCESS_VM_WRITE +
+// PROCESS_VM_OPERATION - required for memory injection
+// TargetImage=*\\lsass.exe is a separate high-value alert
+// (credential access - covered in Credential Access tactic)`,
+        kibana: `// EID 1: Process with empty command line
+winlog.event_id: 1
+AND NOT process.command_line: *
+AND NOT process.name: ("smss.exe" OR "csrss.exe" OR "wininit.exe" OR "services.exe")
+
+// EID 8: Remote thread injection - blank StartModule = shellcode
+winlog.event_id: 8
+AND NOT winlog.event_data.StartModule: *
+
+// EID 8: Remote thread into sensitive targets
+winlog.event_id: 8
+AND winlog.event_data.TargetImage: ("*\\lsass.exe" OR "*\\svchost.exe" OR "*\\explorer.exe" OR "*\\notepad.exe")
+
+// EID 10: Suspicious cross-process handle with write access
+winlog.event_id: 10
+AND winlog.event_data.GrantedAccess: ("0x1fffff" OR "0x1f0fff" OR "0x143a")
+AND NOT winlog.event_data.SourceImage: ("*\\MsMpEng.exe" OR "*\\svchost.exe" OR "*\\csrss.exe")`,
+        powershell: `# Hunt for EID 8 - CreateRemoteThread with no StartModule (shellcode indicator)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=8
+} | Where-Object {
+  # Blank StartModule = thread start address not in any known DLL
+  -not $_.Properties[8].Value
+} | Select TimeCreated,
+  @{n='SourceImage';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='TargetImage';e={($_.Properties[6].Value -split '\\\\')[-1]}},
+  @{n='StartAddress';e={$_.Properties[10].Value}},
+  @{n='StartModule';e={$_.Properties[8].Value}},
+  @{n='StartFunction';e={$_.Properties[9].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Hunt for EID 10 - suspicious cross-process memory access
+$suspiciousAccess = @('0x1fffff','0x1f0fff','0x143a','0x40','0x1410')
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=10
+} | Where-Object {
+  $access = $_.Properties[8].Value
+  $suspiciousAccess -contains $access -and
+  # Exclude known-good sources
+  $_.Properties[4].Value -notmatch '(MsMpEng|svchost|csrss|lsass|werfault)\.exe'
+} | Select TimeCreated,
+  @{n='SourceImage';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='TargetImage';e={($_.Properties[6].Value -split '\\\\')[-1]}},
+  @{n='GrantedAccess';e={$_.Properties[8].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Hunt for EID 1 - processes with empty command line
+$knownNoCLI = @('smss.exe','csrss.exe','wininit.exe','services.exe','lsass.exe')
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  -not $_.Properties[10].Value -and
+  $knownNoCLI -notcontains ($_.Properties[4].Value -split '\\\\')[-1]
+} | Select TimeCreated,
+  @{n='Image';e={$_.Properties[4].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `No direct registry artifact from Native API execution.
+
+Native API calls operate entirely in memory - the
+execution path bypasses the filesystem artifacts
+that most other techniques leave behind.
+
+Indirect forensic artifacts to investigate:
+- Memory forensics (most reliable for Native API):
+  Volatility / Rekall plugins:
+  - malfind: scans for injected code regions
+    (RWX memory pages with PE headers or shellcode)
+  - dlllist: lists loaded modules per process
+    (compare against expected DLLs for that process)
+  - cmdline: dumps command lines from PEB structure
+    (if empty for a user-space process = anomaly)
+  - handles: open handles per process
+
+- Sysmon EID 7 (Image Load) context:
+  Watch for ntdll.dll loaded into unexpected processes,
+  or unusual DLLs appearing in memory of known-good
+  processes shortly before EID 8/10 events
+
+- Process hollowing artifact:
+  SectionObjectPointers divergence in memory -
+  detectable via Get-InjectedThread (PowerShell tool)
+  or process memory scanners`,
+        tools: `Native API functions commonly abused:
+- NtCreateProcess / NtCreateProcessEx
+  (process creation without Win32 CreateProcess)
+- NtAllocateVirtualMemory + NtWriteVirtualMemory
+  (allocate + write shellcode to remote process)
+- NtCreateThreadEx / RtlCreateUserThread
+  (thread creation in remote process)
+- NtMapViewOfSection
+  (map shared memory section into target process)
+- NtQueueApcThread
+  (queue APC - Asynchronous Procedure Call - for injection)
+
+Frameworks using Native API:
+Cobalt Strike (multiple injection techniques)
+Metasploit (meterpreter injection)
+Sliver C2 (process injection modules)
+Donut (shellcode generator - produces Native API stagers)
+Syswhispers / Syswhispers2 / Syswhispers3
+  (toolkits for making direct syscalls, bypassing
+  ntdll.dll hooks by going straight to kernel)
+HellsGate / HalosGate (syscall bypass techniques)
+
+Syscall-level evasion note: the most advanced
+adversaries don't just call ntdll.dll Native API -
+they use direct syscalls (int 2e / syscall instruction)
+to bypass ntdll.dll entirely, defeating EDR hooks
+placed there. Detection at that level requires
+kernel-mode visibility (ETW, kernel sensors).`,
+        ossdetect: `Sigma:
+- proc_creation_win_susp_empty_commandline.yml
+- sysmon_createremotethread_win_susp.yml (EID 8)
+- sysmon_proc_access_win_susp_access_mask.yml (EID 10)
+- sysmon_createremotethread_win_shellcode.yml
+  (EID 8 with blank StartModule)
+
+Atomic Red Team:
+- T1106 (Native API process creation tests)
+- T1055 (Process Injection - overlapping technique)
+
+Hayabusa:
+- CreateRemoteThread detection rules (EID 8)
+- SuspiciousProcessAccess rules (EID 10)
+
+Velociraptor:
+- Windows.Detection.Injection
+  (combines EID 8 + EID 10 + memory scanning)
+- Windows.Memory.Acquisition (full memory capture)
+
+Dedicated injection detection tools:
+- Get-InjectedThread (PowerShell, Jared Atkinson)
+  Scans running processes for injected threads
+  by checking thread start address against
+  known module ranges - shellcode threads have
+  start addresses in unattributed memory regions
+- PE-sieve (hasherezade) - process memory scanner`,
+        notes: "T1106 is the most detection-resistant technique in the Execution tactic because its entire value to an adversary is avoiding the artifacts that other techniques generate. The three Sysmon event IDs here (1, 8, 10) are the best available host-side telemetry, but each has significant false-positive challenges that require careful tuning. EID 8 (CreateRemoteThread) is the most actionable: legitimate software rarely injects threads into other processes, and a CreateRemoteThread event where StartModule is blank almost always indicates shellcode rather than a legitimate DLL-based operation. EID 10 (ProcessAccess) with write-capable access masks is noisier - AV and EDR products themselves open handles to other processes for scanning, so source-image allowlisting is essential. The empty command line on EID 1 is worth monitoring but generates false positives from some legitimate system processes and certain vendor software that uses Win32 CreateProcess with a NULL lpCommandLine argument. The honest detection gap to acknowledge: the most sophisticated operators use direct syscalls (Syswhispers-style) to bypass even ntdll.dll, making user-mode detection insufficient. Kernel-mode ETW (Event Tracing for Windows) sensors in modern EDR products are the frontier for that level of evasion. For most environments and most adversaries, the Sysmon EID 8 blank-StartModule detection is the highest-value single alert in this indicator.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Process injection via Native API documented across multiple long-dwell espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "Native API injection techniques documented in operations targeting multiple sectors." },
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Multiple Native API injection techniques (CreateRemoteThread, NtMapViewOfSection, APC) built into Beacon." },
+          { cls: "apt-mul", name: "Ransomware", note: "Process injection for AV evasion documented across Conti, BlackCat, and other ransomware families." },
+          { cls: "apt-mul", name: "Red Teams", note: "Direct syscall techniques (Syswhispers, HellsGate) are standard modern red team evasion tradecraft." }
+        ],
+        cite: "MITRE ATT&CK T1106, T1055"
       }
     ]
   },
