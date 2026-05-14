@@ -342,19 +342,325 @@ Velociraptor:
     desc: "cmd.exe LOLBin chains, recon command bursts, parent-process anomalies, DOSfuscation",
     rows: [
       {
-        sub: "T1059.003 - Coming Soon",
-        indicator: "Full content for T1059.003 cmd.exe (3+ indicators) coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: discovery command chains (whoami + ipconfig + net user combinations), Office-spawning-cmd phishing chains, DOSfuscation (caret/quote escape obfuscation). See build session widget for summary detection patterns.",
+        sub: "T1059.003 - Suspicious Parent Process",
+        indicator: "cmd.exe spawned by Office, Adobe, or scripting host - phishing or macro execution chain",
+        sysmon: `EventID=1
+Image=*\\cmd.exe
+ParentImage=
+  *\\winword.exe
+  OR *\\excel.exe
+  OR *\\powerpnt.exe
+  OR *\\outlook.exe
+  OR *\\acrord32.exe
+  OR *\\acrobat.exe
+  OR *\\mshta.exe
+  OR *\\wscript.exe
+  OR *\\cscript.exe
+  OR *\\wmiprvse.exe`,
+        kibana: `winlog.event_id: 1
+AND process.name: "cmd.exe"
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "powerpnt.exe" OR "outlook.exe" OR "acrord32.exe" OR "acrobat.exe" OR "mshta.exe" OR "wscript.exe" OR "cscript.exe" OR "wmiprvse.exe")`,
+        powershell: `Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\cmd.exe' -and
+  $_.Properties[20].Value -match
+    'winword|excel|powerpnt|outlook|acrord32|acrobat|mshta|wscript|cscript|wmiprvse'
+} | Select TimeCreated,
+  @{n='Parent';e={$_.Properties[20].Value}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `Office macro artifacts (same as T1059.001 parent indicator):
+- %APPDATA%\\Microsoft\\Templates\\*.dotm
+- %APPDATA%\\Microsoft\\Word\\STARTUP\\*.dotm
+- %APPDATA%\\Microsoft\\Excel\\XLSTART\\*.xlsm
+
+Outlook attachment cache:
+- %APPDATA%\\Local\\Microsoft\\Windows\\INetCache\\
+  Content.Outlook\\
+
+LNK targets (often used as cmd.exe launchers post-MOTW):
+- %APPDATA%\\Roaming\\Microsoft\\Windows\\Recent\\*.lnk
+- Shell:startup\\*.lnk (if persistence also in play)
+
+Zone.Identifier ADS on container files
+(confirms download origin vs internal):
+- Right-click file -> Properties -> Unblock, or
+- Get-Item file.exe -Stream Zone.Identifier`,
+        tools: `Phishing operators (universal)
+Malicious Office macro loaders
+HTA droppers (mshta -> cmd chain)
+VBScript / WScript loaders
+ISO/LNK containers (post-MOTW evasion, 2022+)
+OneNote (.one) embedded attachment runners
+
+Modern observation: as with PowerShell parent detection,
+the parent list must evolve with phishing trends.
+Post-2022 additions worth monitoring:
+- explorer.exe (ISO mount auto-run via LNK)
+- %TEMP%\\*.tmp (staging via temp dir)
+- onenoteim.exe (OneNote embedded script runners)`,
+        ossdetect: `Sigma:
+- proc_creation_win_office_cmd_child.yml
+- proc_creation_win_susp_cmd_parent_process.yml
+- proc_creation_win_office_susp_child.yml (covers both cmd and PS)
+
+Atomic Red Team:
+- T1566.001 (phishing - upstream technique)
+- T1059.003 Test #2 (cmd from script host)
+
+Hayabusa:
+- SuspParentChild rules include cmd.exe variants
+- Office spawn detection (cmd + PS variants)
+
+Velociraptor:
+- Windows.Detection.OfficeSpawn
+  (covers cmd.exe and powershell.exe children)`,
+        notes: "Office-spawning-cmd is the cmd.exe equivalent of the PowerShell parent indicator - same logic, same high fidelity, slightly different toolchain. Where PowerShell is preferred for in-memory staging, cmd.exe is often used as a relay: the macro or HTA spawns cmd.exe, which then chains into something else (certutil, bitsadmin, curl, etc.). That chaining pattern - cmd spawning a network-capable LOLBin - is worth treating as a separate pivot: look at Sysmon EID 1 events where cmd.exe is BOTH child (suspicious parent) and parent (spawning LOLBin) within the same process tree. False positives are low for end-user machines. Admin and developer workstations will generate noise. Tune by user role and parent-child pair, not just parent alone.",
         apt: [
-          { cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }
+          { cls: "apt-mul", name: "Phishing", note: "Universal in phishing chains - macro or HTA drops cmd, cmd relays to next stage." },
+          { cls: "apt-ru", name: "APT28", note: "Office-based phishing chains invoking cmd.exe extensively documented." },
+          { cls: "apt-kp", name: "Lazarus", note: "HTA and Office macro loaders spawning cmd.exe in cryptocurrency-targeted operations." },
+          { cls: "apt-ir", name: "APT35", note: "Macro-based initial access chains documented in CISA advisories." },
+          { cls: "apt-mul", name: "Ransomware", note: "Affiliate operators use Office-to-cmd chains as standard initial access pathway." }
         ],
-        cite: "MITRE ATT&CK T1059.003"
+        cite: "MITRE ATT&CK T1059.003, T1566.001"
+      },
+      {
+        sub: "T1059.003 - Post-Compromise Recon Command Burst",
+        indicator: "Rapid sequence of discovery commands from cmd.exe - whoami, ipconfig, net user, systeminfo within short window",
+        sysmon: `EventID=1
+Image=*\\cmd.exe OR *\\whoami.exe
+  OR *\\ipconfig.exe OR *\\net.exe
+  OR *\\systeminfo.exe OR *\\hostname.exe
+  OR *\\nltest.exe OR *\\arp.exe
+  OR *\\route.exe OR *\\tasklist.exe
+
+// Logical spec: alert when 4+ of these images
+// appear with the same ParentProcessId or same
+// user session within a 60-second window.
+// Single-event Sysmon filters cannot express this;
+// use Kibana or Sigma correlation rule below.`,
+        kibana: `// Correlation query - run over short time window (60-120s)
+winlog.event_id: 1
+AND process.name: (
+  "whoami.exe" OR "ipconfig.exe" OR "net.exe" OR
+  "systeminfo.exe" OR "hostname.exe" OR "nltest.exe" OR
+  "arp.exe" OR "route.exe" OR "tasklist.exe" OR
+  "netstat.exe" OR "qwinsta.exe"
+)
+// Then aggregate: if same user or same parent spawns
+// 4+ distinct process names in < 120s, alert.
+// Use Kibana Threshold rule or EQL sequence for correlation.`,
+        powershell: `# Hunt for recon command bursts in Sysmon EID 1
+# Looks for 4+ distinct recon binaries per user per 2-minute window
+$reconBinaries = @(
+  'whoami.exe','ipconfig.exe','net.exe','systeminfo.exe',
+  'hostname.exe','nltest.exe','arp.exe','route.exe',
+  'tasklist.exe','netstat.exe','qwinsta.exe','nslookup.exe'
+)
+
+$windowSecs = 120
+
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational'; ID=1
+} | Where-Object {
+  $bin = ($_.Properties[4].Value -split '\\\\')[-1]
+  $reconBinaries -contains $bin
+} | Select TimeCreated,
+  @{n='Binary';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='ParentCmdLine';e={$_.Properties[21].Value}} |
+  Group-Object User |
+  ForEach-Object {
+    $user = $_.Name
+    $events = $_.Group | Sort-Object TimeCreated
+    for ($i=0; $i -lt $events.Count; $i++) {
+      $window = $events | Where-Object {
+        [Math]::Abs(($_.TimeCreated - $events[$i].TimeCreated).TotalSeconds) -le $windowSecs
+      }
+      if (($window.Binary | Select-Object -Unique).Count -ge 4) {
+        [PSCustomObject]@{
+          User       = $user
+          StartTime  = $events[$i].TimeCreated
+          BinariesRun = ($window.Binary | Select-Object -Unique) -join ', '
+          Count      = ($window.Binary | Select-Object -Unique).Count
+        }
+        break
+      }
+    }
+  } | Where-Object { $_ -ne $null }`,
+        registry: `No direct registry artifact from recon commands.
+
+Investigation pivots:
+- Sysmon EID 3 (NetworkConnect) from same session:
+  nltest and net.exe can generate LDAP/SMB traffic -
+  pivot to network logs to see what systems were queried
+- User profile writes from systeminfo:
+  none by default; output is stdout only
+- Command history if not cleared:
+  %APPDATA%\\Microsoft\\Windows\\PowerShell\\PSReadLine\\
+  ConsoleHost_history.txt (PowerShell-launched cmds only)
+- Prefetch (if enabled - off by default on servers):
+  C:\\Windows\\Prefetch\\WHOAMI.EXE-*.pf timestamps
+  confirm first vs repeated execution`,
+        tools: `Manual operator post-exploitation (most common)
+Cobalt Strike built-in reconnaissance commands
+Metasploit post-exploitation modules
+Empire / Starkiller discovery modules
+Impacket tooling (for remote variants)
+
+Standard adversary recon sequence seen across
+many documented operations:
+  whoami /all          - current user + privileges
+  hostname             - machine name
+  ipconfig /all        - network config + DNS suffix
+  net user             - local users
+  net localgroup administrators - admin group members
+  net view             - visible shares/hosts
+  systeminfo           - OS/patch level
+  nltest /domain_trusts - domain trust enumeration
+  tasklist /svc        - running services
+
+The sequence order and timing distinguishes manual
+operators from scripted tooling - manual operators
+run commands with human-paced gaps; scripts run
+them near-simultaneously.`,
+        ossdetect: `Sigma:
+- win_susp_recon_activity.yml (Florian Roth)
+- proc_creation_win_recon_discovery.yml
+- Multiple individual detection rules per binary
+
+Elastic EQL (Event Query Language) example:
+sequence with maxspan=2m
+  [process where process.name == "whoami.exe"]
+  [process where process.name == "net.exe"]
+  [process where process.name == "ipconfig.exe"]
+
+Atomic Red Team:
+- T1087.001 (Local Account Discovery)
+- T1016 (System Network Configuration Discovery)
+- T1082 (System Information Discovery)
+- Many individual discovery tests that reproduce
+  the component commands
+
+Velociraptor:
+- Windows.System.Pslist + correlation
+- Windows.EventLogs.Sysmon (with filters)`,
+        notes: "Individual recon commands like whoami and ipconfig run constantly in healthy enterprise environments - IT scripts, monitoring agents, login scripts. The detection is not per-command but per-burst: multiple distinct recon binaries run by the same user or from the same parent process within a short time window. This is almost exclusively human operator behavior post-compromise. The timing gap between commands is a secondary signal: automated tools run commands in milliseconds; human operators take 2-30 seconds between commands. Sysmon alone cannot express the windowed-count correlation - you need Kibana threshold rules, EQL sequences, or a SIEM aggregation query. This is one of the cases where the PowerShell hunt script above is genuinely useful for rapid triage without a SIEM. APT attribution is broad because this is a universal technique - every threat actor who gains shell access does some version of this recon sequence.",
+        apt: [
+          { cls: "apt-mul", name: "All Operators", note: "Universal post-compromise behavior - virtually every documented intrusion includes a recon command burst." },
+          { cls: "apt-ru", name: "APT29", note: "Documented in SolarWinds post-compromise activity." },
+          { cls: "apt-cn", name: "APT41", note: "Discovery command sequences documented across multiple sectors." },
+          { cls: "apt-kp", name: "Lazarus", note: "Standard recon sequence documented in CISA advisories on DPRK operators." },
+          { cls: "apt-mul", name: "Ransomware", note: "Pre-encryption recon (network share and user enumeration) is standard across ransomware operations." }
+        ],
+        cite: "MITRE ATT&CK T1059.003, T1087.001, T1016, T1082"
+      },
+      {
+        sub: "T1059.003 - DOSfuscation / Command Obfuscation",
+        indicator: "cmd.exe command string with excessive carets, quoted null insertions, or comma/semicolon delimiters - obfuscated shell syntax",
+        sysmon: `EventID=1
+Image=*\\cmd.exe
+CommandLine matches (any of):
+  - 3+ consecutive carets: ^^^
+  - Quoted empty string insertion: ""c""m""d or s^e^t
+  - Comma/semicolon as token separators: cmd,/c or
+    c;m;d;.;e;x;e
+  - Environment variable substring: %ComSpec:~0,3%
+
+// Logical spec: regex on CommandLine field.
+// Sysmon XML config does not support regex in
+// CommandLine match; use Kibana pcre or Sigma
+// detection below for runtime alerting.`,
+        kibana: `winlog.event_id: 1
+AND process.name: "cmd.exe"
+AND process.command_line: /(\^{3,}|\"\"[a-z]\"\"|\,[\/\\\\]|;[a-z];|%[A-Za-z]+:~[0-9]+,[0-9]+%)/
+
+// Alternative plaintext-match approach (lower fidelity):
+AND process.command_line: (*^^^* OR *""c""* OR *,/c* OR *;m;d;*)`,
+        powershell: `# Hunt for DOSfuscated cmd.exe command lines in Sysmon EID 1
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\cmd.exe' -and (
+    # 3+ consecutive carets
+    $_.Properties[10].Value -match '\^{3,}' -or
+    # Quoted null-string insertion (s""et, c""md, etc.)
+    $_.Properties[10].Value -match '""\w""' -or
+    # Comma or semicolon as command token separator
+    $_.Properties[10].Value -match '[,;][/\\\\cC]' -or
+    # Environment variable substring extraction
+    $_.Properties[10].Value -match '%[A-Za-z_]+:~\d+,\d+%'
+  )
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={$_.Properties[20].Value}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `No registry artifact directly.
+
+Context: DOSfuscation is almost always a wrapper around
+something substantive - the obfuscated outer shell
+eventually invokes a real payload.
+
+Investigation pivots:
+- Child processes of the obfuscated cmd.exe:
+  what did cmd.exe actually launch?
+  Sysmon EID 1, filter ParentProcessId = <suspicious cmd PID>
+- Network connections from child processes:
+  Sysmon EID 3 within same session
+- File writes from child processes:
+  Sysmon EID 11 (FileCreate) or EID 15 (FileCreateStreamHash)
+- Decode the obfuscation manually:
+  Remove carets (they escape the next char in cmd.exe)
+  Remove quoted null strings ("" between tokens = nothing)
+  Reconstruct the actual command to understand intent`,
+        tools: `DOSfuscation tool by Daniel Bohannon (2018)
+  - Published tool for demonstrating cmd.exe obfuscation
+  - Multiple layers: token, string, encoding techniques
+  - GitHub: danielbohannon/Invoke-DOSfuscation
+
+Manual operator technique (carets + quoted nulls)
+Malware staging scripts
+Some ransomware dropper chains
+
+Note: DOSfuscation is significantly less common than
+PowerShell obfuscation in modern operations. Most
+adversaries prefer PowerShell's richer obfuscation
+options (-EncodedCommand, string concatenation, etc.).
+cmd.exe obfuscation appears most in:
+- Older malware lineages
+- Environments where PS execution is blocked or monitored
+- Manual operators who default to cmd.exe tradecraft`,
+        ossdetect: `Sigma:
+- proc_creation_win_cmd_dosfuscation.yml (Florian Roth)
+- proc_creation_win_cmd_susp_special_chars.yml
+- proc_creation_win_susp_cmd_obfuscation.yml
+
+Atomic Red Team:
+- T1059.003 Test #3 (DOSfuscation variants)
+- Invoke-DOSfuscation manual tests
+
+Daniel Bohannon research:
+- "DOSfuscation: Exploring the Depths of Cmd.exe
+  Obfuscation and Detection Techniques" (2018 DEF CON)
+- Core reference for understanding all variants
+
+Hayabusa:
+- cmd-obfuscation rules in default ruleset
+
+Velociraptor:
+- Windows.EventLogs.Sysmon + regex filter on CommandLine`,
+        notes: "DOSfuscation exploits cmd.exe's quirky parsing rules - carets are escape characters, quoted empty strings are silently removed, commas and semicolons can substitute for spaces in certain positions. The result is command strings that look like noise but execute normally. The core reference is Daniel Bohannon's 2018 DEF CON talk and the Invoke-DOSfuscation tool. Detection angle: legitimate cmd.exe usage almost never contains 3+ consecutive carets or quoted null strings mid-token. These patterns have near-zero false-positive rate in normal enterprise telemetry - they're detectable because the obfuscation itself is anomalous. The deeper hunt is what the obfuscated command actually does: decode the outer shell (drop carets, remove quoted nulls, resolve env var substrings) and analyze the revealed payload. Kibana regex on CommandLine is more reliable than Sysmon config-level filtering here because Sysmon's XML match syntax doesn't support regex in CommandLine fields - this is one of the genuine cases where the Kibana column catches things the Sysmon column misses at config time.",
+        apt: [
+          { cls: "apt-mul", name: "Commodity Malware", note: "DOSfuscation present in several malware families using cmd.exe staging." },
+          { cls: "apt-cn", name: "APT41", note: "Cmd-level obfuscation documented in intrusions against gaming and tech sectors." },
+          { cls: "apt-mul", name: "Ransomware", note: "Some ransomware droppers use DOSfuscated cmd.exe wrappers for staging scripts." }
+        ],
+        cite: "MITRE ATT&CK T1059.003, T1027"
       }
     ]
   },

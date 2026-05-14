@@ -66,9 +66,9 @@
 
   <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
     <div class="card-id" style="color:#a371f7">TA0002</div>
-    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">4 indicators · 1 of 13 techniques built</span>
+    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">7 indicators · 2 of 13 techniques built</span>
     <div class="card-name">Execution</div>
-    <div class="card-desc">Code execution via interpreters and signed binaries - PowerShell encoded commands, suspicious Office-spawned children, ScriptBlock content patterns, ExecutionPolicy bypass. T1059.001 PowerShell built; remaining 12 techniques (cmd, VB, JS, WMI, scheduled tasks, services, Mshta, Rundll32, Regsvr32, Native API, Shared Modules, User Execution) coming next sessions.</div>
+    <div class="card-desc">Code execution via interpreters and signed binaries - PowerShell encoded commands, suspicious Office-spawned children, ScriptBlock content patterns, ExecutionPolicy bypass, cmd.exe phishing chains, post-compromise recon bursts, DOSfuscation. T1059.001 PowerShell and T1059.003 cmd.exe built; remaining 11 techniques (VB, JS, WMI, scheduled tasks, services, Mshta, Rundll32, Regsvr32, Native API, Shared Modules, User Execution) coming next sessions.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
@@ -151,7 +151,7 @@
 
     <div class="info-card">
       <h3>Build status</h3>
-      <p>Currently building <strong>Execution (TA0002)</strong>: 1 of 13 techniques fully built (T1059.001 PowerShell with 4 indicators). Remaining 12 techniques in Execution are stubbed and will be filled out in future sessions.</p>
+      <p>Currently building <strong>Execution (TA0002)</strong>: 2 of 13 techniques fully built (T1059.001 PowerShell - 4 indicators, T1059.003 cmd.exe - 3 indicators). Remaining 11 techniques in Execution are stubbed and will be filled out in future sessions.</p>
       <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Defense Evasion<br>&rarr;Privilege Escalation<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 
