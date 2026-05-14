@@ -1145,17 +1145,369 @@ Gootloader-specific:
     desc: "wmic.exe process create, remote WMI execution, WMI subscription persistence",
     rows: [
       {
-        sub: "T1047 - Coming Soon",
-        indicator: "Full content for T1047 WMI coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: wmic process call create (local + remote), WMI subscription persistence (Sysmon EID 19/20/21). 3 indicators planned. Note wmic.exe is deprecated as of Windows 11 24H2 but still ships and works on most enterprise endpoints.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1047 - Local Process Creation via wmic",
+        indicator: "wmic.exe with 'process call create' argument - spawning a process via WMI to avoid direct cmd/PS execution",
+        sysmon: `EventID=1
+Image=*\\wmic.exe
+CommandLine=*process*call*create*
+
+// Also watch for child processes of wmiprvse.exe
+// that are not typical WMI management children:
+EventID=1
+ParentImage=*\\wmiprvse.exe
+Image NOT IN:
+  *\\WmiPrvSE.exe
+  *\\msiexec.exe
+  *\\scrcons.exe
+  (other known-good WMI children in your environment)`,
+        kibana: `// Primary: wmic process call create
+winlog.event_id: 1
+AND process.name: "wmic.exe"
+AND process.command_line: (*process* AND *call* AND *create*)
+
+// Supplementary: suspicious wmiprvse.exe children
+winlog.event_id: 1
+AND process.parent.name: "wmiprvse.exe"
+AND NOT process.name: ("WmiPrvSE.exe" OR "msiexec.exe" OR "scrcons.exe")`,
+        powershell: `# Hunt for wmic process call create executions
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\wmic.exe' -and
+  $_.Properties[10].Value -match 'process\s+call\s+create'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: unexpected wmiprvse.exe children
+$knownGoodWmiChildren = @('WmiPrvSE.exe','msiexec.exe','scrcons.exe')
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[20].Value -like '*\\wmiprvse.exe' -and
+  $knownGoodWmiChildren -notcontains
+    ($_.Properties[4].Value -split '\\\\')[-1]
+} | Select TimeCreated,
+  @{n='Child';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `No direct registry artifact from wmic process execution.
+
+WMI repository location (the underlying database):
+- C:\\Windows\\System32\\wbem\\Repository\\
+  (OBJECTS.DATA, INDEX.BTR, INDEX.MAP)
+  Not human-readable directly - use specialized tools
+  (PyWMIPersistenceFinder, WMI-Forensics) for analysis
+
+Investigation pivots:
+- Child process of wmic or wmiprvse.exe:
+  Sysmon EID 1, filter ParentImage to find what
+  wmic actually launched
+- Network connections from spawned child:
+  Sysmon EID 3 within same session
+- wmic.exe is deprecated as of Windows 11 24H2 -
+  its presence in Sysmon logs on modern endpoints
+  is itself a mild anomaly worth noting
+
+wmic.exe location:
+- C:\\Windows\\System32\\wbem\\wmic.exe (legitimate)
+- wmic.exe found anywhere else = high-confidence IOC`,
+        tools: `Cobalt Strike (WMI lateral movement module)
+Metasploit (exploit/windows/local/wmi)
+Impacket wmiexec.py (remote WMI execution without wmic)
+CrackMapExec (--exec-method wmiexec)
+Custom scripts using WMI COM objects directly
+  (bypasses wmic.exe entirely - harder to detect)
+PowerShell Invoke-WmiMethod / Invoke-CimMethod
+  (same underlying WMI, no wmic.exe on disk)
+
+Note on detection evasion: sophisticated operators
+avoid wmic.exe entirely and call WMI COM objects
+directly from PowerShell or via compiled code.
+In those cases, the execution artifact shifts to
+wmiprvse.exe spawning unexpected children rather
+than wmic.exe appearing in process logs.`,
+        ossdetect: `Sigma:
+- proc_creation_win_wmic_process_creation.yml
+- proc_creation_win_wmiprvse_susp_child_process.yml
+- proc_creation_win_wmic_susp_execution.yml
+
+Atomic Red Team:
+- T1047 Test #1 (wmic process call create)
+- T1047 Test #2 (WMI via PowerShell)
+
+Hayabusa:
+- WMI process creation detection rules
+- wmiprvse child process anomaly rules
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.System.Wmi (WMI namespace enumeration)
+- Windows.Forensics.WMIPersistence`,
+        notes: "wmic process call create is the most direct WMI execution path - it tells WMI to instantiate the Win32_Process class and call its Create method, spawning a new process. The resulting child process has wmiprvse.exe as its parent rather than cmd.exe or powershell.exe, which is the key detection pivot. This parent-swap is intentional: adversaries use it to break the process ancestry chain and make the spawned process appear to originate from a system management context rather than a user shell. The wmiprvse.exe suspicious child detection is arguably more durable than the wmic.exe detection because it catches cases where the attacker calls WMI COM objects directly (bypassing wmic.exe entirely) as well as the standard wmic path. False positives: wmiprvse.exe legitimately spawns msiexec.exe, scrcons.exe, and a handful of other management processes - build your allowlist from a baseline of normal WMI activity in your environment before alerting on everything. Also note: wmic.exe deprecated in Windows 11 24H2 but still present and functional on virtually all enterprise endpoints you will encounter in practice.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "WMI process execution documented across multiple operations including SolarWinds follow-on activity." },
+          { cls: "apt-cn", name: "APT41", note: "wmic.exe and direct WMI COM execution documented in intrusions across multiple sectors." },
+          { cls: "apt-cn", name: "APT32", note: "WMI-based execution used for lateral movement and staging in documented operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "WMI process creation used for lateral movement and payload execution across many ransomware operations." },
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Built-in WMI lateral movement module used extensively by ransomware affiliates and APT operators." }
+        ],
         cite: "MITRE ATT&CK T1047"
+      },
+      {
+        sub: "T1047 - Remote WMI Execution",
+        indicator: "wmic.exe with /node: flag targeting remote host - lateral movement via WMI over DCOM/RPC",
+        sysmon: `// On SOURCE host - wmic with remote /node: target:
+EventID=1
+Image=*\\wmic.exe
+CommandLine=*/node:*
+
+// On DESTINATION host - wmiprvse.exe spawning
+// unexpected child process (incoming WMI execution):
+EventID=1
+ParentImage=*\\wmiprvse.exe
+// Cross-reference: does this system normally receive
+// remote WMI connections? If not, any wmiprvse child
+// is suspicious.
+
+// Network connection from source:
+EventID=3
+Image=*\\wmic.exe
+DestinationPort=135
+// (DCOM initial negotiation - then ephemeral port)`,
+        kibana: `// Source host: wmic targeting remote system
+winlog.event_id: 1
+AND process.name: "wmic.exe"
+AND process.command_line: *\/node\:*
+
+// Destination host: wmiprvse spawning processes
+// (correlate with source network events)
+winlog.event_id: 1
+AND process.parent.name: "wmiprvse.exe"
+AND NOT process.name: ("WmiPrvSE.exe" OR "msiexec.exe")
+
+// Network: wmic initiating DCOM connection
+winlog.event_id: 3
+AND process.name: "wmic.exe"
+AND destination.port: 135`,
+        powershell: `# Hunt for remote WMI execution attempts (source side)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\wmic.exe' -and
+  $_.Properties[10].Value -match '/node:'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}} |
+  Sort-Object TimeCreated -Descending
+
+# Hunt for DCOM network connections from wmic (EID 3)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=3
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\wmic.exe' -and
+  $_.Properties[14].Value -eq '135'
+} | Select TimeCreated,
+  @{n='DestIP';e={$_.Properties[14].Value}},
+  @{n='DestPort';e={$_.Properties[16].Value}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `No registry artifact on source host from wmic /node: execution.
+
+On DESTINATION host - Windows event log artifacts:
+- Security Event ID 4624 (Logon):
+  LogonType 3 (Network logon) from source IP
+  around the same time as wmiprvse child spawn
+  - this confirms the authentication leg of
+  the WMI connection
+- Security Event ID 4688 (Process Creation,
+  if process auditing enabled):
+  Child process of wmiprvse.exe on destination
+
+Network forensics pivot:
+- DCOM uses TCP 135 for initial negotiation
+  then negotiates a dynamic high port (1024-65535)
+  for the actual data transfer
+- Zeek/Suricata DCOM logs on your network sensor
+  can correlate the source-destination pair
+- This is where host-side and network-side
+  detection complement each other directly`,
+        tools: `wmic.exe /node: (built-in, most common)
+Impacket wmiexec.py
+  - Implements WMI execution without wmic.exe
+  - Operates over DCOM directly
+  - Leaves wmiprvse.exe child artifact on target
+  - Does not use wmic.exe on source host
+CrackMapExec (wmiexec method)
+Cobalt Strike WMI lateral movement
+PowerShell Invoke-WmiMethod -ComputerName
+PowerShell New-CimSession + Invoke-CimMethod
+  (modern replacement for wmic, same detection surface)
+
+Key distinction: Impacket wmiexec.py and CrackMapExec
+wmiexec do NOT use wmic.exe on the source host -
+the /node: indicator only catches wmic.exe usage.
+For those tools, detection shifts entirely to the
+destination host's wmiprvse.exe child process and
+the Security Event 4624 network logon.`,
+        ossdetect: `Sigma:
+- proc_creation_win_wmic_remote_execution.yml
+- proc_creation_win_wmiprvse_susp_child_process.yml
+- network_connection_win_wmic_remote.yml
+
+Atomic Red Team:
+- T1047 Test #3 (remote WMI execution)
+- T1021.006 (Windows Remote Management - related)
+
+Hayabusa:
+- RemoteWMIExecution rules
+- DCOM lateral movement detection category
+
+Velociraptor:
+- Windows.EventLogs.Sysmon (both source and dest)
+- Windows.Network.NetstatEnriched (active DCOM connections)
+
+Network-side (complements host detection):
+- Zeek dce_rpc.log: filter for WMI-related operations
+- Suricata: DCOM/RPC anomaly rules
+- hunt.6b74.dev Lateral Movement reference
+  for the network-side complement to this detection`,
+        notes: "Remote WMI execution is one of the cleanest lateral movement techniques from an adversary perspective: it requires no dropped binary on the target, uses a legitimate Windows protocol (DCOM/RPC), authenticates via normal Windows credentials, and leaves a minimal footprint. The network traffic blends into background Windows management noise in environments that use WMI for legitimate remote management. Detection requires correlating artifacts across two hosts: the source (wmic /node: command or DCOM network connection) and the destination (wmiprvse.exe spawning an unexpected child, Security Event 4624 network logon). Neither artifact alone is high-fidelity - combined they are. This is a genuine case where your network sensor (Zeek/Suricata on the wire) and host sensor (Sysmon on the endpoint) complement each other: the DCOM connection is visible at the network layer, and the process creation is visible at the host layer. Neither sensor alone gives the full picture. If you see wmiprvse.exe spawning cmd.exe or powershell.exe on a host that is not a WMI management server, treat it as high-confidence lateral movement until proven otherwise.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Remote WMI lateral movement documented extensively across espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "WMI-based lateral movement documented in intrusions across tech, healthcare, and government sectors." },
+          { cls: "apt-cn", name: "APT32", note: "wmiexec-style lateral movement documented in operations against Southeast Asian targets." },
+          { cls: "apt-mul", name: "Ransomware", note: "WMI lateral movement used for ransomware propagation - Ryuk, Conti, and others documented." },
+          { cls: "apt-mul", name: "Impacket", note: "wmiexec.py is a standard tool across red team and APT operations for agentless lateral movement." }
+        ],
+        cite: "MITRE ATT&CK T1047, T1021"
+      },
+      {
+        sub: "T1047 - WMI Event Subscription Persistence",
+        indicator: "WMI EventFilter, EventConsumer, or FilterToConsumerBinding creation - fileless persistence via WMI repository",
+        sysmon: `// Sysmon has three dedicated WMI persistence event IDs:
+
+EventID=19 (WmiEventFilter activity detected)
+// Fires when a WMI event filter is registered
+// Filter = the trigger condition (e.g., system boot,
+// process creation, time interval)
+// Key fields: Name, Query, QueryLanguage
+
+EventID=20 (WmiEventConsumer activity detected)
+// Fires when a WMI event consumer is registered
+// Consumer = the action to take when filter fires
+// Two dangerous consumer types:
+//   CommandLineEventConsumer (runs a command)
+//   ActiveScriptEventConsumer (runs VBScript/JScript)
+// Key fields: Name, Type, Destination/ScriptText
+
+EventID=21 (WmiEventConsumerToFilter activity)
+// Fires when filter and consumer are bound together
+// This is the final step that arms the subscription
+// Key fields: Consumer, Filter`,
+        kibana: `// Alert on any WMI subscription activity (EID 19/20/21)
+winlog.event_id: (19 OR 20 OR 21)
+
+// Narrow to high-risk consumer types:
+winlog.event_id: 20
+AND winlog.event_data.Type: ("CommandLineEventConsumer" OR "ActiveScriptEventConsumer")
+
+// Full subscription chain (filter + consumer + binding):
+winlog.event_id: 19
+// then correlate by winlog.event_data.Name
+// to find matching EID 20 and EID 21 events`,
+        powershell: `# Hunt for WMI event subscriptions via Sysmon EID 19/20/21
+19, 20, 21 | ForEach-Object {
+  $id = $_
+  Get-WinEvent -FilterHashtable @{
+    LogName='Microsoft-Windows-Sysmon/Operational';
+    ID=$id
+  } -ErrorAction SilentlyContinue
+} | Select TimeCreated, Id,
+  @{n='EventType';e={
+    switch ($_.Id) {
+      19 { 'WMI Filter Registered' }
+      20 { 'WMI Consumer Registered' }
+      21 { 'Filter-Consumer Binding' }
+    }
+  }},
+  @{n='Details';e={$_.Message}} |
+  Sort-Object TimeCreated -Descending
+
+# Direct WMI query for active subscriptions
+# (run on live host or via Velociraptor/remote PS)
+Get-WMIObject -Namespace root\subscription -Class __EventFilter |
+  Select Name, Query, QueryLanguage
+
+Get-WMIObject -Namespace root\subscription -Class __EventConsumer |
+  Select Name, __CLASS, CommandLineTemplate, ScriptText
+
+Get-WMIObject -Namespace root\subscription -Class __FilterToConsumerBinding |
+  Select Filter, Consumer`,
+        registry: `WMI persistence does NOT use registry run keys or
+scheduled task XML - it lives in the WMI repository:
+
+C:\\Windows\\System32\\wbem\\Repository\\
+  OBJECTS.DATA  - main object store
+  INDEX.BTR     - index file
+  INDEX.MAP     - index map
+
+Not directly human-readable - use these tools:
+- PyWMIPersistenceFinder (David Reaves / mandiant)
+  python PyWMIPersistenceFinder.py OBJECTS.DATA
+- WMIForensics (python, similar capability)
+- Velociraptor artifact Windows.Forensics.WMIPersistence
+- autoruns.exe (Sysinternals) - lists WMI subscriptions
+  under the WMI tab
+
+Legitimate WMI subscriptions exist in healthy
+environments (SCCM, monitoring agents, AV products)
+- baseline before alerting on all subscriptions.
+Known-good namespaces: root\ccm, root\cimv2\sms
+Adversary subscriptions typically use: root\subscription`,
+        tools: `PowerSploit / PowerShell Empire:
+- New-UserPersistenceOption -WMI
+- Installs CommandLineEventConsumer triggering on logon
+
+Metasploit:
+- exploit/windows/local/wmi_persistence
+
+Sharp-WMI (C# WMI execution tool)
+WMImplant (PowerShell WMI C2 framework)
+Cobalt Strike (WMI persistence module)
+
+Manual WMI subscription (PowerShell):
+$filter = Set-WmiInstance -Namespace root\subscription
+  -Class __EventFilter -Arguments @{
+    Name='Updater';
+    QueryLanguage='WQL';
+    Query='SELECT * FROM __InstanceModificationEvent
+      WITHIN 60 WHERE TargetInstance ISA "Win32_PerfFormattedData_PerfOS_System"'
+  }
+$consumer = Set-WmiInstance -Namespace root\subscription
+  -Class CommandLineEventConsumer -Arguments @{
+    Name='Updater';
+    CommandLineTemplate='cmd /c payload.exe'
+  }
+Set-WmiInstance -Namespace root\subscription
+  -Class __FilterToConsumerBinding -Arguments @{
+    Filter=$filter; Consumer=$consumer
+  }`,
+        notes: "WMI event subscription persistence is the most forensically evasive standard persistence technique on Windows. There is no registry run key, no scheduled task XML, no startup folder file - the persistence object lives entirely inside the WMI repository binary (OBJECTS.DATA), which most IR tools and AV products do not inspect by default. Sysmon EID 19/20/21 are the primary detection mechanism and are only logged if Sysmon is deployed with WMI monitoring enabled in its config - verify your Sysmon config actually captures these before assuming you have coverage. The three-event chain (19 = filter registered, 20 = consumer registered, 21 = binding created) tells the complete story: what triggers it, what it does, and that it is now armed. In practice, EID 21 (binding) is the highest-value single alert because a filter and consumer registered independently are less meaningful than when they are bound together. Two consumer types are dangerous: CommandLineEventConsumer (runs a shell command) and ActiveScriptEventConsumer (runs VBScript or JScript inline - no file on disk at all). Legitimate WMI subscriptions exist (SCCM, some AV products) - baseline your environment before alerting on all subscription activity. The root\\subscription namespace is the canonical adversary location; legitimate subscriptions more often live under root\\cimv2 or vendor-specific namespaces.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "WMI subscription persistence documented in multiple long-dwell espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "WMI event subscriptions used for persistence in operations across multiple sectors." },
+          { cls: "apt-mul", name: "FIN6", note: "WMI subscription persistence documented in financial sector intrusions." },
+          { cls: "apt-mul", name: "Turla", note: "WMI-based persistence documented across long-term espionage campaigns." },
+          { cls: "apt-mul", name: "Red Teams", note: "WMI subscription persistence is a standard red team technique due to evasiveness - widely emulated." }
+        ],
+        cite: "MITRE ATT&CK T1047, T1546.003"
       }
     ]
   },
