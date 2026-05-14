@@ -1517,16 +1517,409 @@ Set-WmiInstance -Namespace root\subscription
     desc: "schtasks.exe creation, COM-based task creation, remote scheduled tasks",
     rows: [
       {
-        sub: "T1053.005 - Coming Soon",
-        indicator: "Full content for T1053.005 Scheduled Tasks coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: local schtasks /create with suspicious binary path, remote schtasks creation, task action pointing to suspicious binary. 3 indicators planned. Pair with Windows Event ID 4698 (task created).",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1053.005 - Suspicious Task Creation via schtasks.exe",
+        indicator: "schtasks.exe /create with action pointing to suspicious binary path or scripting interpreter",
+        sysmon: `EventID=1
+Image=*\\schtasks.exe
+CommandLine=*/create*
+AND CommandLine matches (any of):
+  *\\AppData\\*
+  OR *\\Temp\\*
+  OR *\\ProgramData\\*
+  OR *\\Users\\Public\\*
+  OR *powershell*
+  OR *cmd.exe*
+  OR *wscript*
+  OR *cscript*
+  OR *mshta*
+  OR *rundll32*
+  OR *regsvr32*
+  OR *certutil*
+
+// Supplementary - Windows Security Event:
+EventID=4698 (Task Scheduler / Security log)
+// Fires on every task creation regardless of method
+// (schtasks.exe, COM API, remote) - higher coverage
+// than Sysmon EID 1 alone`,
+        kibana: `// Primary: schtasks /create with suspicious action
+winlog.event_id: 1
+AND process.name: "schtasks.exe"
+AND process.command_line: *\/create*
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *powershell* OR *wscript* OR *mshta* OR *rundll32* OR *regsvr32* OR *certutil*)
+
+// Supplementary: Windows Security Event 4698 (all task creation)
+winlog.event_id: 4698
+AND winlog.channel: "Security"`,
+        powershell: `# Hunt for suspicious schtasks /create executions (Sysmon EID 1)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\schtasks.exe' -and
+  $_.Properties[10].Value -match '/create' -and
+  $_.Properties[10].Value -match
+    '(AppData|Temp|ProgramData|Public|powershell|wscript|cscript|mshta|rundll32|regsvr32|certutil)'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: Security Event 4698 (task created - all methods)
+Get-WinEvent -FilterHashtable @{
+  LogName='Security';
+  ID=4698
+} | Select TimeCreated,
+  @{n='TaskName';e={
+    ([xml]$_.ToXml()).Event.EventData.Data |
+    Where-Object { $_.Name -eq 'TaskName' } | Select-Object -Expand '#text'
+  }},
+  @{n='TaskContent';e={
+    ([xml]$_.ToXml()).Event.EventData.Data |
+    Where-Object { $_.Name -eq 'TaskContent' } | Select-Object -Expand '#text'
+  }},
+  @{n='User';e={$_.UserId}} |
+  Sort-Object TimeCreated -Descending`,
+        registry: `Scheduled task artifacts on disk:
+- C:\\Windows\\System32\\Tasks\\<TaskName>
+  (XML file - human readable, contains full task config
+  including action, trigger, principal, and run-as user)
+- C:\\Windows\\SysWOW64\\Tasks\\<TaskName>
+  (32-bit task storage on 64-bit systems)
+
+Registry task keys (legacy/additional storage):
+- HKLM\\SOFTWARE\\Microsoft\\Windows NT\\
+  CurrentVersion\\Schedule\\TaskCache\\Tasks\\
+- HKLM\\SOFTWARE\\Microsoft\\Windows NT\\
+  CurrentVersion\\Schedule\\TaskCache\\Tree\\
+  (tree view of task names by folder path)
+
+Investigation pivots:
+- Read the XML in C:\\Windows\\System32\\Tasks\\
+  to see the full task definition:
+  Get-Content "C:\\Windows\\System32\\Tasks\\<name>"
+- Check SubjectUserName in Security EID 4698 -
+  SYSTEM creating tasks is normal;
+  a standard user account creating tasks is suspicious
+- Check trigger type: OnLogon and AtStartup triggers
+  indicate persistence intent vs one-time execution`,
+        tools: `schtasks.exe /create (built-in - most common)
+Task Scheduler MMC (taskschd.msc - GUI, less common in ops)
+PowerShell New-ScheduledTask / Register-ScheduledTask
+  (COM-based - does not invoke schtasks.exe,
+  only detectable via EID 4698 not EID 1)
+Impacket atexec.py (remote task scheduling)
+CrackMapExec (--exec-method atexec)
+Cobalt Strike (scheduled task persistence module)
+SharPersist (C# persistence tool with schtasks support)
+
+Common adversary task action patterns:
+- /tr "powershell.exe -ep bypass -w hidden -c <cmd>"
+- /tr "cmd.exe /c <staging command>"
+- /tr "wscript.exe %APPDATA%\\payload.vbs"
+- /tr "C:\\ProgramData\\<random>.exe"
+- /sc ONLOGON /tn "Windows Update" (disguised name)
+- /sc MINUTE /mo 5 (beacon persistence)`,
+        ossdetect: `Sigma:
+- proc_creation_win_schtasks_creation_susp_path.yml
+- proc_creation_win_schtasks_creation_susp_action.yml
+- win_security_scheduled_task_creation.yml (EID 4698)
+- proc_creation_win_schtasks_susp_parent.yml
+
+Atomic Red Team:
+- T1053.005 Test #1 (schtasks /create local)
+- T1053.005 Test #2 (PowerShell Register-ScheduledTask)
+- Multiple variants covering different triggers/actions
+
+Hayabusa:
+- ScheduledTaskCreation rules (EID 1 + EID 4698)
+- SuspiciousTaskAction detection category
+
+Velociraptor:
+- Windows.System.ScheduledTasks
+  (enumerates all tasks with full XML content)
+- Windows.EventLogs.Sysmon
+- Windows.Forensics.Autoruns (lists scheduled tasks)
+
+Sysinternals autoruns.exe:
+- Scheduled Tasks tab shows all registered tasks
+- Highlights unsigned task actions in yellow/red`,
+        notes: "Scheduled tasks are one of the most commonly abused persistence mechanisms because they are well-understood by IT staff (reducing scrutiny), support a wide range of triggers (logon, startup, time interval, event-based), and can run as SYSTEM with minimal configuration. The schtasks.exe /create command is the most visible path - it generates Sysmon EID 1 with the full command line including the task action, which is often where the suspicious binary path or interpreter is visible. The detection is path-and-action focused: system binaries in standard paths (C:\\Windows\\System32) creating tasks that run system management tools are normal; tasks running interpreters (powershell, wscript, mshta) or binaries from user-writable paths (AppData, Temp, ProgramData) are suspicious. Security Event 4698 is the more comprehensive signal because it fires regardless of how the task was created - schtasks.exe, PowerShell COM API, or remote scheduling - and the event content includes the full task XML. The task XML file in C:\\Windows\\System32\\Tasks\\ is a valuable forensic artifact: it contains the full action, trigger, principal, and run-as context and persists even after the process that created it has exited. Adversaries frequently disguise task names as legitimate Windows tasks ('Windows Update', 'GoogleUpdateTask', 'AdobeFlashUpdate') - the action path is more reliable than the task name for detection.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Scheduled task persistence documented across multiple long-term espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "schtasks-based persistence documented in intrusions across tech and healthcare sectors." },
+          { cls: "apt-kp", name: "Lazarus", note: "Scheduled task persistence documented in CISA advisories on DPRK-attributed operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Scheduled tasks used for persistence and propagation across Ryuk, Conti, LockBit operations." },
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Built-in scheduled task persistence module used across red team and APT operations." }
+        ],
+        cite: "MITRE ATT&CK T1053.005"
+      },
+      {
+        sub: "T1053.005 - Remote Scheduled Task Creation",
+        indicator: "schtasks.exe /create with /s flag targeting remote host - lateral movement or remote persistence via Task Scheduler",
+        sysmon: `// On SOURCE host:
+EventID=1
+Image=*\\schtasks.exe
+CommandLine=*/create*
+AND CommandLine=*/s *
+// /s <hostname/IP> = remote target
+
+// Network connection from source:
+EventID=3
+Image=*\\schtasks.exe
+DestinationPort=445
+// (schtasks remote uses SMB - TCP 445)
+
+// On DESTINATION host - Security Event:
+EventID=4698 (task created)
+// SubjectUserName will be the remote authenticating user
+// SubjectLogonId correlates to a Type 3 network logon
+// (Security EID 4624 LogonType=3 around same time)`,
+        kibana: `// Source: schtasks targeting remote host
+winlog.event_id: 1
+AND process.name: "schtasks.exe"
+AND process.command_line: (*\/create* AND *\/s\ *)
+
+// Source: SMB connection from schtasks
+winlog.event_id: 3
+AND process.name: "schtasks.exe"
+AND destination.port: 445
+
+// Destination: task created (correlate by time + username)
+winlog.event_id: 4698
+AND winlog.channel: "Security"
+// Then join on SubjectLogonId to Security EID 4624
+// LogonType=3 to confirm remote origin`,
+        powershell: `# Hunt for remote schtasks /create (source host)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\schtasks.exe' -and
+  $_.Properties[10].Value -match '/create' -and
+  $_.Properties[10].Value -match '/s\s+\S+'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}} |
+  Sort-Object TimeCreated -Descending
+
+# SMB connections from schtasks (EID 3)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=3
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\schtasks.exe' -and
+  $_.Properties[16].Value -eq '445'
+} | Select TimeCreated,
+  @{n='DestIP';e={$_.Properties[14].Value}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `On DESTINATION host - task XML artifact:
+- C:\\Windows\\System32\\Tasks\\<TaskName>
+  Created by the remote scheduling operation
+  SubjectUserName in EID 4698 is the remote user -
+  correlate with Security EID 4624 (LogonType=3)
+  to confirm which account was used and from where
+
+Lateral movement context:
+- Remote scheduled task creation requires:
+  1. Valid credentials on the target (or pass-the-hash)
+  2. SMB access to target (TCP 445)
+  3. Task Scheduler service running on target
+- This is the same credential/access requirement
+  as PsExec, but uses a different protocol path
+  and leaves a different artifact set
+
+Network pivot:
+- SMB connection (TCP 445) from source to target
+  is visible in Zeek conn.log and Suricata alerts
+- Cross-reference with hunt.6b74.dev Lateral Movement
+  reference for the network-side complement`,
+        tools: `schtasks.exe /create /s <target> (built-in)
+Impacket atexec.py
+  - Implements remote task scheduling over SMB
+  - Does not use schtasks.exe on source host
+  - Creates task, runs it, deletes it (less persistent)
+CrackMapExec --exec-method atexec
+PowerShell Register-ScheduledTask with
+  -CimSession (remote CIM session)
+Cobalt Strike (remote task scheduling module)
+
+Key distinction: Impacket atexec and CrackMapExec
+atexec do NOT generate schtasks.exe EID 1 on source -
+detection shifts entirely to destination EID 4698
+and the SMB/authentication artifacts.
+
+atexec pattern: creates task, runs it immediately,
+deletes it - watch for short-lived tasks (EID 4698
+task created followed quickly by EID 4699 task deleted)`,
+        ossdetect: `Sigma:
+- proc_creation_win_schtasks_remote.yml
+- win_security_scheduled_task_creation.yml
+  (EID 4698 with network logon correlation)
+- network_connection_win_schtasks_smb.yml
+
+Atomic Red Team:
+- T1053.005 Test #4 (remote scheduled task)
+
+Hayabusa:
+- RemoteScheduledTask rules
+- SMB lateral movement correlation rules
+
+Velociraptor:
+- Windows.EventLogs.Sysmon (both hosts)
+- Windows.System.ScheduledTasks (destination)
+- Windows.Forensics.Autoruns (destination)`,
+        notes: "Remote scheduled task creation is a lateral movement technique that predates most modern C2 frameworks - the Windows 'at' command (now deprecated) and its successor schtasks /s have been used for decades. The detection split between source and destination is the same pattern as remote WMI: the source generates a process creation event (schtasks /s) and a network connection (SMB to 445), while the destination generates a task creation event (Security EID 4698) with a network logon (Security EID 4624 LogonType=3). The EID 4699 (task deleted) paired shortly after EID 4698 is worth a separate alert - it's the signature of execution-only remote task use (Impacket atexec pattern) where the adversary creates a task, runs it immediately, and deletes it to minimize forensic evidence. A task that exists for less than 60 seconds and was created by a remote user is high-confidence malicious activity.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Remote scheduled task lateral movement documented in SolarWinds follow-on intrusion activity." },
+          { cls: "apt-cn", name: "APT41", note: "Remote task scheduling documented as lateral movement method across multiple sector intrusions." },
+          { cls: "apt-mul", name: "Impacket", note: "atexec.py is a standard tool in red team and APT lateral movement toolkits." },
+          { cls: "apt-mul", name: "Ransomware", note: "Remote task creation for ransomware propagation documented across Conti, Ryuk, and LockBit operations." }
+        ],
+        cite: "MITRE ATT&CK T1053.005, T1021"
+      },
+      {
+        sub: "T1053.005 - Scheduled Task Action Pointing to Suspicious Binary",
+        indicator: "Existing or newly created scheduled task with action path in user-writable directory or running a scripting interpreter",
+        sysmon: `// Sysmon does not directly inspect task XML content -
+// use Windows Security Event 4698 for this.
+// Sysmon contribution: catch the EXECUTION of the task:
+
+EventID=1
+// Task runs as SYSTEM or as a specific user account
+// Parent will be taskeng.exe (legacy) or svchost.exe
+// (modern Task Scheduler host):
+ParentImage=*\\svchost.exe
+ParentCommandLine=*Schedule*
+// AND child Image is suspicious:
+Image matches:
+  *\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\*
+  OR *\\powershell.exe OR *\\wscript.exe
+  OR *\\mshta.exe OR *\\rundll32.exe`,
+        kibana: `// Task execution: svchost (scheduler) spawning suspicious child
+winlog.event_id: 1
+AND process.parent.name: "svchost.exe"
+AND process.parent.command_line: *Schedule*
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *powershell* OR *wscript* OR *mshta* OR *rundll32*)
+
+// Security Event: task created with suspicious action
+// (parse TaskContent XML field for the action path)
+winlog.event_id: 4698
+AND winlog.channel: "Security"
+AND winlog.event_data.TaskContent: (*AppData* OR *Temp* OR *ProgramData* OR *powershell* OR *wscript* OR *mshta* OR *rundll32*)`,
+        powershell: `# Enumerate all scheduled tasks and flag suspicious actions
+Get-ScheduledTask | ForEach-Object {
+  $task = $_
+  $actions = $task.Actions
+  foreach ($action in $actions) {
+    if ($action.Execute -match
+      '(AppData|Temp|ProgramData|Public|powershell|wscript|cscript|mshta|rundll32|regsvr32|certutil)') {
+      [PSCustomObject]@{
+        TaskName    = $task.TaskName
+        TaskPath    = $task.TaskPath
+        Execute     = $action.Execute
+        Arguments   = $action.Arguments
+        State       = $task.State
+        Author      = $task.Author
+        RunAs       = $task.Principal.UserId
+        LastRun     = $task.LastRunTime
+        NextRun     = $task.NextRunTime
+      }
+    }
+  }
+} | Sort-Object TaskPath
+
+# Also check raw XML for tasks that Get-ScheduledTask
+# may not fully surface (e.g., broken/hidden tasks):
+Get-ChildItem C:\\Windows\\System32\\Tasks -Recurse -File |
+  ForEach-Object {
+    $content = Get-Content $_.FullName -Raw
+    if ($content -match
+      '(AppData|Temp|ProgramData|powershell|wscript|mshta|rundll32)') {
+      [PSCustomObject]@{
+        File    = $_.FullName
+        Snippet = ($content -split '\n' |
+          Select-String 'AppData|Temp|ProgramData|powershell|wscript|mshta|rundll32' |
+          Select-Object -First 3) -join '; '
+      }
+    }
+  }`,
+        registry: `Task XML files - primary forensic artifact:
+- C:\\Windows\\System32\\Tasks\\<TaskName>
+  Read with Get-Content or any text editor
+  Key XML elements to inspect:
+  <Exec><Command> - the binary being run
+  <Exec><Arguments> - command line arguments
+  <Principal><UserId> - run-as account
+  <Triggers> - what causes the task to fire
+  <RegistrationInfo><Author> - who created it
+
+Registry task cache (secondary):
+- HKLM\\SOFTWARE\\Microsoft\\Windows NT\\
+  CurrentVersion\\Schedule\\TaskCache\\Tasks\\{GUID}\\
+  Actions value contains the task action in binary
+  format - use specialized tools to parse
+
+Deleted task forensics:
+- If task XML file is deleted, the registry cache
+  may still contain the task GUID and action data
+- $MFT (NTFS master file table) retains metadata
+  for deleted task XML files including timestamps
+  and original filename`,
+        tools: `This indicator focuses on HUNTING existing tasks
+rather than catching creation in real-time.
+
+Useful for:
+- Post-compromise triage (what persists on this host?)
+- Baseline deviation (new tasks since last check)
+- Threat hunting sweeps across fleet
+
+Tools for task enumeration:
+- Get-ScheduledTask (PowerShell - built-in)
+- schtasks /query /fo LIST /v (schtasks.exe)
+- autoruns.exe -a * -ct (Sysinternals - CSV output)
+- Velociraptor Windows.System.ScheduledTasks
+- Carbon Black / CrowdStrike scheduled task queries
+
+Red team tools that create tasks:
+SharPersist (/t schtask)
+Cobalt Strike persistence module
+Metasploit persistence/windows/schtasks
+Custom .NET / C++ task COM API callers
+  (bypass schtasks.exe entirely)`,
+        ossdetect: `Sigma:
+- win_security_scheduled_task_creation.yml
+  (parse TaskContent for suspicious actions)
+- proc_creation_win_svchost_susp_child_process.yml
+  (svchost Schedule spawning suspicious children)
+
+Atomic Red Team:
+- T1053.005 (multiple task persistence tests)
+- T1053.005 Test #6 (task pointing to LOLBin)
+
+Hayabusa:
+- SuspiciousScheduledTaskAction rules
+- TaskSchedulerSvchost child detection
+
+Velociraptor:
+- Windows.System.ScheduledTasks
+  (best single artifact - full task enumeration
+  with action path, trigger, and run-as context)
+- Windows.Forensics.Autoruns
+
+Sysinternals autoruns.exe:
+- Most effective single tool for manual triage
+- Highlights unsigned task actions
+- Shows hidden/broken tasks that PowerShell misses`,
+        notes: "This indicator is hunting-oriented rather than real-time detection - it's about finding what already exists rather than catching creation live. The two previous T1053.005 indicators cover real-time creation via schtasks.exe EID 1 and Security EID 4698. This one covers the scenario where a task was created by a method that didn't generate obvious telemetry (COM API, fileless stager, pre-Sysmon deployment) and you need to sweep for it. The Get-ScheduledTask PowerShell script and the raw XML scan of C:\\Windows\\System32\\Tasks\\ are the most useful live-host forensic tools for this. The svchost.exe spawning suspicious children pattern bridges the gap - it fires when an existing task actually executes, regardless of how it was created, because all modern scheduled tasks run under the Task Scheduler svchost instance. The parent command line containing 'Schedule' distinguishes the Task Scheduler svchost from the dozens of other svchost instances running on a Windows system. Adversaries frequently disguise task names as Windows Update, Windows Defender, Google Update, or similar legitimate-sounding names - always inspect the action path, not the task name, as the primary detection signal.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Disguised scheduled task names with suspicious action paths documented in long-dwell operations." },
+          { cls: "apt-cn", name: "APT41", note: "Scheduled task persistence with LOLBin or interpreter actions documented across multiple intrusions." },
+          { cls: "apt-kp", name: "Lazarus", note: "Persistent scheduled tasks with obfuscated PowerShell actions documented in CISA advisories." },
+          { cls: "apt-mul", name: "Ransomware", note: "Pre-encryption scheduled tasks for persistence and propagation documented across ransomware families." },
+          { cls: "apt-mul", name: "Red Teams", note: "Task disguise (legitimate-looking name + suspicious action) is standard red team persistence tradecraft." }
+        ],
         cite: "MITRE ATT&CK T1053.005"
       }
     ]
