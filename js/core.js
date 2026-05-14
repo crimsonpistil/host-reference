@@ -172,25 +172,25 @@ function buildRow(row, techId, rowId) {
   const detail = document.createElement('div');
   detail.className = 'ind-detail';
 
-  // tab bar
   const tabs = [
-    ['t-sys', 'Sysmon'],
-    ['t-kib', 'Kibana'],
-    ['t-ps', 'PowerShell'],
-    ['t-reg', 'Registry/Artifacts'],
-    ['t-tool', 'Tools'],
-    ['t-oss', 'OSS Detections'],
-    ['t-not', 'Notes'],
-    ['t-apt', 'APT'],
-    ['t-cms', 'CMS Template'],
+    ['sys', 'Sysmon'],
+    ['kib', 'Kibana'],
+    ['ps',  'PowerShell'],
+    ['reg', 'Registry/Artifacts'],
+    ['tool','Tools'],
+    ['oss', 'OSS Detections'],
+    ['not', 'Notes'],
+    ['apt', 'APT'],
+    ['cms', 'CMS Template'],
   ];
   const tabBar = document.createElement('div');
   tabBar.className = 'tab-bar';
-  tabs.forEach(([cls, label], i) => {
+  tabs.forEach(([key, label], i) => {
     const btn = document.createElement('button');
-    btn.className = 'dtab ' + cls + (i === 0 ? ' active' : '');
+    btn.className = 'dtab' + (i === 0 ? ' active' : '');
+    btn.dataset.key = key;
     btn.textContent = label;
-    btn.addEventListener('click', () => switchTab(detail, btn, cls));
+    btn.addEventListener('click', () => switchTab(detail, btn));
     tabBar.appendChild(btn);
   });
   detail.appendChild(tabBar);
@@ -214,9 +214,9 @@ function buildRow(row, techId, rowId) {
 
   // panels
   const panels = {
-    'ark': codePanel('l-sys', 'Sysmon Event',  row.sysmon),
-    'kib': codePanel('l-kib', 'Kibana KQL',     row.kibana),
-    'sur': codePanel('l-ps',  'PowerShell Hunt', row.powershell),
+    'sys': codePanel('l-sys', 'Sysmon Event',    row.sysmon),
+    'kib': codePanel('l-kib', 'Kibana KQL',      row.kibana),
+    'ps':  codePanel('l-ps',  'PowerShell Hunt',  row.powershell),
     'reg': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.registry || '(no registry/file artifacts documented)'; return d; })(),
     'tool': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.tools || '(no adversary tools documented)'; return d; })(),
     'oss': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.ossdetect || '(no open-source detections documented)'; return d; })(),
@@ -271,10 +271,11 @@ function buildRow(row, techId, rowId) {
     })(),
   };
 
-  const panelKeys = ['ark','kib','sur','reg','tool','oss','not','apt','cms'];
+  const panelKeys = ['sys','kib','ps','reg','tool','oss','not','apt','cms'];
   panelKeys.forEach((key, i) => {
     const wrap = document.createElement('div');
     wrap.className = 'tab-panel' + (i === 0 ? ' active' : '');
+    wrap.dataset.key = key;
     wrap.appendChild(panels[key]);
     detail.appendChild(wrap);
   });
@@ -285,19 +286,13 @@ function buildRow(row, techId, rowId) {
   return el;
 }
 
-function switchTab(detail, activeBtn, activeCls) {
+function switchTab(detail, activeBtn) {
   detail.querySelectorAll('.dtab').forEach(b => b.classList.remove('active'));
   detail.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   activeBtn.classList.add('active');
-  // Tab class -> panel index mapping (must match panelKeys order)
-  const tabToIdx = {
-    't-sys': 0, 't-kib': 1, 't-ps': 2,
-    't-reg': 3, 't-tool': 4, 't-oss': 5,
-    't-not': 6, 't-apt': 7, 't-cms': 8
-  };
-  const idx = tabToIdx[activeCls];
-  const panels = detail.querySelectorAll('.tab-panel');
-  if (panels[idx]) panels[idx].classList.add('active');
+  const key = activeBtn.dataset.key;
+  const panel = detail.querySelector(`.tab-panel[data-key="${key}"]`);
+  if (panel) panel.classList.add('active');
 }
 
 // ── RENDER ──
