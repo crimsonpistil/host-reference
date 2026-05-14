@@ -1930,17 +1930,413 @@ Sysinternals autoruns.exe:
     desc: "sc.exe service creation, PsExec service signature, suspicious binPath patterns",
     rows: [
       {
-        sub: "T1569.002 - Coming Soon",
-        indicator: "Full content for T1569.002 Service Execution coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: sc.exe create with suspicious binPath, PsExec service-creation signature (PSEXESVC), service binary in non-standard path. 3 indicators planned. Pair with Windows Event ID 7045 (service installed).",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1569.002 - sc.exe Service Creation with Suspicious binPath",
+        indicator: "sc.exe create with binPath pointing to suspicious binary, user-writable path, or scripting interpreter",
+        sysmon: `EventID=1
+Image=*\\sc.exe
+CommandLine=*create*
+AND CommandLine matches (any of):
+  *binPath=*\\AppData\\*
+  OR *binPath=*\\Temp\\*
+  OR *binPath=*\\ProgramData\\*
+  OR *binPath=*\\Users\\Public\\*
+  OR *binPath=*powershell*
+  OR *binPath=*cmd.exe*
+  OR *binPath=*rundll32*
+  OR *binPath=*mshta*
+
+// Supplementary - Windows System Event:
+EventID=7045 (System log - Service Control Manager)
+// Fires on every new service installation regardless
+// of method (sc.exe, API, remote) - broader coverage`,
+        kibana: `// Primary: sc.exe create with suspicious binPath
+winlog.event_id: 1
+AND process.name: "sc.exe"
+AND process.command_line: (*create* AND *binPath*)
+AND process.command_line: (*AppData* OR *Temp* OR *ProgramData* OR *powershell* OR *cmd.exe* OR *rundll32* OR *mshta*)
+
+// Supplementary: System Event 7045 (all service installs)
+winlog.event_id: 7045
+AND winlog.channel: "System"`,
+        powershell: `# Hunt for sc.exe service creation with suspicious binPath (Sysmon EID 1)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -like '*\\sc.exe' -and
+  $_.Properties[10].Value -match 'create' -and
+  $_.Properties[10].Value -match 'binPath' -and
+  $_.Properties[10].Value -match
+    '(AppData|Temp|ProgramData|Public|powershell|cmd\.exe|rundll32|mshta)'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: System Event 7045 (new service installed - all methods)
+Get-WinEvent -FilterHashtable @{
+  LogName='System';
+  ID=7045
+} | Select TimeCreated,
+  @{n='ServiceName';e={$_.Properties[0].Value}},
+  @{n='ServiceFile';e={$_.Properties[1].Value}},
+  @{n='ServiceType';e={$_.Properties[2].Value}},
+  @{n='StartType';e={$_.Properties[3].Value}},
+  @{n='AccountName';e={$_.Properties[4].Value}} |
+  Sort-Object TimeCreated -Descending`,
+        registry: `Service registration in registry (primary artifact):
+HKLM\\SYSTEM\\CurrentControlSet\\Services\\<ServiceName>\\
+  ImagePath  - the binPath (binary + arguments)
+  Start      - 0=Boot, 1=System, 2=Auto, 3=Demand, 4=Disabled
+  Type       - service type (0x10=Win32OwnProcess most common)
+  ObjectName - run-as account (LocalSystem, NetworkService, etc.)
+  Description - often blank for adversary-created services
+
+Investigate with:
+- Get-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Services\\*
+  | Where-Object { $_.ImagePath -match '(Temp|AppData|ProgramData)' }
+- sc qc <ServiceName> (query service config via sc.exe)
+
+Adversary service naming patterns:
+- Random alphanumeric strings: "svc_a7f3b2"
+- Typosquatting: "WindowsUpdater", "WinDefend32"
+- Blank DisplayName + blank Description = anomaly
+- Single-character or very short service names`,
+        tools: `sc.exe create (built-in - most visible)
+PowerShell New-Service (COM-based, no sc.exe in logs)
+  New-Service -Name "svc" -BinaryPathName "C:\\payload.exe"
+  -StartupType Automatic
+Metasploit (windows/manage/persistence_exe)
+SharPersist (/t service)
+Cobalt Strike (service-based lateral movement)
+Custom service wrappers compiled in C/C++/.NET
+
+Dual-use remote tools (also create services):
+PsExec (PSEXESVC - covered in next indicator)
+Impacket svcctl.py
+CrackMapExec service creation
+
+Common adversary binPath patterns:
+- cmd.exe /c <payload> (service wrapping a cmd chain)
+- powershell.exe -ep bypass -w hidden -c <stager>
+- C:\\Windows\\Temp\\<random>.exe
+- %COMSPEC% /Q /c echo <commands> > pipe (cmd redirection)`,
+        ossdetect: `Sigma:
+- proc_creation_win_sc_service_creation_susp_binary.yml
+- win_system_service_install.yml (EID 7045)
+- proc_creation_win_sc_service_creation_susp_path.yml
+
+Atomic Red Team:
+- T1569.002 Test #1 (sc.exe service creation)
+- T1569.002 Test #2 (PowerShell New-Service)
+
+Hayabusa:
+- ServiceCreationSuspBinPath rules (EID 1 + 7045)
+- sc.exe suspicious argument detection
+
+Velociraptor:
+- Windows.System.Services
+  (enumerates all services with ImagePath and config)
+- Windows.Forensics.Autoruns (Services tab)
+- Windows.EventLogs.Sysmon
+
+Sysinternals autoruns.exe:
+- Services tab - highlights non-Microsoft signed binaries
+- Most effective single tool for manual service triage`,
+        notes: "sc.exe create is the most explicit service creation path - the full binPath is visible in the Sysmon EID 1 command line, making it straightforward to detect suspicious binary paths at creation time. System Event 7045 is the broader net: it fires regardless of whether sc.exe, PowerShell, or a compiled binary's API call was used to create the service. 7045 is underutilized in many detection stacks - it's in the System log rather than Security, so it sometimes gets overlooked in log collection policies. Worth verifying your SIEM is ingesting System log events, not just Security. The registry artifact is the most durable - even if the service was created and the creating process logs have rolled, the registry entry under HKLM\\SYSTEM\\CurrentControlSet\\Services persists until the service is explicitly deleted. Services with a blank Description, blank DisplayName, and an ImagePath in a user-writable directory are a high-confidence IOC combination. Adversaries sometimes use sc.exe create with start=demand followed immediately by sc.exe start - watch for that rapid create-then-start sequence in the same session as it indicates immediate execution intent rather than persistence setup.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Service-based execution and persistence documented across multiple espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "sc.exe service creation for lateral movement and persistence documented in multiple sector intrusions." },
+          { cls: "apt-mul", name: "Ransomware", note: "Service creation for persistence and propagation documented across Ryuk, Conti, BlackCat operations." },
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Service-based lateral movement is a built-in Cobalt Strike capability used across APT and ransomware operations." },
+          { cls: "apt-kp", name: "Lazarus", note: "Malicious service installation documented in CISA advisories on DPRK-attributed intrusions." }
+        ],
         cite: "MITRE ATT&CK T1569.002"
+      },
+      {
+        sub: "T1569.002 - PsExec Service Signature (PSEXESVC)",
+        indicator: "PSEXESVC service installation or PSEXESVC.exe drop on target host - PsExec lateral movement artifact",
+        sysmon: `// On DESTINATION host:
+
+// PSEXESVC.exe written to C:\\Windows\\ (EID 11):
+EventID=11
+TargetFilename=*\\PSEXESVC.exe
+
+// PSEXESVC service created (EID 13 - registry value set):
+EventID=13
+TargetObject=*\\Services\\PSEXESVC*
+
+// PSEXESVC process execution (EID 1):
+EventID=1
+Image=*\\PSEXESVC.exe
+
+// On SOURCE host:
+// SMB connection from psexec.exe to target (EID 3):
+EventID=3
+Image=*\\psexec.exe OR *\\psexec64.exe
+DestinationPort=445`,
+        kibana: `// Destination: PSEXESVC binary written to disk
+winlog.event_id: 11
+AND file.path: *\\PSEXESVC.exe
+
+// Destination: PSEXESVC service registry key set
+winlog.event_id: 13
+AND registry.path: *\\Services\\PSEXESVC*
+
+// Destination: System Event 7045 (service installed)
+winlog.event_id: 7045
+AND winlog.channel: "System"
+AND winlog.event_data.ServiceName: "PSEXESVC"
+
+// Source: psexec.exe SMB connection
+winlog.event_id: 3
+AND process.name: ("psexec.exe" OR "psexec64.exe")
+AND destination.port: 445`,
+        powershell: `# Hunt for PSEXESVC artifacts on destination host
+
+# File artifact: PSEXESVC.exe on disk
+Get-ChildItem C:\\Windows\\PSEXESVC.exe -ErrorAction SilentlyContinue |
+  Select FullName, CreationTime, LastWriteTime, Length
+
+# Registry artifact: PSEXESVC service key
+Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\PSEXESVC" \`
+  -ErrorAction SilentlyContinue |
+  Select ImagePath, Start, ObjectName
+
+# System Event 7045: PSEXESVC service installation
+Get-WinEvent -FilterHashtable @{
+  LogName='System';
+  ID=7045
+} | Where-Object {
+  $_.Properties[0].Value -eq 'PSEXESVC'
+} | Select TimeCreated,
+  @{n='ServiceName';e={$_.Properties[0].Value}},
+  @{n='ServiceFile';e={$_.Properties[1].Value}},
+  @{n='AccountName';e={$_.Properties[4].Value}}
+
+# Sysmon EID 11: PSEXESVC.exe file creation
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=11
+} | Where-Object {
+  $_.Properties[0].Value -like '*PSEXESVC.exe'
+} | Select TimeCreated,
+  @{n='File';e={$_.Properties[0].Value}},
+  @{n='CreatingProcess';e={$_.Properties[5].Value}}`,
+        registry: `PSEXESVC service key (present while service is installed):
+HKLM\\SYSTEM\\CurrentControlSet\\Services\\PSEXESVC\\
+  ImagePath = C:\\Windows\\PSEXESVC.exe
+  Start = 3 (Demand - created on-demand by PsExec)
+  Type = 0x10 (Win32OwnProcess)
+  ObjectName = LocalSystem
+
+PsExec cleans up after itself - the service key and
+binary are deleted after the PsExec session ends.
+This means the registry artifact is transient.
+Forensic artifacts that persist after cleanup:
+- System Event 7045 (service installed) - log entry
+  remains after service is deleted
+- System Event 7009/7034 (service timeout/stop)
+- MFT entry for PSEXESVC.exe (metadata persists
+  in NTFS after file deletion)
+- USN Journal entry for PSEXESVC.exe create/delete
+- Sysmon EID 11 (FileCreate) log entry - persists
+  in Sysmon log even after file is deleted
+
+Authentication artifacts on destination:
+- Security EID 4624 LogonType=3 (network logon)
+  from source IP around time of PSEXESVC installation
+- Security EID 4648 (explicit credentials used)
+  if /u and /p flags were passed to psexec`,
+        tools: `PsExec.exe / PsExec64.exe (Sysinternals/Microsoft)
+  - Legitimate remote administration tool
+  - Adversary use: lateral movement, remote execution
+  - Leaves PSEXESVC artifact on destination
+  - Context determines malicious vs legitimate
+
+PsExec clones / reimplementations:
+- Impacket psexec.py (creates same PSEXESVC artifact)
+- CrackMapExec (--exec-method smbexec uses different
+  service name - not PSEXESVC)
+- SharpExec (C# reimplementation)
+- PAExec (PsExec alternative, different service name)
+
+Detection note: tools that reimplement the PsExec
+protocol but use a different service name will NOT
+trigger on PSEXESVC specifically. Broaden to:
+- Any service installed with ImagePath in C:\\Windows\\
+  that is not a known-good service
+- Any short-lived service (EID 7045 create followed
+  by EID 7036 stop within seconds)`,
+        ossdetect: `Sigma:
+- win_system_psexec_service_install.yml (EID 7045)
+- file_event_win_psexec_service_binary.yml (EID 11)
+- registry_event_win_psexec_service.yml (EID 13)
+- proc_creation_win_psexec_execution.yml
+
+Atomic Red Team:
+- T1569.002 Test #3 (PsExec service creation)
+- T1021.002 (SMB/Windows Admin Shares - related)
+
+Hayabusa:
+- PSEXESVCServiceInstall rules
+- PsExec detection category (multiple event types)
+
+Velociraptor:
+- Windows.System.Services (catches live service)
+- Windows.EventLogs.Sysmon (EID 11/13)
+- Windows.Forensics.Usn (USN journal - catches
+  PSEXESVC.exe create/delete even post-cleanup)
+
+Network-side complement:
+- hunt.6b74.dev Lateral Movement reference
+  for SMB-based lateral movement network detection`,
+        notes: "PSEXESVC is one of the most reliable lateral movement fingerprints in Windows forensics precisely because PsExec is so widely used - by both legitimate administrators and adversaries. The detection is straightforward: PSEXESVC.exe should never appear in C:\\Windows\\ in a healthy environment outside of an active PsExec session. The challenge is that PsExec cleans up after itself, so the window for live detection is short. The forensic artifacts that survive cleanup (System Event 7045, Sysmon EID 11, USN Journal) are your primary post-incident evidence sources. Context is everything here: seeing PSEXESVC in logs from a known IT admin workstation targeting a server it manages during business hours is probably legitimate. Seeing PSEXESVC originating from a developer workstation, a user endpoint, or targeting a domain controller is worth immediate investigation. Impacket psexec.py deserves a callout: it's a Python reimplementation of the PsExec protocol that produces the same PSEXESVC artifact on the destination, so this detection catches Impacket psexec.py as well as the legitimate Sysinternals tool.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "PsExec and Impacket psexec.py used for lateral movement in SolarWinds and other documented operations." },
+          { cls: "apt-cn", name: "APT41", note: "PsExec-based lateral movement documented across multiple sector intrusions." },
+          { cls: "apt-mul", name: "Ransomware", note: "PsExec is the single most commonly observed lateral movement tool in ransomware incident response engagements." },
+          { cls: "apt-mul", name: "Impacket", note: "psexec.py produces identical PSEXESVC artifact - standard tool across red team and APT lateral movement." },
+          { cls: "apt-mul", name: "FIN7", note: "PsExec lateral movement documented across financial sector intrusions." }
+        ],
+        cite: "MITRE ATT&CK T1569.002, T1021.002"
+      },
+      {
+        sub: "T1569.002 - Service Binary in Non-Standard Path",
+        indicator: "Registered service with ImagePath outside standard system directories - hunting for malicious persistence via service registry",
+        sysmon: `// Real-time: Sysmon EID 13 (registry value set)
+// catches service ImagePath being written:
+EventID=13
+TargetObject=*\\Services\\*\\ImagePath
+Details NOT matching:
+  C:\\Windows\\System32\\*
+  C:\\Windows\\SysWOW64\\*
+  C:\\Program Files\\*
+  C:\\Program Files (x86)\\*
+
+// Supplementary - service execution artifact:
+EventID=1
+ParentImage=*\\services.exe
+Image NOT matching known-good service paths
+// services.exe is the SCM host - it spawns
+// services directly, making it a useful parent filter`,
+        kibana: `// Real-time: ImagePath written outside standard paths
+winlog.event_id: 13
+AND registry.path: *\\Services\\*\\ImagePath
+AND NOT registry.data.strings: ("C:\\\\Windows\\\\System32\\\\*" OR "C:\\\\Windows\\\\SysWOW64\\\\*" OR "C:\\\\Program Files\\\\*" OR "C:\\\\Program Files (x86)\\\\*")
+
+// Service execution from non-standard path
+winlog.event_id: 1
+AND process.parent.name: "services.exe"
+AND NOT process.executable: ("C:\\\\Windows\\\\*" OR "C:\\\\Program Files\\\\*" OR "C:\\\\Program Files (x86)\\\\*")`,
+        powershell: `# Hunt for services with ImagePath outside standard directories
+$standardPaths = @(
+  'C:\\Windows\\',
+  'C:\\Program Files\\',
+  'C:\\Program Files (x86)\\'
+)
+
+Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\*" |
+  Where-Object {
+    $ip = $_.ImagePath
+    if (-not $ip) { return $false }
+    $ip = $ip.TrimStart('"') -replace '^([^"]+).*','$1'
+    $ip = [System.Environment]::ExpandEnvironmentVariables($ip)
+    -not ($standardPaths | Where-Object { $ip -like "$_*" })
+  } | Select-Object \`
+    @{n='ServiceName';e={$_.PSChildName}},
+    @{n='ImagePath';e={$_.ImagePath}},
+    @{n='Start';e={
+      switch ($_.Start) {
+        0 {'Boot'} 1 {'System'} 2 {'Auto'}
+        3 {'Demand'} 4 {'Disabled'} default {$_}
+      }
+    }},
+    @{n='ObjectName';e={$_.ObjectName}},
+    @{n='DisplayName';e={$_.DisplayName}} |
+  Sort-Object ServiceName`,
+        registry: `Primary artifact - service ImagePath:
+HKLM\\SYSTEM\\CurrentControlSet\\Services\\<Name>\\
+  ImagePath - full path to service binary
+  (may include arguments after the binary path)
+  (may be quoted or unquoted)
+  (may use environment variables: %SystemRoot%\\...)
+
+Suspicious ImagePath patterns to hunt:
+- C:\\Users\\<user>\\AppData\\*
+- C:\\Windows\\Temp\\*
+- C:\\ProgramData\\*
+- C:\\Users\\Public\\*
+- Relative paths (no drive letter)
+- UNC paths (\\\\server\\share\\binary.exe)
+- Paths containing scripting interpreters as the binary
+
+Baseline approach:
+- Export all service ImagePaths on a known-good system
+- Compare against target system
+- New entries with non-standard paths = investigate
+
+Deleted service forensics:
+- System Event 7036 (service stopped) and
+  absence of 7045 for a service that previously
+  existed suggests manual deletion
+- MFT and USN Journal retain file metadata
+  for the service binary even after deletion`,
+        tools: `This indicator is hunting-oriented - sweep for
+existing malicious services rather than real-time
+creation detection (covered in indicator 1).
+
+Most useful in:
+- IR triage: what services exist that shouldn't?
+- Baseline deviation: new services since last audit
+- Post-persistence-establishment hunting
+- Fleet-wide sweep via Velociraptor or EDR
+
+Service creation tools (all leave ImagePath artifact):
+sc.exe create
+PowerShell New-Service / Register-ServiceJob
+Compiled code using CreateService() Win32 API
+Metasploit persistence modules
+SharPersist
+Cobalt Strike persistence
+Any tool writing directly to the Services registry key
+
+Known-good exceptions to tune out:
+- Security software (AV, EDR agents)
+- Monitoring agents (Elastic, Splunk UF, etc.)
+- Vendor software with non-standard install paths
+- Build allowlist from asset management / SCCM data`,
+        ossdetect: `Sigma:
+- registry_event_win_service_registry_susp_path.yml
+- proc_creation_win_services_susp_child_process.yml
+
+Atomic Red Team:
+- T1569.002 (service creation variants)
+- T1543.003 (Create or Modify System Process: Windows Service)
+
+Hayabusa:
+- ServiceBinaryNonStandardPath rules (EID 13)
+- services.exe child process anomaly detection
+
+Velociraptor:
+- Windows.System.Services
+  (best single artifact for fleet-wide service hunting)
+- Windows.Forensics.Autoruns
+
+Sysinternals autoruns.exe:
+- Services tab with VirusTotal integration
+- Highlights unsigned service binaries in red/yellow
+- Most practical tool for manual IR triage`,
+        notes: "This is the hunt-oriented companion to the real-time sc.exe detection - same concept as the scheduled task action hunting indicator in T1053.005. The PowerShell registry sweep is the core tool: it enumerates every registered service's ImagePath and flags anything outside standard system and program directories. The key challenge is normalization: ImagePath values can be quoted, unquoted, contain environment variables (%SystemRoot%), or embed arguments after the binary path - the hunt script handles this. Environment variable expansion is important because %SystemRoot%\\system32\\svchost.exe is legitimate but looks non-standard if you string-match on C:\\Windows without expanding the variable first. Services running from C:\\ProgramData\\ deserve particular scrutiny - it's a world-writable directory that doesn't appear in standard path allowlists, making it a common adversary staging location. The services.exe parent filter in the Sysmon section is a useful real-time complement: services.exe is the SCM binary that directly spawns services, so filtering Sysmon EID 1 on ParentImage=services.exe and checking the child's path against standard directories gives live execution coverage for this indicator.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Malicious service binaries in non-standard paths documented in long-dwell espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "Services with ImagePath in ProgramData and AppData documented across multiple intrusions." },
+          { cls: "apt-mul", name: "Ransomware", note: "Ransomware persistence via services with binaries in world-writable paths documented across multiple families." },
+          { cls: "apt-mul", name: "FIN6", note: "Malicious service installation with non-standard binary paths documented in financial sector intrusions." },
+          { cls: "apt-mul", name: "Red Teams", note: "Service binary staging in ProgramData or Temp is standard red team persistence tradecraft." }
+        ],
+        cite: "MITRE ATT&CK T1569.002, T1543.003"
       }
     ]
   },

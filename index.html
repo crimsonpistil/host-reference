@@ -66,9 +66,9 @@
 
   <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
     <div class="card-id" style="color:#a371f7">TA0002</div>
-    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">17 indicators · 6 of 13 techniques built</span>
+    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">20 indicators · 7 of 13 techniques built</span>
     <div class="card-name">Execution</div>
-    <div class="card-desc">Code execution via interpreters and signed binaries - PowerShell encoded commands, suspicious Office-spawned children, ScriptBlock content patterns, ExecutionPolicy bypass, cmd.exe phishing chains, post-compromise recon bursts, DOSfuscation, VBScript via wscript/cscript, ISO/LNK container VBS delivery, JScript via WSH, browser and Office-spawned JS chains, WMI local/remote process creation, WMI event subscription persistence, scheduled task creation, remote task lateral movement, and task action hunting. T1059.001 PowerShell, T1059.003 cmd.exe, T1059.005 VBScript, T1059.007 JScript, T1047 WMI, and T1053.005 Scheduled Tasks built; remaining 7 techniques (services, Mshta, Rundll32, Regsvr32, Native API, Shared Modules, User Execution) coming next sessions.</div>
+    <div class="card-desc">Code execution via interpreters and signed binaries - PowerShell encoded commands, suspicious Office-spawned children, ScriptBlock content patterns, ExecutionPolicy bypass, cmd.exe phishing chains, post-compromise recon bursts, DOSfuscation, VBScript via wscript/cscript, ISO/LNK container VBS delivery, JScript via WSH, browser and Office-spawned JS chains, WMI local/remote process creation, WMI event subscription persistence, scheduled task creation, remote task lateral movement, task action hunting, service creation, PsExec signature, and service binary hunting. T1059.001 PowerShell, T1059.003 cmd.exe, T1059.005 VBScript, T1059.007 JScript, T1047 WMI, T1053.005 Scheduled Tasks, and T1569.002 Service Execution built; remaining 6 techniques (Mshta, Rundll32, Regsvr32, Native API, Shared Modules, User Execution) coming next sessions.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
@@ -151,7 +151,7 @@
 
     <div class="info-card">
       <h3>Build status</h3>
-      <p>Currently building <strong>Execution (TA0002)</strong>: 6 of 13 techniques fully built (T1059.001 PowerShell - 4 indicators, T1059.003 cmd.exe - 3 indicators, T1059.005 VBScript - 2 indicators, T1059.007 JScript - 2 indicators, T1047 WMI - 3 indicators, T1053.005 Scheduled Tasks - 3 indicators). Remaining 7 techniques in Execution are stubbed and will be filled out in future sessions.</p>
+      <p>Currently building <strong>Execution (TA0002)</strong>: 7 of 13 techniques fully built (T1059.001 PowerShell - 4 indicators, T1059.003 cmd.exe - 3 indicators, T1059.005 VBScript - 2 indicators, T1059.007 JScript - 2 indicators, T1047 WMI - 3 indicators, T1053.005 Scheduled Tasks - 3 indicators, T1569.002 Service Execution - 3 indicators). Remaining 6 techniques in Execution are stubbed and will be filled out in future sessions.</p>
       <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Defense Evasion<br>&rarr;Privilege Escalation<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 
