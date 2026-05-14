@@ -670,17 +670,227 @@ Velociraptor:
     desc: "VBA macros, vbscript via wscript/cscript, Office-driven script execution",
     rows: [
       {
-        sub: "T1059.005 - Coming Soon",
-        indicator: "Full content for T1059.005 VBA/VBScript coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: Office app spawning wscript.exe / cscript.exe (macro chain), ISO/LNK→VBS chain (post-MOTW evasion). 2 indicators planned.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
-        cite: "MITRE ATT&CK T1059.005"
+        sub: "T1059.005 - Office Macro Spawning Script Host",
+        indicator: "wscript.exe or cscript.exe spawned by Office application - VBA macro executing VBScript payload",
+        sysmon: `EventID=1
+Image=*\\wscript.exe OR *\\cscript.exe
+ParentImage=
+  *\\winword.exe
+  OR *\\excel.exe
+  OR *\\powerpnt.exe
+  OR *\\outlook.exe
+  OR *\\onenote.exe
+  OR *\\msaccess.exe
+  OR *\\mspub.exe`,
+        kibana: `winlog.event_id: 1
+AND process.name: ("wscript.exe" OR "cscript.exe")
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "powerpnt.exe" OR "outlook.exe" OR "onenote.exe" OR "msaccess.exe" OR "mspub.exe")`,
+        powershell: `Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match '(wscript|cscript)\.exe$' -and
+  $_.Properties[20].Value -match
+    'winword|excel|powerpnt|outlook|onenote|msaccess|mspub'
+} | Select TimeCreated,
+  @{n='ScriptHost';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}}`,
+        registry: `VBA macro artifacts:
+- %APPDATA%\\Microsoft\\Templates\\Normal.dotm
+  (Word global template - macros stored here persist
+  across all Word sessions, high-value persistence location)
+- %APPDATA%\\Microsoft\\Word\\STARTUP\\*.dotm
+- %APPDATA%\\Microsoft\\Excel\\XLSTART\\*.xlam
+- %APPDATA%\\Microsoft\\Excel\\XLSTART\\*.xlsm
+
+Office Trust Center registry keys
+(adversaries sometimes modify to enable macros silently):
+HKCU\\Software\\Microsoft\\Office\\<version>\\<app>\\
+  Security\\VBAWarnings = 1 (REG_DWORD)
+  (1 = enable all macros without notification)
+  AccessVBOM = 1
+  (grants macro access to VBA object model)
+
+Script dropped by macro - common staging locations:
+- %TEMP%\\*.vbs
+- %APPDATA%\\*.vbs
+- %PUBLIC%\\*.vbs
+- C:\\ProgramData\\*.vbs`,
+        tools: `Emotet (VBA macro dropper - historically prolific)
+QakBot / QBot (macro-based delivery pre-2022)
+IcedID (macro delivery variants)
+Dridex (Office macro delivery)
+Agent Tesla (VBA macro stager)
+Custom VBA macro loaders (common in targeted ops)
+
+Note: Microsoft's 2022 internet-macro block
+significantly reduced this vector for commodity
+malware. It remains relevant for:
+- Internally-sourced documents (no MOTW applied)
+- Targeted ops where the attacker can social-engineer
+  the victim into enabling macros
+- Legacy environments where the block is not enforced
+  (Office 2016 and earlier, or policy-disabled block)
+- Macro-enabled templates delivered via SMB share
+  (SMB-sourced files do not get MOTW in most configs)`,
+        ossdetect: `Sigma:
+- proc_creation_win_office_wscript_child.yml
+- proc_creation_win_office_cscript_child.yml
+- proc_creation_win_office_susp_child.yml
+  (covers wscript, cscript, cmd, powershell children)
+
+Atomic Red Team:
+- T1059.005 (VBScript execution tests)
+- T1566.001 (phishing with macro delivery)
+
+Hayabusa:
+- Office spawn detection rules cover wscript/cscript
+- "SuspiciousOfficeChildProcess" category
+
+Velociraptor:
+- Windows.Detection.OfficeSpawn
+- Windows.System.Autoruns (catches macro persistence
+  via Normal.dotm and XLSTART locations)
+
+YARA:
+- Many VBA macro detection rules in community repos
+- Didier Stevens' oledump.py for static macro analysis`,
+        notes: "wscript.exe and cscript.exe are the two Windows Script Host engines - wscript runs scripts with a GUI context (no console window visible), cscript runs them in a console. Adversaries strongly prefer wscript for macro-dropped scripts because it runs silently. The detection is the same as the Office-spawning-PowerShell and Office-spawning-cmd patterns - the anomaly is the parent, not the child. One important addition to the parent list vs the cmd/PS indicators: onenote.exe. Since the MOTW macro block in 2022, OneNote became a popular delivery vehicle - embedded attachments inside .one files execute via the OneNote process, not a standard Office app. Also worth noting: msaccess.exe and mspub.exe are lower-volume Office apps that get less scrutiny but are used in targeted operations specifically because defenders don't always include them in parent-process watchlists. False positives: IT automation scripts occasionally use wscript legitimately - allowlist by known-good script paths and parent context.",
+        apt: [
+          { cls: "apt-mul", name: "Commodity Malware", note: "Emotet, QakBot, IcedID all used Office macro to wscript/cscript chains extensively pre-2022." },
+          { cls: "apt-ru", name: "APT28", note: "VBA macro delivery documented in multiple spearphishing campaigns." },
+          { cls: "apt-ir", name: "APT35", note: "Office macro-based initial access documented in CISA advisories targeting US organizations." },
+          { cls: "apt-cn", name: "APT41", note: "VBA macro loaders documented in operations against multiple sectors." },
+          { cls: "apt-mul", name: "TA505", note: "Prolific use of Office macro chains spawning wscript as part of Dridex and Clop distribution." }
+        ],
+        cite: "MITRE ATT&CK T1059.005, T1566.001"
+      },
+      {
+        sub: "T1059.005 - ISO/LNK Container Dropping VBScript",
+        indicator: "wscript.exe executing .vbs file from mounted ISO, %TEMP%, or %APPDATA% - post-MOTW container evasion chain",
+        sysmon: `EventID=1
+Image=*\\wscript.exe OR *\\cscript.exe
+CommandLine matches:
+  *.vbs* OR *.vbe* OR *.wsf*
+AND CommandLine path matches:
+  *\\AppData\\* OR *\\Temp\\* OR *\\Public\\*
+  OR *\\ProgramData\\* OR [A-Z]:\\*.vbs
+  (single drive-letter root = likely mounted ISO)
+
+// Supplementary - Sysmon EID 11 FileCreate:
+EventID=11
+TargetFilename=*.vbs OR *.vbe OR *.wsf
+TargetFilename path=*\\Temp\\* OR *\\AppData\\*
+  OR *\\Public\\* OR *\\ProgramData\\*`,
+        kibana: `// Primary: wscript/cscript running script from suspicious path
+winlog.event_id: 1
+AND process.name: ("wscript.exe" OR "cscript.exe")
+AND process.command_line: (*.vbs* OR *.vbe* OR *.wsf*)
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\Public\\* OR *\\ProgramData\\*)
+
+// Supplementary: VBScript file written to suspicious path
+winlog.event_id: 11
+AND file.extension: ("vbs" OR "vbe" OR "wsf")
+AND file.path: (*\\Temp\\* OR *\\AppData\\* OR *\\Public\\* OR *\\ProgramData\\*)`,
+        powershell: `# Hunt for wscript/cscript running scripts from non-standard paths
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match '(wscript|cscript)\.exe$' -and
+  $_.Properties[10].Value -match '\.(vbs|vbe|wsf)' -and
+  $_.Properties[10].Value -match
+    '(AppData|Temp|Public|ProgramData|^[A-Z]:\\\\[^\\\\]+\.(vbs|vbe|wsf))'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: VBS files written to suspicious locations (EID 11)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=11
+} | Where-Object {
+  $_.Properties[0].Value -match '\.(vbs|vbe|wsf)$' -and
+  $_.Properties[0].Value -match '(Temp|AppData|Public|ProgramData)'
+} | Select TimeCreated,
+  @{n='File';e={$_.Properties[0].Value}},
+  @{n='CreatingProcess';e={$_.Properties[5].Value}}`,
+        registry: `ISO/container mount artifacts:
+- HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
+  Explorer\\MountPoints2\\
+  (records mounted drive letters including ISO mounts -
+  entry appears when user opens/mounts an ISO file)
+
+Zone.Identifier ADS on the ISO file itself
+(present on the .iso - NOT on files extracted from it):
+- Get-Item *.iso -Stream Zone.Identifier
+  ZoneId=3 confirms internet origin
+
+LNK file artifacts (the launcher inside the ISO):
+- %APPDATA%\\Roaming\\Microsoft\\Windows\\Recent\\*.lnk
+  (LNK files created when user double-clicks inside ISO)
+- LNK target path will point to the .vbs inside the
+  mounted drive letter (e.g., D:\\payload.vbs)
+
+Script file on disk - investigate with:
+- Get-Content <path>.vbs (read the actual script)
+- Check file creation time vs execution time
+  (gap indicates staging before execution)`,
+        tools: `ISO/IMG container delivery (2022+ dominant vector):
+- Adversary crafts ISO containing LNK + VBS payload
+- LNK has custom icon to look like legitimate document
+- User opens ISO (auto-mounts in Win10/11), double-clicks
+  what appears to be a file, LNK runs wscript against VBS
+
+ZIP delivery variants:
+- Password-protected ZIP (bypasses email gateway AV scan)
+- Extracts to %TEMP%, LNK or direct VBS execution
+
+OneNote (.one) embedded attachments:
+- .vbs embedded directly in OneNote section
+- User prompted to click "Click to view attachment"
+- File extracted to %TEMP% and executed via wscript
+
+Tools/families using this chain:
+Qakbot (post-macro-block ISO pivot, 2022-2023)
+IcedID (ISO delivery variants)
+Bumblebee loader (heavy ISO + LNK + VBS use)
+Raspberry Robin (worm spread via LNK on USB/ISO)
+Various initial access brokers (IABs)`,
+        ossdetect: `Sigma:
+- proc_creation_win_wscript_vbs_exec_susp_location.yml
+- file_event_win_vbs_creation_susp_location.yml
+- proc_creation_win_susp_script_exec_from_temp.yml
+
+Atomic Red Team:
+- T1059.005 (VBScript from temp directory tests)
+- T1566.001 (ISO/LNK delivery chain)
+
+Hayabusa:
+- ScriptFromTemp and ScriptFromAppData rules
+- ISO mount + LNK detection rules
+
+Velociraptor:
+- Windows.Detection.Autoruns
+- Windows.Forensics.Lnk (LNK file analysis)
+- Windows.System.MountedDevices (ISO mount history)
+
+Any.run / VirusTotal sandbox:
+- Submit suspicious VBS files for behavioral analysis
+- VBS is often obfuscated but sandboxes detonate it`,
+        notes: "This indicator represents the post-2022 evolution of VBScript delivery after Microsoft's macro block. The ISO container trick works because Windows auto-mounts ISO files when double-clicked (since Windows 8), and files inside the mounted ISO volume do not inherit the Zone.Identifier ADS from the outer ISO file - so the .vbs inside has no MOTW and runs without a macro security prompt. The detection pivot is twofold: first, the ISO mount event itself (MountPoints2 registry key, Sysmon EID 11 on the ISO), then wscript executing a script from a mounted drive letter or staging path. The drive-letter heuristic (wscript running D:\\something.vbs where D: is not a standard drive) is high-fidelity but requires knowing which drive letters are fixed vs removable vs mounted in your environment. The %TEMP% and %APPDATA% path heuristics are broader and catch the cases where the script is first dropped to disk before execution. VBE (.vbe) is encoded VBScript - the content is obfuscated using Microsoft's Script Encoder - and is a meaningful escalation signal when seen in these paths.",
+        apt: [
+          { cls: "apt-mul", name: "Initial Access Brokers", note: "ISO/LNK/VBS chains are the dominant IAB delivery method post-2022 macro block." },
+          { cls: "apt-mul", name: "QakBot", note: "Pivoted to ISO + VBS delivery after the 2022 Microsoft macro block." },
+          { cls: "apt-mul", name: "Bumblebee", note: "Heavy use of ISO container with LNK launching VBS or DLL payload." },
+          { cls: "apt-kp", name: "Lazarus", note: "ISO-based delivery documented in operations against financial and defense sectors." },
+          { cls: "apt-mul", name: "Raspberry Robin", note: "LNK-based worm using wscript for execution, spread via USB and ISO." }
+        ],
+        cite: "MITRE ATT&CK T1059.005, T1566.001, T1027"
       }
     ]
   },
@@ -690,17 +900,242 @@ Velociraptor:
     desc: "JScript via Windows Script Host, mshta+JS chains, fileless JS loaders",
     rows: [
       {
-        sub: "T1059.007 - Coming Soon",
-        indicator: "Full content for T1059.007 JavaScript coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: WSH (wscript/cscript) executing .js/.jse, mshta JS chain. 2 indicators planned. JScript is a quieter alternative to PowerShell - fewer defenders watch it closely.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1059.007 - WSH Executing JScript from Suspicious Path",
+        indicator: "wscript.exe or cscript.exe running .js or .jse file from %TEMP%, %APPDATA%, or mounted container path",
+        sysmon: `EventID=1
+Image=*\\wscript.exe OR *\\cscript.exe
+CommandLine matches:
+  *.js* OR *.jse*
+AND CommandLine path matches:
+  *\\AppData\\* OR *\\Temp\\* OR *\\Public\\*
+  OR *\\ProgramData\\* OR [A-Z]:\\*.js
+
+// Supplementary - Sysmon EID 11 FileCreate:
+EventID=11
+TargetFilename=*.js OR *.jse
+TargetFilename path=
+  *\\Temp\\* OR *\\AppData\\*
+  OR *\\Public\\* OR *\\ProgramData\\*`,
+        kibana: `// Primary: WSH executing JScript from suspicious path
+winlog.event_id: 1
+AND process.name: ("wscript.exe" OR "cscript.exe")
+AND process.command_line: (*.js* OR *.jse*)
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\Public\\* OR *\\ProgramData\\*)
+
+// Supplementary: JScript file written to suspicious path
+winlog.event_id: 11
+AND file.extension: ("js" OR "jse")
+AND file.path: (*\\Temp\\* OR *\\AppData\\* OR *\\Public\\* OR *\\ProgramData\\*)`,
+        powershell: `# Hunt for wscript/cscript executing JScript from non-standard paths
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match '(wscript|cscript)\.exe$' -and
+  $_.Properties[10].Value -match '\.(js|jse)(\s|"|$)' -and
+  $_.Properties[10].Value -match
+    '(AppData|Temp|Public|ProgramData|^[A-Z]:\\\\[^\\\\]+\.(js|jse))'
+} | Select TimeCreated,
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending
+
+# Supplementary: JS/JSE files written to suspicious locations (EID 11)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=11
+} | Where-Object {
+  $_.Properties[0].Value -match '\.(js|jse)$' -and
+  $_.Properties[0].Value -match '(Temp|AppData|Public|ProgramData)'
+} | Select TimeCreated,
+  @{n='File';e={$_.Properties[0].Value}},
+  @{n='CreatingProcess';e={$_.Properties[5].Value}}`,
+        registry: `No direct registry artifact from JScript execution itself.
+
+JS/JSE file on disk - investigate with:
+- Get-Content <path>.js (read the script - often obfuscated)
+- Common obfuscation: eval(), String.fromCharCode(),
+  ActiveXObject instantiation buried in encoded strings
+- JSE (.jse) is Microsoft Script Encoded JScript -
+  same obfuscation as VBE, content not human-readable
+  without decoding
+
+Container mount artifacts (same as T1059.005):
+- HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
+  Explorer\\MountPoints2\\
+  (ISO mount history)
+
+Zone.Identifier ADS on source container:
+- Get-Item *.iso -Stream Zone.Identifier
+  ZoneId=3 confirms internet origin
+
+File association context:
+- .js files are associated with wscript.exe by default
+  on Windows (HKCR\\.js\\Shell\\Open\\Command)
+- Adversaries rely on this default association -
+  user double-clicking a .js file triggers wscript
+  with no visible console if using the GUI handler`,
+        tools: `Delivery mechanisms for .js payloads:
+- ZIP/RAR containing .js file (email attachment)
+- ISO container with LNK pointing to .js (post-MOTW)
+- Direct .js file attachment (increasingly blocked
+  by mail gateways but still attempted)
+- Drive-by download dropping .js to %TEMP%
+
+Frameworks and families using JScript via WSH:
+Gootloader (heavy use of .js delivery, multi-stage)
+TA505 / Dridex variants
+Qakbot (JS-based loader variants)
+Bumblebee (JS staging in some variants)
+Custom loaders (targeted ops favoring WSH over PS
+  for lower detection profile)
+
+Gootloader note: particularly notable for using
+large, heavily obfuscated .js files (thousands of
+lines) staged in registry or %APPDATA% - the file
+size and obfuscation density are signals in addition
+to path and execution context.`,
+        ossdetect: `Sigma:
+- proc_creation_win_wscript_jscript_exec_susp_location.yml
+- file_event_win_jscript_creation_susp_location.yml
+- proc_creation_win_wscript_susp_child_process.yml
+
+Atomic Red Team:
+- T1059.007 (WSH JScript execution tests)
+
+Hayabusa:
+- JScriptFromTemp and related rules
+- WSH execution detection category
+
+Velociraptor:
+- Windows.EventLogs.Sysmon (EID 1 + EID 11 filters)
+- Windows.Forensics.Gootloader (dedicated artifact
+  for Gootloader JS registry staging)
+
+Static analysis:
+- CyberChef: decode JSE (Script Encoder decode recipe)
+- js-beautify: deobfuscate minified/packed JS
+- Any.run: sandbox detonation for behavioral analysis`,
+        notes: "The detection pattern here is nearly identical to T1059.005 VBScript - same engines (wscript/cscript), same suspicious paths, same EID 11 supplementary hunt. The distinctions that matter: .js files have a user-visible double-click association on Windows (wscript runs them silently), making them effective for lure-based delivery without requiring a macro or container trick. The user sees what looks like a document icon, double-clicks, and wscript silently executes the payload. JSE (.jse) is encoded JScript using Microsoft's Script Encoder - same tool as VBE encoding - and is a stronger signal because legitimate software rarely produces .jse files in staging directories. Gootloader is worth calling out specifically because it uses an unusual pattern: a large multi-stage .js file (often 5,000+ lines of obfuscated code) that may be staged in the registry between stages rather than purely on disk - if you see wscript running a .js with an unusually large file size or see powershell.exe reading registry values and piping to wscript, that's a Gootloader indicator. False positives: some legitimate software installers use .js files during setup, typically from their own installation directory rather than temp paths - path context resolves most of these.",
+        apt: [
+          { cls: "apt-mul", name: "Gootloader", note: "Signature use of large obfuscated .js files for multi-stage delivery, heavily documented." },
+          { cls: "apt-mul", name: "TA505", note: "JScript-based loaders used in Dridex and FlawedAmmyy distribution campaigns." },
+          { cls: "apt-mul", name: "Initial Access Brokers", note: "ZIP-delivered .js files are a recurring IAB delivery mechanism." },
+          { cls: "apt-cn", name: "APT41", note: "JScript-based loaders documented in operations against multiple sectors." },
+          { cls: "apt-mul", name: "Commodity Malware", note: "JScript delivery present across multiple malware families favoring WSH over PowerShell for lower detection profile." }
+        ],
         cite: "MITRE ATT&CK T1059.007"
+      },
+      {
+        sub: "T1059.007 - Office or Browser Spawning WSH with JScript Payload",
+        indicator: "wscript.exe with .js argument spawned by Office app, browser, or explorer.exe - delivery chain execution",
+        sysmon: `EventID=1
+Image=*\\wscript.exe OR *\\cscript.exe
+CommandLine matches: *.js* OR *.jse*
+ParentImage=
+  *\\winword.exe
+  OR *\\excel.exe
+  OR *\\powerpnt.exe
+  OR *\\outlook.exe
+  OR *\\onenote.exe
+  OR *\\explorer.exe
+  OR *\\chrome.exe
+  OR *\\msedge.exe
+  OR *\\firefox.exe
+  OR *\\iexplore.exe`,
+        kibana: `winlog.event_id: 1
+AND process.name: ("wscript.exe" OR "cscript.exe")
+AND process.command_line: (*.js* OR *.jse*)
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "powerpnt.exe" OR "outlook.exe" OR "onenote.exe" OR "explorer.exe" OR "chrome.exe" OR "msedge.exe" OR "firefox.exe" OR "iexplore.exe")`,
+        powershell: `Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[4].Value -match '(wscript|cscript)\.exe$' -and
+  $_.Properties[10].Value -match '\.(js|jse)(\s|"|$)' -and
+  $_.Properties[20].Value -match
+    'winword|excel|powerpnt|outlook|onenote|explorer|chrome|msedge|firefox|iexplore'
+} | Select TimeCreated,
+  @{n='Parent';e={($_.Properties[20].Value -split '\\\\')[-1]}},
+  @{n='CmdLine';e={$_.Properties[10].Value}},
+  @{n='User';e={$_.Properties[12].Value}} |
+  Sort-Object TimeCreated -Descending`,
+        registry: `Browser download artifacts - confirm the JS file origin:
+- Chrome download history:
+  %LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\
+  History (SQLite - query Downloads table)
+- Edge download history:
+  %LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\
+  History (SQLite - same schema as Chrome)
+- Firefox download history:
+  %APPDATA%\\Mozilla\\Firefox\\Profiles\\*.default\\
+  downloads.sqlite
+
+Zone.Identifier ADS on the .js file itself
+(if delivered via browser download, this will be present):
+- Get-Item payload.js -Stream Zone.Identifier
+  ZoneId=3 = internet origin
+  ReferrerUrl and HostUrl fields present in Win10+
+  (confirm which site delivered the file)
+
+explorer.exe parent context:
+- explorer spawning wscript means the user double-clicked
+  the .js file directly in Explorer or from an email
+  attachment saved to disk - check Recent files:
+  %APPDATA%\\Roaming\\Microsoft\\Windows\\Recent\\*.lnk`,
+        tools: `Explorer.exe parent (user double-click):
+- Most common for commodity JS delivery
+- User receives ZIP, extracts .js, double-clicks thinking
+  it's a document - wscript runs silently
+
+Browser parent:
+- Drive-by download delivering .js file
+- Browser auto-opens downloaded .js (rare - most browsers
+  now prompt before opening script files, but older
+  configs and IE/legacy Edge allow auto-open)
+- More common: browser downloads, user manually opens
+
+Office parent:
+- VBA macro drops a .js file then executes it via Shell()
+- Less common than direct wscript.exe delivery but creates
+  a cleaner two-stage chain (macro handles download,
+  JS handles execution/persistence)
+
+Families using these chains:
+Gootloader (SEO poisoning -> browser download -> user opens .js)
+Qakbot variants
+TA505 campaigns
+Various phishing operators`,
+        ossdetect: `Sigma:
+- proc_creation_win_wscript_jscript_susp_parent.yml
+- proc_creation_win_explorer_wscript_child.yml
+- proc_creation_win_browser_susp_child_process.yml
+  (covers browser spawning any script host)
+
+Atomic Red Team:
+- T1059.007 (parent process variants)
+
+Hayabusa:
+- BrowserSpawnScriptHost rules
+- OfficeSpawnWSH category
+
+Velociraptor:
+- Windows.EventLogs.Sysmon
+- Windows.Forensics.BrowserHistory
+  (correlate download time with wscript execution time)
+
+Gootloader-specific:
+- ANY.RUN Gootloader behavioral signatures
+- Velociraptor Windows.Forensics.Gootloader artifact`,
+        notes: "The explorer.exe parent is the most common real-world path for JScript delivery - it means the user double-clicked the .js file directly, relying on the default Windows file association (wscript.exe handles .js). This is the 'ZIP attachment -> extract -> double-click' chain. Gootloader is the canonical example and worth understanding in depth: it uses SEO poisoning to rank malicious sites in search results for legal/business document searches, delivers a large obfuscated .js file disguised as the document, and relies entirely on the user double-clicking it. The browser parent variant is less common now because modern browsers (Chrome, Edge) warn before opening script files downloaded from the internet - but it still surfaces in environments with older browser configurations or where the .js is delivered inside a password-protected ZIP (bypasses browser warning because the file is 'opened' from the ZIP handler, not the browser directly). The Office parent variant is the most sophisticated - it means a macro is orchestrating the JScript execution as a second stage, suggesting a more deliberate operator rather than commodity tooling.",
+        apt: [
+          { cls: "apt-mul", name: "Gootloader", note: "Canonical example of explorer-spawned wscript via user double-click of SEO-poisoned .js lure." },
+          { cls: "apt-mul", name: "TA505", note: "Browser and email delivery chains resulting in wscript execution documented across campaigns." },
+          { cls: "apt-mul", name: "Phishing Operators", note: "ZIP-delivered .js with explorer parent is a standard commodity phishing pattern." },
+          { cls: "apt-cn", name: "APT41", note: "Multi-stage chains using Office macro dropping and executing JScript documented in intrusion reports." }
+        ],
+        cite: "MITRE ATT&CK T1059.007, T1566.001"
       }
     ]
   },
