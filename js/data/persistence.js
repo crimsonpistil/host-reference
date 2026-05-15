@@ -602,16 +602,423 @@ Reference: SANS DFIR
     desc: "Hunting established WMI event filter/consumer/binding persistence in the WMI repository",
     rows: [
       {
-        sub: "T1546.003 - Coming Soon",
-        indicator: "Full content for T1546.003 WMI Subscription Persistence Hunt coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: hunting the WMI repository for established subscriptions (complements real-time EID 19/20/21 detection in T1047). 2 indicators planned. Use PyWMIPersistenceFinder, Velociraptor Windows.Forensics.WMIPersistence, and direct WMI namespace enumeration.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1546.003 - Live Enumeration of WMI Event Subscriptions",
+        indicator: "Direct query of WMI subscription namespaces (root\\subscription) on live host - find established filter/consumer/binding triples",
+        sysmon: `// This indicator is hunting-oriented - PowerShell
+// WMI queries against live host, not Sysmon detection.
+//
+// Sysmon detects subscription CREATION in real-time via
+// EID 19/20/21 (covered in T1047). This indicator
+// finds subscriptions that were established BEFORE
+// Sysmon coverage began, or in environments where
+// Sysmon WMI monitoring is not enabled.
+//
+// Sysmon contribution: re-check EID 19/20/21 history
+// during incident investigation:
+
+EventID=19 OR EventID=20 OR EventID=21
+// Filter on Operation=Created
+// Useful for retroactive timeline of when a
+// subscription was established`,
+        kibana: `// Historical Sysmon EID 19/20/21 events
+// (find when a subscription was registered):
+winlog.event_id: (19 OR 20 OR 21)
+AND winlog.event_data.Operation: "Created"
+
+// Cross-reference subscription Name field
+// across all three events to build the
+// filter + consumer + binding triple:
+winlog.event_id: (19 OR 20 OR 21)
+AND winlog.event_data.Name: "<suspicious_name>"`,
+        powershell: `# Enumerate all WMI event subscriptions on live host
+# Run with admin privileges for full namespace access
+
+Write-Host "=== Event Filters (triggers) ===" -ForegroundColor Cyan
+Get-WMIObject -Namespace root\\subscription -Class __EventFilter |
+  Select Name, Query, QueryLanguage, EventNamespace
+
+Write-Host "\`n=== Event Consumers (actions) ===" -ForegroundColor Cyan
+Get-WMIObject -Namespace root\\subscription -Class __EventConsumer |
+  Select Name, __CLASS,
+    @{n='CommandLine';e={$_.CommandLineTemplate}},
+    @{n='ScriptText';e={$_.ScriptText}},
+    @{n='ScriptFileName';e={$_.ScriptFileName}}
+
+Write-Host "\`n=== Filter-Consumer Bindings (armed subscriptions) ===" -ForegroundColor Cyan
+Get-WMIObject -Namespace root\\subscription -Class __FilterToConsumerBinding |
+  Select Filter, Consumer
+
+# Also check other namespaces sometimes used:
+Write-Host "\`n=== root\\default subscriptions ===" -ForegroundColor Cyan
+Get-WMIObject -Namespace root\\default -Class __EventFilter -EA SilentlyContinue
+Get-WMIObject -Namespace root\\default -Class __EventConsumer -EA SilentlyContinue
+
+# Suspicious patterns to flag:
+$consumers = Get-WMIObject -Namespace root\\subscription -Class __EventConsumer
+foreach ($c in $consumers) {
+  $suspicious = @()
+
+  # CommandLineEventConsumer or ActiveScriptEventConsumer
+  # are the two execution-capable consumer types
+  if ($c.__CLASS -eq 'CommandLineEventConsumer' -or
+      $c.__CLASS -eq 'ActiveScriptEventConsumer') {
+    $suspicious += "Execution-capable consumer type"
+  }
+
+  # Command line points to interpreter or user-writable path
+  if ($c.CommandLineTemplate -match
+    '(powershell|cmd\\.exe|wscript|cscript|mshta|rundll32|AppData|Temp|ProgramData)') {
+    $suspicious += "Suspicious target in CommandLineTemplate"
+  }
+
+  # Inline ScriptText present (ActiveScriptEventConsumer)
+  if ($c.ScriptText) {
+    $suspicious += "Inline script content - no file artifact"
+  }
+
+  # Name not matching known-good vendor pattern
+  if ($c.Name -match '^[a-z0-9]{8,}$' -or
+      [string]::IsNullOrWhiteSpace($c.Name)) {
+    $suspicious += "Random or blank consumer name"
+  }
+
+  if ($suspicious.Count -gt 0) {
+    [PSCustomObject]@{
+      Name = $c.Name
+      Class = $c.__CLASS
+      Suspicious = ($suspicious -join '; ')
+      Detail = ($c.CommandLineTemplate, $c.ScriptText, $c.ScriptFileName |
+                Where-Object { $_ } | Select-Object -First 1)
+    }
+  }
+}`,
+        registry: `WMI repository - the underlying database:
+C:\\Windows\\System32\\wbem\\Repository\\
+  OBJECTS.DATA  - main object store (binary)
+  INDEX.BTR     - B-tree index
+  INDEX.MAP     - index map
+  MAPPING1.MAP  - namespace mapping
+  MAPPING2.MAP  - namespace mapping
+
+The repository is NOT human-readable and is NOT
+in the registry despite the name 'WMI Event
+Subscription' suggesting registry storage.
+
+Offline analysis tools (forensic image investigation):
+- PyWMIPersistenceFinder (David Reaves / Mandiant)
+  python PyWMIPersistenceFinder.py OBJECTS.DATA
+  Parses the binary repository and lists all
+  filter/consumer/binding triples
+- WMI-Forensics (Python toolkit)
+- Velociraptor Windows.Forensics.WMIPersistence
+  (fleet-wide artifact)
+
+Live host alternative:
+- mofcomp.exe can compile/decompile MOF files
+- Get-WMIObject queries (PowerShell - shown above)
+- wmic /namespace:\\\\root\\subscription path
+  __EventFilter (command line equivalent)
+
+Legitimate subscription namespaces:
+- root\\ccm (SCCM - Microsoft Configuration Manager)
+- root\\cimv2\\sms (SMS/SCCM)
+- root\\McAfee (McAfee AV - if installed)
+- Vendor-specific namespaces from installed AV/EDR
+- Build allowlist from clean-baseline environment
+
+Adversary-favored namespace:
+- root\\subscription is the canonical persistence
+  location - if you see subscriptions here that
+  aren't tied to known IT/security software, treat
+  as suspicious until proven otherwise`,
+        tools: `Live-host enumeration tools:
+
+Get-WMIObject (PowerShell - shown in script):
+- Built-in, no deploy required
+- Returns objects with full property access
+- Works on any Windows with PowerShell 2.0+
+
+wmic.exe (legacy, deprecated Win11 24H2):
+wmic /namespace:\\\\root\\subscription path __EventFilter get /value
+wmic /namespace:\\\\root\\subscription path __EventConsumer get /value
+wmic /namespace:\\\\root\\subscription path __FilterToConsumerBinding get /value
+
+Sysinternals autoruns.exe:
+- WMI tab lists all event subscriptions
+- Highlights non-Microsoft entries
+- VirusTotal lookup on consumer command lines
+- Excellent triage tool for live hosts
+
+Velociraptor:
+- Windows.Forensics.WMIPersistence
+  (live host enumeration with parsing)
+- Fleet-wide deployment for environment-wide hunt
+- Single best tool for hunting this technique
+  across many systems
+
+KAPE (Eric Zimmerman):
+- Targets/Compound/RegistryHives.tkape
+  (collects related artifacts)
+- Combined with WMI repository extraction
+  for forensic timeline
+
+Offline (from forensic images):
+- PyWMIPersistenceFinder
+- WMI-Forensics (Mandiant)
+- Both parse the binary repository extracted
+  from a disk image
+- Useful when working post-incident from a
+  full forensic capture`,
+        ossdetect: `Sigma:
+- Sigma rules cover real-time EID 19/20/21
+  (handled in T1047)
+- Hunting via live enumeration is a manual
+  workflow, not a real-time rule
+
+Atomic Red Team:
+- T1546.003 (subscription persistence tests)
+- Use to validate the hunt: install subscription
+  via Atomic, then run PowerShell sweep to confirm
+  it surfaces in your detection
+
+Hayabusa:
+- WMISubscriptionRegistration rules (real-time)
+- For hunting, manual enumeration is the approach
+
+Velociraptor:
+- Windows.Forensics.WMIPersistence
+  (the gold-standard hunting artifact)
+- Parses subscription objects from live WMI
+- Returns filter Query, consumer command/script,
+  and binding relationships
+
+MITRE / community references:
+- Mandiant 2014 paper:
+  'WMI Offense, Defense, and Forensics' (Ballenthin
+  / Graeber / Teodorescu) - foundational research
+- DEF CON 23 talk on WMI persistence
+- These remain canonical references for the
+  technique 10+ years later`,
+        notes: "This indicator is the hunting counterpart to the real-time WMI subscription detection in T1047 - same technique, different question. T1047 asks 'is a subscription being created right now?' This indicator asks 'what subscriptions exist on this host today?' For incident response, the live enumeration approach is genuinely essential because WMI persistence can be established before any Sysmon coverage existed, or in environments where Sysmon WMI monitoring is not configured. The Get-WMIObject query against root\\subscription returns the full subscription inventory in seconds and is one of the highest-value single commands in Windows IR. The suspicious-pattern flagging in the script (CommandLineEventConsumer + interpreter path + random name) catches the typical adversary pattern while letting legitimate SCCM/AV subscriptions pass through. The hardest part of this hunt is baseline establishment: every environment has different legitimate WMI subscriptions from installed software, so 'alert on anything in root\\subscription' is too noisy in practice. Capture a baseline from a clean reference host, then diff suspect systems against it. PyWMIPersistenceFinder is the canonical offline tool when you're working from a forensic image rather than a live host - the Mandiant 2014 paper on WMI persistence is the foundational reference and remains accurate.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "WMI subscription persistence documented across long-dwell espionage operations including SolarWinds." },
+          { cls: "apt-cn", name: "APT41", note: "WMI event subscriptions used for persistence across multiple sector intrusions." },
+          { cls: "apt-mul", name: "Turla", note: "Heavy use of WMI persistence documented in long-term espionage campaigns." },
+          { cls: "apt-mul", name: "FIN6", note: "WMI subscription persistence documented in financial sector intrusions." },
+          { cls: "apt-mul", name: "Red Teams", note: "WMI subscription is standard red team persistence due to forensic evasiveness." }
+        ],
+        cite: "MITRE ATT&CK T1546.003"
+      },
+      {
+        sub: "T1546.003 - Suspicious Consumer Patterns and Trigger Analysis",
+        indicator: "WMI consumer with execution-capable type pointing to interpreter, or filter with persistence-intent trigger (system boot, logon, perfdata polling)",
+        sysmon: `// Real-time Sysmon detection of suspicious patterns
+// during subscription creation (EID 19/20/21):
+
+EventID=20 (Consumer Created)
+Type=CommandLineEventConsumer OR ActiveScriptEventConsumer
+// These two consumer types execute code -
+// other consumer types (NTEventLogEventConsumer,
+// SMTPEventConsumer, LogFileEventConsumer)
+// don't execute attacker code directly
+
+EventID=19 (Filter Created)
+// Suspicious filter queries indicating persistence:
+Query matches (any of):
+  *__InstanceCreationEvent* (process / file create triggers)
+  *__InstanceModificationEvent* (state change triggers)
+  *Win32_LocalTime* (time-based triggers)
+  *Win32_PerfFormattedData_PerfOS_System*
+    (uptime-based triggers - fires after N seconds boot)
+  *Win32_LogonSession* (logon triggers)`,
+        kibana: `// Real-time: dangerous consumer types
+winlog.event_id: 20
+AND winlog.event_data.Type: ("CommandLineEventConsumer" OR "ActiveScriptEventConsumer")
+
+// Real-time: persistence-intent filter queries
+winlog.event_id: 19
+AND winlog.event_data.Query: (*__InstanceCreationEvent* OR *__InstanceModificationEvent* OR *Win32_LocalTime* OR *Win32_PerfFormattedData* OR *Win32_LogonSession*)
+
+// Cross-correlate: pair a suspicious filter (EID 19)
+// with a CommandLine/Script consumer (EID 20) and
+// a binding (EID 21) within a short time window =
+// armed persistence subscription`,
+        powershell: `# Hunt for suspicious consumer + filter pairings on live host
+
+# 1. Inventory all execution-capable consumers
+$execConsumers = Get-WMIObject -Namespace root\\subscription -Class __EventConsumer |
+  Where-Object {
+    $_.__CLASS -eq 'CommandLineEventConsumer' -or
+    $_.__CLASS -eq 'ActiveScriptEventConsumer'
+  }
+
+# 2. Pull all filters
+$filters = Get-WMIObject -Namespace root\\subscription -Class __EventFilter
+
+# 3. Pull all bindings (the link between filters and consumers)
+$bindings = Get-WMIObject -Namespace root\\subscription -Class __FilterToConsumerBinding
+
+# 4. Reconstruct armed subscriptions (filter + consumer + binding triple)
+foreach ($binding in $bindings) {
+  # Binding properties reference objects via __RELPATH
+  $filterPath = $binding.Filter
+  $consumerPath = $binding.Consumer
+
+  $filterName = $filterPath -replace '.*Name="([^"]+)".*','$1'
+  $consumerName = $consumerPath -replace '.*Name="([^"]+)".*','$1'
+
+  $filter = $filters | Where-Object { $_.Name -eq $filterName }
+  $consumer = $execConsumers | Where-Object { $_.Name -eq $consumerName }
+
+  if ($consumer) {
+    # This is an execution-capable armed subscription
+    [PSCustomObject]@{
+      FilterName = $filterName
+      FilterQuery = $filter.Query
+      ConsumerName = $consumerName
+      ConsumerClass = $consumer.__CLASS
+      Action = if ($consumer.CommandLineTemplate) {
+                 $consumer.CommandLineTemplate
+               } else {
+                 $consumer.ScriptText
+               }
+      TriggerType = switch -Regex ($filter.Query) {
+        '__InstanceCreationEvent' { 'Object created (process/file)' }
+        '__InstanceModificationEvent' { 'State change' }
+        'Win32_LocalTime' { 'Time-based' }
+        'Win32_PerfFormattedData' { 'Uptime / perfdata polling' }
+        'Win32_LogonSession' { 'Logon event' }
+        default { 'Other' }
+      }
+    }
+  }
+}`,
+        registry: `No registry artifacts - all data is in the
+WMI repository binary files.
+
+Consumer type analysis - what each does:
+
+CommandLineEventConsumer:
+- Runs an arbitrary command via the Win32_Process
+  Create method when the bound filter fires
+- CommandLineTemplate property = the command
+- Highest-risk consumer type
+- Example: cmd /c C:\\evil.exe
+
+ActiveScriptEventConsumer:
+- Runs inline VBScript or JScript when the bound
+  filter fires
+- ScriptText property = the inline code
+- ScriptFileName property = optional file path
+  (less common; most adversary use is inline)
+- High-risk; no file artifact when inline
+
+NTEventLogEventConsumer:
+- Writes to Windows Event Log
+- Not directly attacker-executable
+- Lower-risk classification
+
+SMTPEventConsumer:
+- Sends email
+- Not directly attacker-executable
+- Could be used for data exfiltration but rare
+
+LogFileEventConsumer:
+- Writes to a text file
+- Not directly attacker-executable
+
+Filter query patterns and their meaning:
+
+__InstanceCreationEvent + Win32_Process:
+- Fires when ANY process is created
+- Adversary use: 'every time notepad.exe runs,
+  also run my code'
+
+__InstanceModificationEvent + Win32_PerfFormattedData_PerfOS_System:
+- Fires when system uptime crosses N seconds
+- Adversary use: 'run my code 5 minutes after
+  every boot' (classic boot-persistence trigger)
+
+__InstanceCreationEvent + __TimerEvent / Win32_LocalTime:
+- Time-based triggers
+- Adversary use: scheduled-task-like behavior
+  without a scheduled task artifact`,
+        tools: `Subscription persistence frameworks:
+
+PowerSploit / Empire:
+- New-UserPersistenceOption -WMI
+- Creates CommandLineEventConsumer with logon trigger
+- Documented adversary tradecraft
+
+WMI-Persistence (Matt Graeber / Justin Warner):
+- PowerShell module for WMI persistence creation
+- Multiple trigger types supported
+- Reference for understanding the technique
+
+SharPersist:
+- /t wmi flag adds WMI subscription
+- Standard red team persistence option
+
+Cobalt Strike:
+- Aggressor scripts for WMI persistence
+- Multiple trigger and consumer combinations
+
+Manual operator pattern:
+- Create filter using stable trigger
+  (perf data polling or logon event)
+- Create CommandLineEventConsumer pointing
+  to staged payload
+- Bind them together
+- Subscription persists until explicitly removed
+- No registry entry, no scheduled task,
+  no startup folder file - invisible to most
+  standard persistence checks
+
+Defensive note - subscription removal:
+Remove-WmiObject -Namespace root\\subscription
+  -Class __FilterToConsumerBinding
+  -Filter "Filter='...'"
+(removes the binding; filter/consumer remain
+ unless removed separately)`,
+        ossdetect: `Sigma:
+- sysmon_wmi_susp_consumer_type.yml (EID 20)
+- sysmon_wmi_susp_filter_query.yml (EID 19)
+- sysmon_wmi_persistence_binding.yml (EID 21)
+
+Atomic Red Team:
+- T1546.003 (multiple subscription persistence tests)
+- T1546.003 Test #1 (CommandLineEventConsumer + filter)
+- T1546.003 Test #5 (ActiveScriptEventConsumer)
+
+Hayabusa:
+- WMIDangerousConsumerType rules
+- WMISuspFilterQuery detection
+
+Velociraptor:
+- Windows.Forensics.WMIPersistence
+  (returns parsed subscriptions with consumer
+  type and filter query exposed for analysis)
+
+Foundational research:
+- 'WMI Offense, Defense, and Forensics' -
+  William Ballenthin, Matt Graeber, Claudiu
+  Teodorescu (Mandiant, 2014)
+- The single most cited reference for WMI
+  persistence detection
+- Still accurate today; the technique
+  hasn't fundamentally changed
+
+DEF CON / Black Hat talks:
+- Various WMI persistence talks 2014-2018
+- All build on the Mandiant 2014 foundation`,
+        notes: "This indicator narrows the WMI subscription hunt to the highest-risk subset: consumers with execution capability (CommandLineEventConsumer, ActiveScriptEventConsumer) paired with filters that have persistence intent (boot triggers, logon triggers, periodic polling). The 'trigger type' classification in the PowerShell script is genuinely useful for triage: a boot-uptime trigger (Win32_PerfFormattedData_PerfOS_System) paired with a CommandLineEventConsumer running powershell is the classic adversary persistence pattern documented across many incidents. The reverse - benign trigger types like '__InstanceModificationEvent + a tracked legitimate object' paired with NTEventLogEventConsumer - is more often a legitimate monitoring or AV subscription. Subscription persistence is genuinely hard to detect without targeted hunting because Sysmon's WMI monitoring (EID 19/20/21) requires explicit config-level opt-in and many Sysmon deployments don't include it. Velociraptor's Windows.Forensics.WMIPersistence artifact is the single most valuable tool for fleet-wide hunting of this technique. The Mandiant 2014 paper remains the foundational reference - if you want to dig deeper into the technique, it's the canonical read.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Persistence-intent WMI subscriptions with boot triggers documented across long-dwell operations." },
+          { cls: "apt-cn", name: "APT41", note: "WMI subscription with boot/logon triggers documented in sector-targeting intrusions." },
+          { cls: "apt-mul", name: "Turla", note: "Sophisticated WMI subscription persistence documented across espionage campaigns." },
+          { cls: "apt-mul", name: "FIN6", note: "WMI persistence with CommandLineEventConsumer documented in financial sector cases." },
+          { cls: "apt-mul", name: "Red Teams", note: "Boot-trigger + interpreter consumer is the canonical WMI persistence pattern - standard tradecraft." }
+        ],
         cite: "MITRE ATT&CK T1546.003"
       }
     ]
