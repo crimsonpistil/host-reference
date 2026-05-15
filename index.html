@@ -66,9 +66,9 @@
 
   <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
     <div class="card-id" style="color:#a371f7">TA0002</div>
-    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">32 indicators · 13 of 13 techniques built · COMPLETE</span>
+    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">32 indicators · 13 techniques</span>
     <div class="card-name">Execution</div>
-    <div class="card-desc">Code execution via interpreters and signed binaries - complete coverage of all 13 Execution techniques. PowerShell, cmd.exe, VBScript, JScript, WMI (local/remote/persistence), scheduled tasks, service execution, mshta, rundll32, regsvr32 (Squiblydoo), Native API injection, DLL side-loading / search-order hijacking, and user execution via container files and LNK shortcuts. 32 indicators total across the tactic.</div>
+    <div class="card-desc">Code execution via interpreters and signed binaries - complete coverage of 13 Execution techniques. PowerShell, cmd.exe, VBScript, JScript, WMI (local/remote/persistence), scheduled tasks, service execution, mshta, rundll32, regsvr32 (Squiblydoo), Native API injection, DLL side-loading / search-order hijacking, and user execution via container files and LNK shortcuts. 32 indicators total across the tactic.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
@@ -82,7 +82,7 @@
     <span class="card-pill" style="background:rgba(57,211,83,.12);color:#39d353">In progress</span>
     <div class="card-name">Persistence</div>
     <div class="card-desc">Registry run keys, scheduled tasks, WMI subscriptions, startup folders, services, DLL hijacking - the canonical host-side persistence techniques.</div>
-    <div class="card-count">Coming soon</div>
+    <div class="card-count">In Development</div>
   </div>
 
   <div class="tactic-card soon" data-tags="privilege escalation">
@@ -90,7 +90,7 @@
     <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">Planned</span>
     <div class="card-name">Privilege Escalation</div>
     <div class="card-desc">Token manipulation, UAC bypass, named pipe impersonation, exploitation patterns. Builds on Execution telemetry.</div>
-    <div class="card-count">Coming soon</div>
+    <div class="card-count">In Development</div>
   </div>
 
   <div class="tactic-card soon" data-tags="defense evasion">
@@ -98,7 +98,7 @@
     <span class="card-pill" style="background:rgba(248,81,73,.12);color:#f85149">Planned</span>
     <div class="card-name">Defense Evasion</div>
     <div class="card-desc">Process injection (CreateRemoteThread, APC, PE injection), parent PID spoofing, unsigned drivers, LOLBin abuse.</div>
-    <div class="card-count">Coming soon</div>
+    <div class="card-count">In Development</div>
   </div>
 
   <div class="tactic-card soon" data-tags="credential access">
@@ -106,7 +106,7 @@
     <span class="card-pill" style="background:rgba(255,123,114,.12);color:#ff7b72">Planned</span>
     <div class="card-name">Credential Access</div>
     <div class="card-desc">LSASS access patterns, SAM/NTDS extraction, DPAPI abuse, Mimikatz process indicators. Host-side complement to network credential access detections.</div>
-    <div class="card-count">Coming soon</div>
+    <div class="card-count">In Development</div>
   </div>
 
   <div class="tactic-card soon" data-tags="discovery">
@@ -114,7 +114,7 @@
     <span class="card-pill" style="background:rgba(88,166,255,.12);color:#58a6ff">Planned</span>
     <div class="card-name">Discovery</div>
     <div class="card-desc">Host enumeration commands, registry queries, network/system discovery. Complements network-side discovery detections.</div>
-    <div class="card-count">Coming soon</div>
+    <div class="card-count">In Development</div>
   </div>
 
 </div>
@@ -145,14 +145,14 @@
 
     <div class="info-card">
       <h3>Schema notes</h3>
-      <p>The host schema differs from network because host telemetry has more dimensions. Same indicator can have evidence in: process events (Sysmon EID 1), registry modifications (EID 12/13), file creation (EID 11), network connections from process (EID 3), image loads (EID 7), and process access (EID 10).</p>
+      <p>The host schema differs from network because host telemetry has more dimensions. Same indicator can have evidence in: process events, registry modifications, file creation, network connections from process, image loads, and process access.</p>
       <p>PowerShell hunt scripts are designed to run directly against Windows event logs - useful for both proactive hunting and during incident response when you need to triage without a SIEM.</p>
     </div>
 
     <div class="info-card">
       <h3>Build status</h3>
-      <p><strong>Execution (TA0002) is complete</strong>: all 13 techniques fully built with 32 indicators total. Coverage includes scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files.</p>
-      <p>Next tactic: <strong>Persistence (TA0003)</strong>. Several techniques cross-cited from Execution (WMI subscriptions, scheduled tasks, services) will reappear from a persistence-detection angle.</p>
+      <p><strong>Execution (TA0002) is complete</strong>: 13 techniques fully built with 32 indicators total. Coverage includes scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files.</p>
+      <p>Up Next - In Dev: <strong>Persistence (TA0003)</strong>. Several techniques cross-cited from Execution (WMI subscriptions, scheduled tasks, services) will reappear from a persistence-detection angle.</p>
       <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Defense Evasion<br>&rarr;Privilege Escalation<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 
