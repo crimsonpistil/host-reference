@@ -1666,16 +1666,483 @@ Manual workflow:
     desc: "Hunting established scheduled tasks with persistence intent - logon/startup triggers, hidden tasks, action analysis",
     rows: [
       {
-        sub: "T1053.005 - Coming Soon",
-        indicator: "Full content for T1053.005 Scheduled Task Persistence Hunt coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: hunting established tasks with persistence-specific triggers (OnLogon, AtStartup, OnEvent) - complements T1053.005 in Execution which covers creation. 2 indicators planned. Cross-reference Execution tactic's third indicator (action hunting) for binary-path angle.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1053.005 - Tasks with Persistence-Intent Triggers",
+        indicator: "Enumerate scheduled tasks and filter to those with OnLogon, AtStartup, OnEvent, or short-interval triggers - the persistence-specific subset",
+        sysmon: `// This indicator is hunting-oriented - PowerShell
+// enumeration of established tasks rather than
+// real-time creation detection (T1053.005 in Execution).
+//
+// Sysmon contribution: historical task creation events:
+EventID=1
+Image=*\\schtasks.exe
+CommandLine=*/create*
+// Cross-reference with /sc ONLOGON, /sc ONSTART,
+// /sc ONEVENT to find persistence-intent creations
+
+// Security Event 4698 (task created) - broader coverage:
+EventID=4698
+LogName=Security
+// TaskContent XML field reveals trigger type
+// Look for: <LogonTrigger>, <BootTrigger>,
+// <EventTrigger>, <TimeTrigger Repetition Interval="PT<short>">`,
+        kibana: `// Historical task creation with persistence trigger
+winlog.event_id: 1
+AND process.name: "schtasks.exe"
+AND process.command_line: (*\/sc ONLOGON* OR *\/sc ONSTART* OR *\/sc ONEVENT*)
+
+// Security Event 4698 with persistence triggers in XML
+winlog.event_id: 4698
+AND winlog.event_data.TaskContent: (*LogonTrigger* OR *BootTrigger* OR *EventTrigger*)
+
+// Short-interval recurring tasks (beacon persistence)
+winlog.event_id: 4698
+AND winlog.event_data.TaskContent: (*PT1M* OR *PT5M* OR *PT10M* OR *PT15M*)`,
+        powershell: `# Hunt scheduled tasks with persistence-intent triggers
+# OnLogon, AtStartup, OnEvent, or short recurring interval
+
+$persistenceTasks = @()
+
+Get-ScheduledTask | ForEach-Object {
+  $task = $_
+  $triggerTypes = @()
+  $suspicious = @()
+
+  foreach ($trigger in $task.Triggers) {
+    $type = $trigger.CimClass.CimClassName
+
+    # Classify the trigger
+    switch ($type) {
+      'MSFT_TaskLogonTrigger'   { $triggerTypes += 'OnLogon' }
+      'MSFT_TaskBootTrigger'    { $triggerTypes += 'AtStartup' }
+      'MSFT_TaskEventTrigger'   { $triggerTypes += 'OnEvent' }
+      'MSFT_TaskSessionStateChangeTrigger' { $triggerTypes += 'SessionStateChange' }
+      'MSFT_TaskTimeTrigger'    { $triggerTypes += 'Time' }
+      'MSFT_TaskDailyTrigger'   { $triggerTypes += 'Daily' }
+      'MSFT_TaskRegistrationTrigger' { $triggerTypes += 'OnRegistration' }
+    }
+
+    # Check for short recurring intervals (beacon-like)
+    if ($trigger.Repetition.Interval) {
+      $interval = $trigger.Repetition.Interval
+      if ($interval -match 'PT([0-9]+)M' -and [int]$matches[1] -le 15) {
+        $suspicious += "Short repetition interval ($interval)"
+      }
+      if ($interval -match 'PT([0-9]+)S' -and [int]$matches[1] -le 600) {
+        $suspicious += "Sub-minute repetition ($interval)"
+      }
+    }
+  }
+
+  # Persistence-intent triggers (any of these alone qualifies)
+  $persistenceTriggers = @('OnLogon','AtStartup','OnEvent','SessionStateChange')
+  $isPersistence = $false
+  foreach ($t in $triggerTypes) {
+    if ($persistenceTriggers -contains $t) { $isPersistence = $true; break }
+  }
+
+  if (-not $isPersistence -and $suspicious.Count -eq 0) { return }
+
+  # Pull the action details
+  $actions = $task.Actions | ForEach-Object {
+    if ($_.Execute) { "$($_.Execute) $($_.Arguments)" }
+  }
+
+  # Check action for additional risk signals
+  $actionStr = $actions -join ' | '
+  if ($actionStr -match '(powershell|cmd\\.exe|wscript|cscript|mshta|rundll32|regsvr32)') {
+    $suspicious += "Action invokes interpreter"
+  }
+  if ($actionStr -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public)') {
+    $suspicious += "Action in user-writable path"
+  }
+
+  $persistenceTasks += [PSCustomObject]@{
+    TaskName    = $task.TaskName
+    TaskPath    = $task.TaskPath
+    Triggers    = ($triggerTypes -join ', ')
+    Action      = $actionStr
+    RunAs       = $task.Principal.UserId
+    State       = $task.State
+    Author      = $task.Author
+    LastRunTime = $task.LastRunTime
+    Suspicious  = ($suspicious -join '; ')
+  }
+}
+
+$persistenceTasks | Sort-Object TaskPath | Format-Table -AutoSize`,
+        registry: `Scheduled task storage on disk:
+
+C:\\Windows\\System32\\Tasks\\<TaskPath>\\<TaskName>
+- XML file containing full task definition
+- Human-readable - inspect with Get-Content
+
+Key XML elements for persistence analysis:
+<Triggers>
+  <LogonTrigger>     <!-- persistence intent -->
+    <UserId>...</UserId>
+  </LogonTrigger>
+  <BootTrigger>      <!-- persistence intent -->
+  </BootTrigger>
+  <EventTrigger>     <!-- can be persistence -->
+    <Subscription>...event XPath query...</Subscription>
+  </EventTrigger>
+  <CalendarTrigger>  <!-- scheduled, may not be persistence -->
+    <Repetition>
+      <Interval>PT5M</Interval>  <!-- short = suspicious -->
+    </Repetition>
+  </CalendarTrigger>
+</Triggers>
+
+<Principal>
+  <UserId>S-1-5-18</UserId>  <!-- SYSTEM = high privilege -->
+  <RunLevel>HighestAvailable</RunLevel>
+</Principal>
+
+Registry equivalent locations:
+HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\
+  Schedule\\TaskCache\\Tree\\<TaskPath>\\<TaskName>
+HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\
+  Schedule\\TaskCache\\Tasks\\{GUID}\\
+- TaskCache\\Tree maps task names to GUIDs
+- TaskCache\\Tasks contains the action data per GUID
+- Useful for finding tasks that exist in registry
+  but not in C:\\Windows\\System32\\Tasks (rare,
+  indicates manipulation)
+
+Cross-reference with Execution tactic:
+- T1053.005 in Execution covers task CREATION
+  (real-time schtasks.exe, Security EID 4698)
+- This indicator covers HUNTING established tasks
+- Use both for full coverage
+
+Last-modified timestamps:
+(Get-Item "C:\\Windows\\System32\\Tasks\\<name>").LastWriteTime
+- Useful for incident timelining
+- Tells you when the task was installed or modified`,
+        tools: `Persistence-intent trigger types:
+
+OnLogon (most common):
+- Fires when specified user logs in
+- "Any user" or specific account
+- Most common adversary persistence trigger
+- Standard Cobalt Strike persistence default
+
+AtStartup (system boot):
+- Fires when system boots
+- Requires SYSTEM-level task (admin to create)
+- Stronger persistence: runs before user logon
+
+OnEvent (event-driven):
+- Fires when specific Windows event log entry appears
+- Adversaries use specific event IDs as triggers
+- Example: trigger on Event ID 4624 LogonType=2
+  (interactive logon - run code when someone logs in)
+- More evasive than OnLogon - less commonly monitored
+
+SessionStateChange:
+- Fires on logon/logoff/lock/unlock
+- Less common but documented
+
+Short recurring intervals:
+- PT1M, PT5M, PT10M repetitions
+- Used for beacon-style persistence
+- Adversary runs a check-in script every N minutes
+- Combined with stub task that contacts C2
+
+Adversary frameworks:
+SharPersist (/t schtask)
+Cobalt Strike (built-in task persistence)
+Empire / Starkiller modules
+Metasploit persistence
+Most commodity malware uses simpler schtasks /create
+  with /sc ONLOGON
+
+Task disguise patterns (covered in T1053.005 Execution):
+- Names mimicking Windows tasks: "Windows Update",
+  "Microsoft Office Health", "Google Update Task"
+- Task paths in \\Microsoft\\Windows\\ to blend with
+  legitimate Windows tasks
+- Author field set to "Microsoft Corporation"
+  (easily spoofed, low fidelity by itself)`,
+        ossdetect: `Sigma:
+- Real-time detection rules cover creation
+- Hunting established tasks is a manual workflow
+
+Atomic Red Team:
+- T1053.005 (multiple persistence trigger variants)
+- T1053.005 Test #1, #6 (OnLogon and OnStartup tasks)
+- Use to validate the hunt: install via Atomic,
+  run PowerShell sweep, confirm detection
+
+Hayabusa:
+- ScheduledTaskCreation rules (real-time, EID 4698)
+- For hunting, use Get-ScheduledTask or schtasks /query
+
+Velociraptor:
+- Windows.System.ScheduledTasks
+  (best fleet-wide artifact - enumerates all tasks
+  with trigger and action detail)
+- Windows.Forensics.Autoruns
+
+Sysinternals autoruns.exe:
+- Scheduled Tasks tab
+- Highlights non-Microsoft signed tasks
+- VirusTotal lookup integration
+- For manual IR triage
+
+PowerShell native (the script above):
+- No tool deploy required
+- Works on any Windows with PowerShell 3.0+
+- Returns parsed trigger type and timing info`,
+        notes: "This is the persistence-hunting counterpart to T1053.005 in Execution. The Execution side covers task CREATION (real-time schtasks.exe and Security EID 4698); this side covers HUNTING established tasks with persistence-specific characteristics. The detection narrows by trigger type: OnLogon, AtStartup, OnEvent, and SessionStateChange are the persistence-intent trigger families. Time-based triggers can be persistence (daily/weekly recurring) but are also legitimate for many scheduled jobs - they need additional context (action analysis) to classify. Short recurring intervals (PT1M-PT15M) are a strong signal for beacon-style persistence: legitimate tasks rarely repeat that frequently, while adversary beacons commonly do. The combination 'OnLogon trigger + action invokes powershell + action contains EncodedCommand or AppData path' is high-confidence malicious - any one of those alone has false positives, but the combination is rarely legitimate. Pair this hunt with the Execution side's third indicator (task action hunting) for full coverage: this indicator filters by trigger type, that one filters by action path - together they catch the persistence-intent + suspicious-execution combination from both angles.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "OnLogon scheduled tasks documented across long-dwell operations." },
+          { cls: "apt-cn", name: "APT41", note: "Scheduled task persistence with OnLogon and OnEvent triggers documented across multiple sector intrusions." },
+          { cls: "apt-kp", name: "Lazarus", note: "Persistence-intent scheduled tasks documented in CISA advisories on DPRK operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Pre-encryption persistence via OnLogon tasks documented across Ryuk, Conti, BlackCat families." },
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Default task persistence module uses OnLogon trigger - common across red team and APT operations." }
+        ],
+        cite: "MITRE ATT&CK T1053.005"
+      },
+      {
+        sub: "T1053.005 - Hidden Scheduled Tasks (SD Manipulation and Tree Hiding)",
+        indicator: "Tasks present in C:\\Windows\\System32\\Tasks XML but missing from schtasks.exe enumeration - registry/filesystem diff reveals hidden tasks",
+        sysmon: `// Hidden task creation typically involves direct
+// registry/filesystem manipulation rather than
+// schtasks.exe, so process-based detection misses it.
+
+// EID 11 (FileCreate) catching task XML write:
+EventID=11
+TargetFilename=C:\\Windows\\System32\\Tasks\\*
+
+// EID 13 catching TaskCache registry manipulation:
+EventID=13
+TargetObject matches:
+  *\\Schedule\\TaskCache\\Tree\\*
+  OR *\\Schedule\\TaskCache\\Tasks\\*
+
+// Cross-correlate: XML written without corresponding
+// schtasks.exe process creation = direct manipulation
+
+// Security Event 4698 (created) WITHOUT a paired
+// schtasks.exe Sysmon EID 1 is unusual:
+EventID=4698
+LogName=Security
+// Then look for absence of corresponding EID 1`,
+        kibana: `// Task XML write detected
+winlog.event_id: 11
+AND file.path: C:\\\\Windows\\\\System32\\\\Tasks\\\\*
+
+// TaskCache registry manipulation
+winlog.event_id: 13
+AND registry.path: (*\\Schedule\\TaskCache\\Tree\\* OR *\\Schedule\\TaskCache\\Tasks\\*)
+
+// Security Event 4698 created
+winlog.event_id: 4698
+AND winlog.channel: "Security"`,
+        powershell: `# Hunt for hidden scheduled tasks - filesystem vs SCM diff
+
+# Method 1: Tasks in filesystem but not visible to Get-ScheduledTask
+$visibleTasks = Get-ScheduledTask | ForEach-Object {
+  ($_.TaskPath + $_.TaskName).TrimStart('\\\\')
+}
+
+$fsTasks = Get-ChildItem 'C:\\Windows\\System32\\Tasks' -Recurse -File |
+  ForEach-Object {
+    $_.FullName.Replace('C:\\Windows\\System32\\Tasks\\','').Replace('\\\\','\\\\')
+  }
+
+$hidden = $fsTasks | Where-Object { $_ -notin $visibleTasks }
+
+if ($hidden) {
+  Write-Host "Potentially hidden tasks (filesystem but not enumerable):" -ForegroundColor Red
+  $hidden | ForEach-Object {
+    $path = "C:\\Windows\\System32\\Tasks\\$_"
+    if (Test-Path $path) {
+      [PSCustomObject]@{
+        TaskPath = $_
+        XmlFile = $path
+        Created = (Get-Item $path).CreationTime
+        Modified = (Get-Item $path).LastWriteTime
+        Size = (Get-Item $path).Length
+      }
+    }
+  }
+} else {
+  Write-Host "No hidden tasks detected via filesystem/SCM diff" -ForegroundColor Green
+}
+
+# Method 2: Check TaskCache registry for orphaned entries
+$registryGuids = Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tasks' |
+  Select-Object -ExpandProperty PSChildName
+
+$treeGuids = @()
+function Get-AllTreeTasks($key) {
+  Get-ChildItem $key -EA SilentlyContinue | ForEach-Object {
+    $id = (Get-ItemProperty $_.PSPath -Name Id -EA SilentlyContinue).Id
+    if ($id) { $script:treeGuids += $id }
+    Get-AllTreeTasks $_.PSPath
+  }
+}
+Get-AllTreeTasks 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\TaskCache\\Tree'
+
+# GUIDs in Tasks key but not in Tree = orphaned/hidden tasks
+$orphans = $registryGuids | Where-Object { $_ -notin $treeGuids }
+if ($orphans) {
+  Write-Host "Orphaned task GUIDs (in Tasks key but not in Tree):" -ForegroundColor Red
+  $orphans
+}
+
+# Method 3: Read raw task XML for tasks that Get-ScheduledTask
+# may not fully surface
+Get-ChildItem 'C:\\Windows\\System32\\Tasks' -Recurse -File | ForEach-Object {
+  try {
+    $xml = [xml](Get-Content $_.FullName -Raw)
+    [PSCustomObject]@{
+      Path = $_.FullName
+      Author = $xml.Task.RegistrationInfo.Author
+      RunAs = $xml.Task.Principals.Principal.UserId
+      Trigger = ($xml.Task.Triggers.ChildNodes.Name) -join ', '
+      Action = ($xml.Task.Actions.Exec.Command + ' ' + $xml.Task.Actions.Exec.Arguments)
+    }
+  } catch { }
+}`,
+        registry: `Scheduled task storage structure (Windows 10+):
+
+Filesystem:
+C:\\Windows\\System32\\Tasks\\<TaskPath>\\<TaskName>
+- XML file with full task definition
+- This is the canonical task storage
+
+Registry mirror:
+HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Schedule\\
+  TaskCache\\
+    Tree\\<TaskPath>\\<TaskName>\\
+      Id = {GUID}  (links to Tasks key below)
+      Index = <byte>
+    Tasks\\{GUID}\\
+      Actions = REG_BINARY  (action data)
+      Triggers = REG_BINARY (trigger data)
+      DynamicInfo = REG_BINARY (last run/result)
+      Path = <task path back-reference>
+
+Hiding techniques:
+
+1. Filesystem only, no registry entry:
+   - Write task XML to C:\\Windows\\System32\\Tasks
+   - Skip the registry TaskCache entries
+   - Get-ScheduledTask uses registry - misses it
+   - Task may or may not run depending on Windows version
+     (newer Windows requires both)
+
+2. Registry only, no filesystem XML:
+   - Write to TaskCache\\Tasks\\{GUID}
+   - Reverses the above hiding pattern
+   - Less common but documented in some malware
+
+3. Security descriptor manipulation:
+   - HKLM\\...\\Schedule\\TaskCache\\Tree\\<task>\\
+     SD = REG_BINARY (security descriptor)
+   - Modify SD to deny enumeration access
+   - Get-ScheduledTask and schtasks /query miss it
+   - Task still runs because Task Scheduler service
+     uses a different privilege level
+
+4. Tree entry hidden, GUID entry present:
+   - Delete the Tree\\<TaskName>\\Id value
+   - Task data still in Tasks\\{GUID} - task runs
+   - Tree enumeration misses the entry
+   - PowerShell COM API and schtasks /query both miss it
+
+Detection approaches:
+
+- Diff filesystem vs Get-ScheduledTask output
+  (shown in script above)
+- Check TaskCache\\Tasks GUIDs against Tree entries
+  (shown in script above)
+- Inspect task SD values for non-default ACLs:
+  Get-Item 'HKLM:\\...\\TaskCache\\Tree\\<name>' |
+  Get-Acl | Select-Object -Expand AccessToString
+
+The XML-based hunt approach reads C:\\Windows\\System32\\
+Tasks directly and bypasses any registry-based hiding -
+even tasks hidden via SD manipulation in the registry
+remain visible if their XML still exists.`,
+        tools: `Hidden scheduled task tradecraft:
+
+Known adversary toolkits:
+- Various custom implants used by capable operators
+- Reported in Mandiant / CrowdStrike intrusion analyses
+- Documented use by Tarrask malware family
+  (Microsoft 2022 disclosure on HAFNIUM tradecraft)
+
+Tarrask specifically (HAFNIUM):
+- Created scheduled tasks with deleted SD security
+  descriptor in registry
+- Tasks invisible to schtasks.exe and services.msc
+- Persisted for months in long-dwell intrusions
+- Microsoft's 2022 disclosure brought the technique
+  into mainstream defender awareness
+
+Standard implementation approach:
+1. Create task via schtasks.exe or COM API (visible)
+2. Modify TaskCache\\Tree\\<name>\\SD value to deny
+   enumeration access OR delete the SD value entirely
+3. Optional: also remove the Tree\\<name>\\Id mapping
+   so registry-based enumeration misses it
+4. Task XML remains in filesystem - the run mechanism
+   uses it - but standard enumeration tools don't
+   surface the task
+
+Detection note:
+- This is sophisticated tradecraft - typically
+  associated with APT-level operators
+- Commodity malware rarely bothers with this
+- Finding hidden tasks is high-confidence signal
+  of capable / deliberate compromise
+
+Defensive recommendation:
+- Always cross-reference filesystem (System32\\Tasks)
+  against schtasks.exe / Get-ScheduledTask output
+- Use Velociraptor or similar XML-based enumeration
+  rather than relying on the registry path alone`,
+        ossdetect: `Sigma:
+- file_event_win_scheduled_task_xml_creation.yml
+- registry_event_taskcache_modification.yml
+- registry_event_taskcache_sd_modification.yml
+
+Atomic Red Team:
+- T1053.005 has tests for task creation variants
+- Hidden task variant less commonly automated
+
+Hayabusa:
+- ScheduledTaskXmlWrite rules (EID 11)
+- TaskCacheModification rules (EID 13)
+
+Velociraptor:
+- Windows.System.ScheduledTasks
+  (parses XML directly - surfaces hidden tasks
+  that registry-based tools miss)
+- Best single tool for fleet-wide hunting
+
+Microsoft references:
+- 'Tarrask malware uses scheduled tasks for defense
+  evasion' (Microsoft Threat Intelligence, 2022)
+- Foundational reference for SD-based task hiding
+- HAFNIUM tradecraft documentation
+
+KAPE (Eric Zimmerman):
+- Targets/Compound/ScheduledTasks.tkape
+  (collects both XML files and registry hive)
+- Enables offline forensic analysis of
+  both visible and hidden tasks`,
+        notes: "Hidden scheduled tasks via SD manipulation came to mainstream attention in April 2022 when Microsoft disclosed the Tarrask malware family used by HAFNIUM (China-nexus). The technique exploits the gap between how tasks are stored (filesystem XML + registry TaskCache mirror) and how they're typically enumerated (schtasks.exe and Get-ScheduledTask use the registry). By modifying or deleting the security descriptor on the TaskCache\\Tree registry entry, the adversary makes the task invisible to standard tools while leaving the XML in place so it still runs. The filesystem-vs-SCM diff in the PowerShell script is the most reliable detection because it bypasses the registry entirely - if the XML exists in C:\\Windows\\System32\\Tasks but Get-ScheduledTask doesn't list it, something is hiding it. This is one of those techniques that's rare enough that most defenders don't actively look for it, which makes it disproportionately valuable for adversaries who do use it. Tarrask persisted in HAFNIUM intrusions for months in some cases before being detected. Pair this hunt with the standard task enumeration in the previous indicator: together they cover both visible-but-suspicious tasks and tasks that have been deliberately hidden. Velociraptor's Windows.System.ScheduledTasks is the best fleet-wide tool because it reads XML directly rather than depending on the registry path.",
+        apt: [
+          { cls: "apt-cn", name: "HAFNIUM", note: "Tarrask malware - documented use of SD manipulation to hide scheduled tasks across long-dwell intrusions." },
+          { cls: "apt-cn", name: "APT41", note: "Hidden task tradecraft documented in sector-targeting operations." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "Hidden tasks indicate deliberate evasion focus - rare in commodity malware, common in APT operations." },
+          { cls: "apt-mul", name: "Red Teams", note: "Custom implants supporting hidden task creation documented in advanced red team toolkits." }
+        ],
         cite: "MITRE ATT&CK T1053.005"
       }
     ]
@@ -1686,17 +2153,985 @@ Manual workflow:
     desc: "LNK files in startup folders, modified existing LNK targets - shortcut-based persistence",
     rows: [
       {
-        sub: "T1547.009 - Coming Soon",
-        indicator: "Full content for T1547.009 Shortcut Modification coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: LNK creation in Startup folder, modification of existing user LNKs (Quick Launch, desktop, Recent) to point to malicious targets. 2 indicators planned.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1547.009 - LNK File in Startup Folder",
+        indicator: "LNK shortcut written to per-user or all-users Startup folder - file launched at every logon",
+        sysmon: `// Real-time detection - LNK file create in Startup folder:
+EventID=11
+TargetFilename matches:
+  *\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\*.lnk
+  OR *\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp\\*.lnk
+
+// Also catch non-LNK files in Startup folder
+// (some adversaries drop .exe/.bat/.vbs directly):
+EventID=11
+TargetFilename matches:
+  *\\Start Menu\\Programs\\Startup\\*
+  OR *\\Start Menu\\Programs\\StartUp\\*
+
+// LNK execution at logon - explorer parent + LNK target:
+EventID=1
+ParentImage=*\\explorer.exe
+CommandLine matches: suspicious interpreter or path
+// (the LNK launches whatever its target says)`,
+        kibana: `// LNK file creation in Startup folders
+winlog.event_id: 11
+AND file.extension: "lnk"
+AND file.path: (*\\Start Menu\\Programs\\Startup\\* OR *\\Start Menu\\Programs\\StartUp\\*)
+
+// Any file dropped to Startup folder (LNK or otherwise)
+winlog.event_id: 11
+AND file.path: (*\\Start Menu\\Programs\\Startup\\* OR *\\Start Menu\\Programs\\StartUp\\*)
+
+// LNK-launched suspicious process at logon
+winlog.event_id: 1
+AND process.parent.name: "explorer.exe"
+AND process.command_line: (*powershell* OR *cmd.exe* OR *wscript* OR *mshta* OR *rundll32*)
+AND process.command_line: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *http* OR *EncodedCommand*)`,
+        powershell: `# Hunt for LNK files in Startup folders + parse their targets
+
+$startupPaths = @(
+  "$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp",
+  "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+)
+
+# Some systems have additional per-user paths - enumerate all users:
+$additionalPaths = Get-ChildItem 'C:\\Users' -Directory -EA SilentlyContinue | ForEach-Object {
+  Join-Path $_.FullName 'AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup'
+} | Where-Object { Test-Path $_ }
+
+$allPaths = $startupPaths + $additionalPaths | Sort-Object -Unique
+
+$shell = New-Object -ComObject WScript.Shell
+
+foreach ($path in $allPaths) {
+  if (-not (Test-Path $path)) { continue }
+
+  Get-ChildItem $path -File | ForEach-Object {
+    $suspicious = @()
+
+    if ($_.Extension -eq '.lnk') {
+      # Parse LNK target/args
+      try {
+        $lnk = $shell.CreateShortcut($_.FullName)
+        $target = $lnk.TargetPath
+        $args = $lnk.Arguments
+
+        # Check 1: LNK target is an interpreter
+        if ($target -match '(powershell|cmd\\.exe|wscript|cscript|mshta|rundll32|regsvr32)') {
+          $suspicious += "Target invokes interpreter"
+        }
+
+        # Check 2: LNK target in user-writable path
+        if ($target -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public)') {
+          $suspicious += "Target in user-writable path"
+        }
+
+        # Check 3: Arguments contain risk keywords
+        if ($args -match '(ExecutionPolicy.*Bypass|EncodedCommand|WindowStyle.*Hidden|vbscript:|javascript:|http://|https://)') {
+          $suspicious += "Risky arguments"
+        }
+
+        # Check 4: Target unsigned (if it exists)
+        if ($target -and (Test-Path $target)) {
+          $sig = Get-AuthenticodeSignature $target -EA SilentlyContinue
+          if ($sig.Status -ne 'Valid') {
+            $suspicious += "Target unsigned ($($sig.Status))"
+          }
+        }
+
+        [PSCustomObject]@{
+          Path = $_.FullName
+          Type = 'LNK'
+          Target = $target
+          Arguments = $args
+          Created = $_.CreationTime
+          Modified = $_.LastWriteTime
+          Suspicious = if ($suspicious) { $suspicious -join '; ' } else { '' }
+        }
+      } catch {
+        Write-Warning "Failed to parse $($_.FullName): $_"
+      }
+    } else {
+      # Non-LNK file in Startup folder (always worth flagging)
+      $suspicious += "Non-LNK file in Startup folder (.$($_.Extension))"
+
+      [PSCustomObject]@{
+        Path = $_.FullName
+        Type = $_.Extension
+        Target = $_.FullName
+        Arguments = ''
+        Created = $_.CreationTime
+        Modified = $_.LastWriteTime
+        Suspicious = $suspicious -join '; '
+      }
+    }
+  }
+} | Sort-Object Suspicious -Descending | Format-Table -AutoSize`,
+        registry: `Startup folder paths:
+
+All-users (machine-wide, requires admin to write):
+C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\
+  Programs\\StartUp\\
+
+Per-user (any user can write to their own):
+C:\\Users\\<user>\\AppData\\Roaming\\Microsoft\\
+  Windows\\Start Menu\\Programs\\Startup\\
+
+Note the casing: 'StartUp' (machine) vs 'Startup'
+(per-user) - Microsoft's inconsistency. File system
+is case-insensitive so detection patterns work
+either way but it's worth knowing.
+
+Files in these folders launch at logon - any
+extension that Windows knows how to execute:
+- .lnk (most common - shortcut to actual binary)
+- .exe (direct binary)
+- .bat / .cmd (batch script)
+- .vbs / .vbe (VBScript)
+- .js / .jse (JScript)
+- .ps1 (PowerShell - only if execution policy allows)
+- .hta (HTA - launches via mshta.exe)
+
+LNK file structure (binary format):
+- Inspect with LECmd (Eric Zimmerman) or
+  PowerShell WScript.Shell COM object (shown above)
+- Key fields:
+  - TargetPath: the binary actually launched
+  - Arguments: command-line arguments
+  - WorkingDirectory: where target runs from
+  - IconLocation: icon path (often spoofed -
+    document icon on a cmd-launching LNK)
+  - Description: tooltip (often blank for adversary
+    LNKs)
+  - Hotkey: keyboard shortcut (rare for malicious)
+
+Registry mirror of Startup folder location:
+HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
+  Explorer\\Shell Folders\\Startup
+HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\
+  Explorer\\User Shell Folders\\Startup
+- Default values point to the per-user Startup path
+- Adversaries occasionally REDIRECT these to a
+  different folder they control - rare but documented
+- Worth checking these registry values match the
+  expected default path
+
+File creation timestamps:
+- LNK files have their own MACB timestamps
+- LNK files also EMBED target file timestamps
+  inside the binary structure
+- Useful for forensic timeline reconstruction`,
+        tools: `LNK creation methods:
+
+Built-in Windows:
+- Right-click > New > Shortcut (GUI)
+- PowerShell WScript.Shell COM object (most common
+  for adversary use):
+    $s = New-Object -ComObject WScript.Shell
+    $lnk = $s.CreateShortcut("$startupPath\\Update.lnk")
+    $lnk.TargetPath = "C:\\Windows\\System32\\powershell.exe"
+    $lnk.Arguments = "-ep bypass -w hidden -file C:\\path\\payload.ps1"
+    $lnk.Save()
+
+Adversary frameworks:
+- SharPersist (/t startupfolder)
+- Empire / Starkiller persistence modules
+- Cobalt Strike persistence aggressor scripts
+- Most commodity malware uses this technique:
+  Emotet, IcedID, QakBot, AgentTesla, RemcosRAT,
+  NjRAT, DarkComet, and many more
+
+Common adversary LNK patterns:
+- LNK named to mimic legitimate startup items:
+  "Microsoft Office Quick Start.lnk"
+  "OneDrive.lnk", "Adobe Updater.lnk"
+- TargetPath = powershell.exe or wscript.exe
+- Arguments contain encoded/obfuscated payload
+- IconLocation set to mimic the spoofed app icon
+- Working directory = user's home folder (looks normal)
+
+Detection note:
+- Per-user startup is more common because it requires
+  no admin privileges - any compromised user can
+  persist their own session
+- All-users startup requires admin and indicates
+  more capable / privileged compromise
+
+Non-LNK files in Startup folder:
+- Adversaries occasionally drop .exe, .bat, .vbs
+  directly without using LNK
+- Slightly noisier (less common in legitimate use)
+- Same detection - any file in Startup folder warrants
+  inspection`,
+        ossdetect: `Sigma:
+- file_event_win_startup_folder_persistence.yml
+- file_event_win_lnk_creation_in_startup.yml
+- proc_creation_win_susp_explorer_child.yml
+  (catches the execution side at logon)
+
+Atomic Red Team:
+- T1547.001 (includes Startup folder tests)
+- T1547.009 Test #1 (LNK file creation in Startup)
+- T1547.009 Test #2 (modified existing LNK target)
+
+Hayabusa:
+- StartupFolderFileWrite rules (EID 11)
+- LnkLaunchingInterpreter detection (EID 1)
+
+Velociraptor:
+- Windows.Sys.AutoRuns
+  (enumerates Startup folder contents alongside
+  Run keys and other autostart locations)
+- Windows.Forensics.Lnk
+  (LNK file parser - extracts target, arguments,
+  working dir, and embedded timestamps)
+
+Sysinternals autoruns.exe:
+- Logon tab includes Startup folder entries
+- Highlights non-Microsoft signed entries
+- Excellent for manual IR triage
+
+LECmd by Eric Zimmerman:
+- Standalone LNK file parser
+- Extracts every field including hidden ones
+- Free tool, essential for LNK forensic work
+- Useful when handling LNKs collected from
+  a forensic image rather than live host`,
+        notes: "Startup folder persistence is the filesystem complement to Run key persistence - same effect (run at logon), different mechanism. The technique is universal: virtually every commodity malware family uses either Run keys, Startup folder LNKs, or both. The detection focus is twofold: real-time file creation in Startup paths (Sysmon EID 11) and hunting established LNKs with suspicious targets. The PowerShell LNK parser in the script is genuinely useful - it reads every LNK in every Startup path, parses the COM-accessible properties (TargetPath, Arguments, WorkingDirectory), and flags ones that point to interpreters or user-writable paths. Per-user Startup is more common than all-users because it requires no admin privileges - any compromised user account can persist itself. The non-LNK file check matters: while most adversary persistence uses LNK shortcuts, some malware drops .vbs or .bat files directly into the Startup folder. Any non-LNK file in a Startup folder is worth investigating because legitimate software almost always uses LNK shortcuts for startup entries. False positives: legitimate vendor software does create LNKs in the all-users Startup folder during install - signature checking on the LNK target binary helps filter these out.",
+        apt: [
+          { cls: "apt-mul", name: "Commodity Malware", note: "Universal across Emotet, IcedID, QakBot, AgentTesla, RemcosRAT, NjRAT, and most RAT families." },
+          { cls: "apt-ru", name: "APT28", note: "Startup folder LNK persistence documented in spearphishing campaigns." },
+          { cls: "apt-cn", name: "APT41", note: "Startup folder persistence documented across multiple sector intrusions." },
+          { cls: "apt-kp", name: "Lazarus", note: "LNK-based startup persistence documented in CISA advisories on DPRK operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Persistence via Startup folder documented across most ransomware families." }
+        ],
         cite: "MITRE ATT&CK T1547.009"
+      },
+      {
+        sub: "T1547.009 - Modified Existing LNK with Malicious Target",
+        indicator: "Pre-existing legitimate LNK shortcut modified to point to attacker-controlled binary - hijacks normal user behavior",
+        sysmon: `// Modification of existing LNK (vs creation):
+EventID=11 (FileCreate fires on overwrite too)
+TargetFilename=*.lnk
+
+// Useful filter: LNK file MODIFIED (not created)
+// in user shortcut locations:
+TargetFilename matches:
+  *\\Desktop\\*.lnk
+  OR *\\Roaming\\Microsoft\\Windows\\Recent\\*.lnk
+  OR *\\Roaming\\Microsoft\\Internet Explorer\\Quick Launch\\*.lnk
+  OR *\\Microsoft\\Windows\\Start Menu\\Programs\\*.lnk
+  (existing LNK overwritten in any of these)
+
+// Process spawning from a hijacked LNK:
+EventID=1
+ParentImage=*\\explorer.exe
+CommandLine matches: suspicious interpreter or args
+// (same pattern as Startup folder LNK execution,
+// but triggered when user clicks any modified shortcut)`,
+        kibana: `// LNK file write in user shortcut locations
+// (modification of existing LNKs - higher fidelity
+// than alerting on any LNK creation)
+winlog.event_id: 11
+AND file.extension: "lnk"
+AND file.path: (*\\Desktop\\* OR *\\Quick Launch\\* OR *\\Start Menu\\Programs\\*)
+
+// Suspicious explorer-spawned process with risky args
+winlog.event_id: 1
+AND process.parent.name: "explorer.exe"
+AND process.command_line: (*ExecutionPolicy*Bypass* OR *EncodedCommand* OR *WindowStyle*Hidden* OR *vbscript\:* OR *javascript\:*)`,
+        powershell: `# Hunt for LNKs in user shortcut locations with suspicious targets
+# Covers Desktop, Quick Launch, Start Menu, Recent
+
+$searchPaths = @(
+  "$env:USERPROFILE\\Desktop",
+  "$env:PUBLIC\\Desktop",
+  "$env:APPDATA\\Microsoft\\Windows\\Recent",
+  "$env:APPDATA\\Microsoft\\Internet Explorer\\Quick Launch",
+  "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs",
+  "$env:PROGRAMDATA\\Microsoft\\Windows\\Start Menu\\Programs"
+)
+
+# Enumerate per-user paths across all users:
+$additionalPaths = Get-ChildItem 'C:\\Users' -Directory -EA SilentlyContinue | ForEach-Object {
+  @(
+    Join-Path $_.FullName 'Desktop'
+    Join-Path $_.FullName 'AppData\\Roaming\\Microsoft\\Windows\\Recent'
+    Join-Path $_.FullName 'AppData\\Roaming\\Microsoft\\Internet Explorer\\Quick Launch'
+    Join-Path $_.FullName 'AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs'
+  )
+} | Where-Object { Test-Path $_ }
+
+$allPaths = $searchPaths + $additionalPaths | Sort-Object -Unique
+
+$shell = New-Object -ComObject WScript.Shell
+
+foreach ($path in $allPaths) {
+  if (-not (Test-Path $path)) { continue }
+
+  Get-ChildItem $path -Filter *.lnk -File -Recurse -EA SilentlyContinue | ForEach-Object {
+    try {
+      $lnk = $shell.CreateShortcut($_.FullName)
+      $target = $lnk.TargetPath
+      $args = $lnk.Arguments
+      $iconLoc = $lnk.IconLocation
+
+      $suspicious = @()
+
+      # Target is an interpreter - high signal
+      if ($target -match '(powershell|cmd\\.exe|wscript|cscript|mshta|rundll32|regsvr32)') {
+        $suspicious += "Target invokes interpreter"
+      }
+
+      # Target in user-writable path
+      if ($target -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public)') {
+        $suspicious += "Target in user-writable path"
+      }
+
+      # Arguments with risk keywords
+      if ($args -match '(ExecutionPolicy.*Bypass|EncodedCommand|WindowStyle.*Hidden|vbscript:|javascript:|http://|https://)') {
+        $suspicious += "Risky arguments"
+      }
+
+      # Icon spoofing: icon path != target path base
+      # (legitimate LNKs usually have icon matching target)
+      if ($iconLoc -and $target) {
+        $iconBase = ($iconLoc -split ',')[0]
+        if ($iconBase -and $iconBase -ne $target -and
+            $iconBase -match '\\.(exe|dll|ico)$' -and
+            (Split-Path $iconBase -Leaf) -ne (Split-Path $target -Leaf)) {
+          $suspicious += "Icon mismatch (possible icon spoof)"
+        }
+      }
+
+      # LNK modified recently but target is old / mismatched
+      $lnkMod = $_.LastWriteTime
+      if ((Test-Path $target) -and ((Get-Item $target).CreationTime -gt $lnkMod.AddDays(-30))) {
+        # Target binary younger than 30 days but LNK is older - suspicious
+        if ($lnkMod -lt (Get-Date).AddDays(-90)) {
+          $suspicious += "LNK modified recently, but its target binary is newer than LNK creation"
+        }
+      }
+
+      if ($suspicious.Count -gt 0) {
+        [PSCustomObject]@{
+          LnkFile     = $_.FullName
+          Target      = $target
+          Arguments   = $args
+          IconLocation = $iconLoc
+          LnkModified = $lnkMod
+          Suspicious  = $suspicious -join '; '
+        }
+      }
+    } catch {
+      # Skip unreadable LNKs
+    }
+  }
+} | Sort-Object Suspicious -Descending | Format-Table -AutoSize`,
+        registry: `LNK file locations for shortcut hijacking:
+
+User Desktop (per-user):
+- C:\\Users\\<user>\\Desktop\\*.lnk
+- High-value target: shortcuts user clicks daily
+- Modifying Chrome.lnk on desktop = persistence
+  every time user opens Chrome
+
+Public Desktop (all users):
+- C:\\Users\\Public\\Desktop\\*.lnk
+- Same idea, all-users visibility
+
+Quick Launch / Pinned Taskbar items:
+- %APPDATA%\\Microsoft\\Internet Explorer\\
+    Quick Launch\\*.lnk
+- %APPDATA%\\Microsoft\\Internet Explorer\\
+    Quick Launch\\User Pinned\\TaskBar\\*.lnk
+- Pinned taskbar items live here as LNKs
+- Modifying them hijacks every taskbar click
+
+Start Menu:
+- %APPDATA%\\Microsoft\\Windows\\Start Menu\\
+    Programs\\*.lnk (per-user)
+- %PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\
+    Programs\\*.lnk (all users)
+- Triggered when user opens Start menu and clicks
+  the LNK
+
+Recent files:
+- %APPDATA%\\Microsoft\\Windows\\Recent\\*.lnk
+- Created automatically by Windows when documents
+  opened
+- Less common adversary target but documented
+
+Adversary tradecraft for LNK hijacking:
+1. Identify high-value user shortcuts (browser,
+   email client, IDE - whatever the user clicks
+   most often)
+2. Read original LNK target with WScript.Shell
+3. Replace TargetPath with attacker binary
+4. (Optionally) keep IconLocation pointing to
+   original binary so the icon looks normal
+5. (Optionally) have attacker binary launch the
+   original binary as a child - user sees expected
+   behavior, doesn't notice compromise
+
+Detection focus:
+- LNK with Target != IconLocation base (icon spoof)
+- LNK with Target pointing to interpreter
+- LNK in user shortcut location modified after
+  initial creation (modification timestamp newer
+  than creation timestamp + 24 hours)
+- LNK Author / Description fields suggesting
+  Microsoft origin but TargetPath outside
+  Microsoft installation directories`,
+        tools: `Existing-LNK hijack tradecraft:
+
+This technique is less common than dropping a new
+LNK in Startup folder because:
+- Requires read-and-modify operation (more API calls)
+- User may notice if launch behavior changes
+- More forensic evidence (modified-not-created LNK)
+
+When used, typically by:
+- Targeted operators (manual LNK modification)
+- Custom red team implants
+- Some sophisticated malware variants
+
+Standard implementation:
+$shell = New-Object -ComObject WScript.Shell
+$lnk = $shell.CreateShortcut(
+  "C:\\Users\\victim\\Desktop\\Chrome.lnk")
+$originalTarget = $lnk.TargetPath
+# Replace with malicious wrapper:
+$lnk.TargetPath = "C:\\ProgramData\\wrapper.exe"
+$lnk.Arguments = $originalTarget  # pass original
+                                  # as arg
+$lnk.Save()
+# wrapper.exe runs adversary code, then launches
+# original Chrome with the passed argument so user
+# sees expected behavior
+
+Why this technique is harder to detect than
+fresh-LNK-in-Startup:
+- LNK already exists - file creation alerts don't fire
+- LNK already trusted by user
+- Hijacked LNK launches at every user click,
+  no schedule needed
+- Forensic signal is the MODIFICATION timestamp,
+  not creation - requires explicit hunting
+
+Pair with execution-time detection: when user
+clicks the hijacked LNK, explorer.exe spawns the
+malicious target - same Sysmon EID 1 pattern as
+T1204.002 indicator 2 (suspicious LNK targets).
+
+Less common variant: LNK with Description field
+modified to suggest legitimate Microsoft software
+while TargetPath points elsewhere - relies on
+defenders not parsing LNK contents thoroughly.`,
+        ossdetect: `Sigma:
+- file_event_win_lnk_modification_user_locations.yml
+- proc_creation_win_lnk_susp_target.yml
+- file_event_win_lnk_icon_target_mismatch.yml
+
+Atomic Red Team:
+- T1547.009 Test #2 (existing LNK target modified)
+
+Hayabusa:
+- LnkModificationInUserPath rules
+- LnkIconTargetMismatch detection
+
+Velociraptor:
+- Windows.Forensics.Lnk
+  (LNK file parser with target/icon analysis)
+- Custom artifact possible for icon-vs-target diff
+
+LECmd (Eric Zimmerman):
+- Standalone LNK parser
+- Best for offline forensic analysis
+- Returns all LNK fields including embedded
+  timestamps that can show original creation vs
+  later modification
+
+Sysinternals autoruns.exe:
+- Logon tab covers Startup folder LNKs but does
+  NOT enumerate Desktop / Quick Launch / Recent
+- This indicator's PowerShell sweep complements
+  autoruns by covering those gaps
+
+Reference:
+- LNK file format documentation (Microsoft)
+- Forensic Wiki - LNK file analysis
+- LECmd documentation for field interpretation`,
+        notes: "LNK hijacking is the more sophisticated cousin of Startup folder LNK persistence. Instead of dropping a new shortcut in Startup, the adversary modifies a pre-existing shortcut the user already clicks regularly (browser, email client, IDE on the desktop or taskbar). The hijack triggers every time the user clicks that shortcut, providing persistence without a scheduled task or registry entry. The detection challenge: legitimate software occasionally modifies existing LNKs during updates (updating the target path when the binary moves to a versioned subdirectory), so 'any LNK modification' is too noisy. The PowerShell hunt focuses on suspicious target characteristics (interpreter, user-writable path, risky arguments) and icon-vs-target mismatch which is a strong indicator of the wrapper-and-launch hijack pattern - the LNK still has Chrome's icon but the target is now wrapper.exe. The technique is less common than Startup folder LNK persistence because it requires reading-and-modifying an existing file rather than just dropping a new one, but when found it's higher-confidence malicious because legitimate software very rarely targets pre-existing user shortcuts for modification. Pair this hunt with T1204.002 (User Execution) which covers the execution side when the user clicks the hijacked LNK.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "LNK modification documented in operations targeting multiple sectors." },
+          { cls: "apt-cn", name: "Mustang Panda", note: "LNK-based persistence including modification of existing shortcuts documented in operations against Southeast Asian governments." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "LNK hijacking indicates deliberate operator presence - rare in commodity malware, more common in targeted operations." },
+          { cls: "apt-mul", name: "Red Teams", note: "Existing LNK hijacking documented in red team toolkits for evasive persistence." }
+        ],
+        cite: "MITRE ATT&CK T1547.009"
+      }
+    ]
+  },
+  {
+    id: "T1037",
+    name: "Boot or Logon Initialization Scripts",
+    desc: "Registry logon scripts, GPO logon/startup scripts, SYSVOL-based domain-wide persistence",
+    rows: [
+      {
+        sub: "T1037.001 - Registry-Based Logon Script (UserInitMprLogonScript)",
+        indicator: "HKCU\\Environment\\UserInitMprLogonScript value set - obscure registry-based logon script trigger with near-zero legitimate use",
+        sysmon: `// Real-time registry write to the logon script value:
+EventID=13
+TargetObject=*\\Environment\\UserInitMprLogonScript
+
+// Also watch the less common variants:
+EventID=13
+TargetObject matches:
+  *\\Environment\\UserInitMprLogonScript
+  OR *\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\
+       Userinit
+  OR *\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\
+       AppInit_DLLs
+
+// Process execution from logon script trigger:
+EventID=1
+ParentImage=*\\userinit.exe
+// userinit.exe is the standard logon driver - it
+// spawns explorer and runs any configured scripts.
+// Children of userinit.exe OTHER than explorer.exe
+// are worth scrutiny.`,
+        kibana: `// Primary: UserInitMprLogonScript write
+winlog.event_id: 13
+AND registry.path: *\\Environment\\UserInitMprLogonScript
+
+// Userinit registry modification (different but related)
+winlog.event_id: 13
+AND registry.path: *\\Winlogon\\Userinit
+
+// userinit.exe spawning unexpected children
+winlog.event_id: 1
+AND process.parent.name: "userinit.exe"
+AND NOT process.name: "explorer.exe"`,
+        powershell: `# Hunt for UserInitMprLogonScript across all user hives
+# This is the obscure-but-effective logon script trigger
+
+# Current user
+$current = Get-ItemProperty 'HKCU:\\Environment' -Name UserInitMprLogonScript -EA SilentlyContinue
+if ($current.UserInitMprLogonScript) {
+  [PSCustomObject]@{
+    User = $env:USERNAME
+    Hive = 'HKCU (current)'
+    Value = $current.UserInitMprLogonScript
+  }
+}
+
+# All loaded user hives via HKU
+Get-ChildItem 'HKU:\\' -EA SilentlyContinue | Where-Object {
+  $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$'
+} | ForEach-Object {
+  $sid = $_.PSChildName
+  $envKey = "HKU:\\$sid\\Environment"
+  if (Test-Path $envKey) {
+    $val = (Get-ItemProperty $envKey -Name UserInitMprLogonScript -EA SilentlyContinue).UserInitMprLogonScript
+    if ($val) {
+      [PSCustomObject]@{
+        User = $sid
+        Hive = "HKU\\$sid"
+        Value = $val
+      }
+    }
+  }
+}
+
+# Also check the related Winlogon\\Userinit value (system-wide)
+# Default value is C:\\Windows\\system32\\userinit.exe,
+# anything additional here is suspicious
+$userinit = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon' -Name Userinit -EA SilentlyContinue
+[PSCustomObject]@{
+  Source = 'HKLM\\Winlogon\\Userinit'
+  Default = 'C:\\Windows\\system32\\userinit.exe,'
+  Current = $userinit.Userinit
+  Suspicious = ($userinit.Userinit -ne 'C:\\Windows\\system32\\userinit.exe,' -and
+                $userinit.Userinit -notlike 'C:\\Windows\\system32\\userinit.exe,*')
+}`,
+        registry: `Primary logon script registry locations:
+
+HKCU\\Environment\\UserInitMprLogonScript
+- The obscure logon script trigger
+- Per-user, no admin required to set
+- Near-zero legitimate use - GPO mechanisms are
+  the standard for legitimate logon scripts
+- Value is a path to a script or executable
+- Runs at user logon as the logging-on user
+
+HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\
+  Winlogon\\Userinit
+- The Userinit process configuration
+- DEFAULT VALUE: C:\\Windows\\system32\\userinit.exe,
+  (note the trailing comma - intentional)
+- Adversaries APPEND additional paths:
+  C:\\Windows\\system32\\userinit.exe,C:\\malicious.exe
+- All listed paths run at logon
+- Modification requires admin / SYSTEM
+- High-value adversary persistence (machine-wide)
+
+HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\
+  Winlogon\\Shell
+- Default value: explorer.exe
+- Adversaries replace with: explorer.exe,malicious.exe
+  (multiple shells supported)
+- Same-level visibility as Userinit changes
+
+HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\
+  Winlogon\\AppInit_DLLs
+- List of DLLs loaded into every user32.dll-linked
+  process (essentially everything)
+- Disabled by default since Windows 8 if Secure Boot
+  is enabled
+- Still works on older systems / non-Secure-Boot
+- Pair with LoadAppInit_DLLs = 1 to actually activate
+
+Investigation pivots:
+- Get the path/value, then:
+  - Authenticode check on referenced binary
+  - Last-write time on the registry key
+    (Get-Item <key>).LastWriteTime
+- Process tree at logon: did userinit spawn anything
+  unexpected? (Sysmon EID 1, ParentImage=userinit.exe)`,
+        tools: `Adversary use:
+
+The UserInitMprLogonScript value is documented
+in Mandiant / Microsoft post-incident analyses as
+an underutilized persistence vector that bypasses
+many common autorun checks (autoruns.exe DOES
+catch it but custom defender scripts often don't).
+
+Frameworks supporting this technique:
+- Empire / Starkiller persistence modules
+- SharPersist (registry persistence variants)
+- Some commodity malware (less common - prefers
+  the more well-known Run keys)
+- Manual operator persistence in targeted ops
+
+Why adversaries pick this over Run keys:
+- Less commonly checked by defenders
+- Per-user so any user can persist their own session
+- Bypasses some EDR persistence-monitoring focused
+  on Run/RunOnce paths
+- Same effect (runs at logon) with less detection
+
+Winlogon\\Userinit appending tradecraft:
+- Most powerful of this technique family
+- Machine-wide persistence as SYSTEM
+- Runs BEFORE explorer.exe spawns
+- Used by sophisticated operators
+- Requires admin to set up
+
+Detection note:
+- These are not 'common' techniques in commodity
+  malware - finding one suggests deliberate operator
+- The default Userinit value is well-known
+  (C:\\Windows\\system32\\userinit.exe,) - any
+  deviation is anomalous
+
+Sysinternals autoruns.exe coverage:
+- Logon tab includes Userinit, Shell, AppInit_DLLs
+- Also covers UserInitMprLogonScript
+- Best for manual triage of this whole family`,
+        ossdetect: `Sigma:
+- registry_event_userinitmprlogonscript.yml
+- registry_event_winlogon_userinit_modification.yml
+- registry_event_winlogon_shell_modification.yml
+- registry_event_appinit_dll_modification.yml
+
+Atomic Red Team:
+- T1037.001 (logon script via registry tests)
+
+Hayabusa:
+- UserInitMprLogonScript detection rules
+- WinlogonUserinitModification rules
+
+Velociraptor:
+- Windows.Sys.AutoRuns (covers the whole family)
+- Windows.Registry.NTUser (HKCU\\Environment enumeration)
+- Best fleet-wide tooling
+
+Sysinternals autoruns.exe:
+- Logon tab - canonical coverage of this technique
+- Highlights non-default Userinit / Shell values
+- VirusTotal lookup on referenced binaries`,
+        notes: "T1037.001 covers a small but high-signal cluster of logon script triggers. UserInitMprLogonScript is the most under-monitored: it's an obscure registry value that has essentially no legitimate use in modern Windows environments, so any value set there is high-confidence malicious. Compare to Run keys where dozens of legitimate entries exist - a UserInitMprLogonScript value is anomalous on first principles. The Winlogon\\Userinit append trick is more dangerous (runs as SYSTEM, machine-wide) and produces a distinctive artifact: the default value C:\\Windows\\system32\\userinit.exe, (with trailing comma) is well-known, so any deviation immediately stands out. The AppInit_DLLs technique was historically common but is largely defunct on modern Windows (Secure Boot disables it by default since Windows 8) - still worth checking on older systems or environments without Secure Boot enforced. The userinit.exe parent-process check in Sysmon EID 1 is the execution-time complement: userinit.exe spawning anything other than explorer.exe at logon time is worth investigating. This is the kind of technique that finding even once strongly suggests deliberate adversary presence - commodity malware rarely bothers with these because Run keys are simpler and work fine.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Logon script persistence documented across multiple sector intrusions." },
+          { cls: "apt-ru", name: "APT29", note: "Winlogon-family persistence documented in long-dwell espionage operations." },
+          { cls: "apt-kp", name: "Lazarus", note: "Userinit-family persistence documented in CISA advisories on DPRK operations." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "Less-known persistence locations preferred over common Run keys for evasion." },
+          { cls: "apt-mul", name: "Red Teams", note: "Empire and SharPersist support these locations - standard advanced red team persistence." }
+        ],
+        cite: "MITRE ATT&CK T1037.001"
+      },
+      {
+        sub: "T1037.003 - Network Logon Script (Group Policy)",
+        indicator: "Logon or startup script configured via Group Policy - distributed from domain controller SYSVOL to all targeted workstations",
+        sysmon: `// On workstation receiving GPO logon scripts:
+
+// EID 11 - GPO scripts cached locally:
+EventID=11
+TargetFilename matches:
+  *\\System32\\GroupPolicy\\User\\Scripts\\Logon\\*
+  OR *\\System32\\GroupPolicy\\Machine\\Scripts\\Startup\\*
+  OR *\\System32\\GroupPolicy\\Machine\\Scripts\\Shutdown\\*
+
+// EID 1 - script execution at logon/startup:
+EventID=1
+ParentImage=*\\gpscript.exe
+// gpscript.exe is the GPO script runner
+// Children of gpscript indicate logon/startup scripts
+// running - inspect what they execute
+
+// On domain controller (if Sysmon deployed there):
+
+// EID 11 - SYSVOL script changes:
+EventID=11
+TargetFilename matches:
+  *\\SYSVOL\\<domain>\\Policies\\{GUID}\\
+    User\\Scripts\\Logon\\*
+  OR *\\SYSVOL\\<domain>\\Policies\\{GUID}\\
+    Machine\\Scripts\\Startup\\*`,
+        kibana: `// Workstation: GPO script files cached locally
+winlog.event_id: 11
+AND file.path: (*\\GroupPolicy\\User\\Scripts\\Logon\\* OR *\\GroupPolicy\\Machine\\Scripts\\Startup\\* OR *\\GroupPolicy\\Machine\\Scripts\\Shutdown\\*)
+
+// Workstation: gpscript-spawned process at logon/startup
+winlog.event_id: 1
+AND process.parent.name: "gpscript.exe"
+
+// Domain controller: SYSVOL script changes
+winlog.event_id: 11
+AND file.path: *\\SYSVOL\\*\\Policies\\*\\Scripts\\*
+
+// Active Directory audit events (DC-side):
+// 5136 Directory Service object modified
+// 5137 Directory Service object created
+// Filter to attribute changes on GPO objects (gPCMachineExtensionNames, gPCUserExtensionNames)`,
+        powershell: `# Hunt for GPO-pushed logon/startup scripts on a workstation
+
+# 1. Local GPO cache - scripts pulled from domain controller
+$gpoPaths = @(
+  'C:\\Windows\\System32\\GroupPolicy\\User\\Scripts\\Logon',
+  'C:\\Windows\\System32\\GroupPolicy\\User\\Scripts\\Logoff',
+  'C:\\Windows\\System32\\GroupPolicy\\Machine\\Scripts\\Startup',
+  'C:\\Windows\\System32\\GroupPolicy\\Machine\\Scripts\\Shutdown'
+)
+
+foreach ($path in $gpoPaths) {
+  if (Test-Path $path) {
+    Get-ChildItem $path -Recurse -File -EA SilentlyContinue | ForEach-Object {
+      $suspicious = @()
+
+      # Check signature on executable scripts
+      if ($_.Extension -match '\\.(exe|dll|ps1)$') {
+        $sig = Get-AuthenticodeSignature $_.FullName -EA SilentlyContinue
+        if ($sig.Status -ne 'Valid') {
+          $suspicious += "Unsigned binary in GPO script path"
+        }
+      }
+
+      # Read content for batch/script files
+      if ($_.Extension -match '\\.(bat|cmd|vbs|ps1)$') {
+        $content = Get-Content $_.FullName -Raw -EA SilentlyContinue
+        if ($content -match '(http://|https://|powershell.*-enc|EncodedCommand|certutil|bitsadmin|FromBase64String)') {
+          $suspicious += "Suspicious content in script"
+        }
+      }
+
+      [PSCustomObject]@{
+        Path = $_.FullName
+        Size = $_.Length
+        Modified = $_.LastWriteTime
+        Type = if ($path -match 'Logon') { 'Logon' }
+               elseif ($path -match 'Startup') { 'Startup' }
+               elseif ($path -match 'Shutdown') { 'Shutdown' }
+               elseif ($path -match 'Logoff') { 'Logoff' }
+               else { 'Other' }
+        Suspicious = if ($suspicious) { $suspicious -join '; ' } else { '' }
+      }
+    }
+  }
+}
+
+# 2. Group Policy Resultant Set of Policy - what scripts actually apply
+# Requires admin to run gpresult fully
+$report = gpresult /Scope:Computer /R /Z 2>&1 |
+  Select-String -Pattern 'Script Name|Last Time|GPO|Filtering' -Context 0,2
+$report
+
+# 3. Check the registry side of GPO script configuration:
+$scriptKeys = @(
+  'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\\Scripts',
+  'HKCU:\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\\Scripts'
+)
+foreach ($key in $scriptKeys) {
+  if (Test-Path $key) {
+    Write-Host "Found policy script key: $key" -ForegroundColor Yellow
+    Get-ChildItem $key -Recurse | ForEach-Object {
+      Get-ItemProperty $_.PSPath -EA SilentlyContinue
+    }
+  }
+}`,
+        registry: `Group Policy script storage and configuration:
+
+On DOMAIN CONTROLLER (the canonical source):
+\\\\<domain>\\SYSVOL\\<domain>\\Policies\\{GPO-GUID}\\
+  User\\Scripts\\Logon\\
+  User\\Scripts\\Logoff\\
+  Machine\\Scripts\\Startup\\
+  Machine\\Scripts\\Shutdown\\
+- Scripts placed here are distributed to workstations
+- {GPO-GUID} identifies the specific Group Policy Object
+- gpt.ini in the GPO folder defines policy version
+- scripts.ini in Scripts folder lists ordered script
+  execution
+
+On WORKSTATION (the local cache):
+C:\\Windows\\System32\\GroupPolicy\\
+  User\\Scripts\\Logon\\
+  User\\Scripts\\Logoff\\
+  Machine\\Scripts\\Startup\\
+  Machine\\Scripts\\Shutdown\\
+- Cached copy of GPO scripts pulled from domain controller
+- Refreshed at GPO update intervals (default 90 min)
+- Run by gpscript.exe at appropriate trigger
+
+Registry policy configuration:
+HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\\Scripts\\
+  Startup\\<index>\\
+  Shutdown\\<index>\\
+HKCU\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\\Scripts\\
+  Logon\\<index>\\
+  Logoff\\<index>\\
+- Each numbered subkey is a configured script
+- Values: Script (path), Parameters, FileSysPath, GPO link
+- Presence of these keys means GPO scripts are configured
+
+Adversary tradecraft - domain-wide persistence:
+1. Compromise a domain admin account
+2. Create or modify a GPO with malicious logon script
+3. Apply GPO to broad scope (Domain Users group,
+   specific OU, or whole domain)
+4. Script distributes via SYSVOL replication to all DCs
+5. Workstations pull and execute at next logon
+6. Every user in scope runs adversary code at logon
+   on every workstation - massive persistence multiplier
+
+This is one of the highest-impact persistence techniques
+in Active Directory environments - one GPO modification
+can establish persistence on thousands of endpoints
+simultaneously.
+
+Investigation pivots:
+- AD audit events 5136/5137 on DC (GPO modifications)
+- SYSVOL file write events on DC (script content changes)
+- Workstation gpscript.exe child process events
+- Compare GPO version numbers across DCs (replication
+  validation)`,
+        tools: `GPO-based persistence is a sophisticated adversary
+technique - typically requires domain admin
+compromise as a prerequisite.
+
+Used by:
+- APT operators after AD compromise
+- Ransomware operators for mass deployment
+- BloodHound / SharpHound-equipped red teams who
+  identify domain admin paths
+- Various China-nexus and Russia-nexus APT groups
+- Documented heavily in 2017+ as a primary
+  ransomware deployment mechanism
+
+Tool support:
+- New-GPLink / Set-GPLink (built-in PowerShell ActiveDirectory module)
+- Group Policy Management Console (gpmc.msc)
+- SharpGPOAbuse (red team tool for GPO modification)
+- Custom scripts using AD COM objects
+
+Why this is uniquely powerful:
+- One modification = persistence on many endpoints
+- Native AD mechanism - signed/trusted Microsoft code
+- Bypasses endpoint-only persistence detection
+  (the artifact lives on the DC, not the endpoint)
+- Replication ensures redundancy across DCs
+
+Common adversary GPO script patterns:
+- Drop and run beacon binary
+- Add user to local admin group
+- Disable security tools
+- Stage credential dumpers
+- Modify defender registry settings
+
+Detection note:
+This technique is fundamentally about DOMAIN-level
+detection rather than endpoint-only - the most
+valuable telemetry comes from the DC:
+- AD audit logs (EID 5136/5137 on GPO objects)
+- SYSVOL file change monitoring
+- GPO version number tracking
+
+For endpoint detection, focus on:
+- The local GroupPolicy cache (script files cached
+  on workstation)
+- gpscript.exe parent process events at logon/startup
+- Anomalous script content in cached files
+
+Red team reference:
+- 'The Most Dangerous User Right You Probably Never
+  Heard Of' - SpecterOps research on GPO abuse
+- BloodHound documentation on GPO attack paths`,
+        ossdetect: `Sigma:
+- file_event_win_gpo_script_creation.yml
+- proc_creation_win_gpscript_child.yml
+- ad_security_gpo_object_modification.yml (EID 5136)
+
+Atomic Red Team:
+- T1037.003 (network logon script tests)
+- T1484.001 (GPO modification - upstream technique)
+
+Hayabusa:
+- GPOScriptCacheModification rules
+- GpScriptUnexpectedChild detection
+- ADGPOObjectModification (DC-side rules)
+
+Velociraptor:
+- Windows.AD.GPOAnalysis (GPO-focused artifact)
+- Windows.System.GroupPolicy
+- Best for fleet-wide / cross-domain analysis
+
+PingCastle / BloodHound:
+- AD-focused security analysis tools
+- Identify GPO attack paths and unusual GPO
+  configurations
+- Useful for proactive AD security review
+
+Microsoft documentation:
+- Group Policy security best practices
+- GPO audit configuration guidance
+
+SpecterOps research:
+- Various GPO abuse and detection writeups
+- Foundational understanding of the attack surface
+
+Critical reference - SANS:
+'Detecting GPO Abuse for Persistence'
+- Foundational defender reading for this technique`,
+        notes: "GPO-based persistence (T1037.003) is one of the highest-impact persistence techniques in Active Directory environments because a single GPO modification on a domain controller can establish persistence on every workstation joined to the domain. This is a 'force multiplier' technique - it requires more initial access (domain admin) but provides exponentially more persistence reach than per-endpoint techniques. The technique is heavily documented in ransomware incident response: ransomware operators commonly compromise domain admin, then push deployment via GPO logon script to ensure ransomware runs on every workstation at next logon. Detection is split between endpoint and DC: endpoint detection focuses on the local GroupPolicy cache and gpscript.exe parent process events; DC detection focuses on AD audit events (5136/5137) on GPO objects and SYSVOL file changes. The endpoint side alone is not sufficient because the artifact source is the DC - a GPO change replicates to all workstations, and by the time you notice at one workstation, hundreds may already be affected. Pair endpoint detection with DC-side audit log forwarding and SYSVOL file change monitoring for full coverage. T1037.001 (registry-based logon script) is per-user / per-endpoint scope; T1037.003 (GPO) is domain-wide scope - the difference in impact is enormous.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "GPO-based persistence documented in SolarWinds and other long-dwell operations." },
+          { cls: "apt-cn", name: "APT41", note: "GPO modification for persistence documented across sector-targeting operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "GPO logon script deployment is a standard ransomware mass-deployment mechanism - documented across Ryuk, Conti, BlackCat, LockBit, REvil." },
+          { cls: "apt-mul", name: "FIN6", note: "Domain-level persistence including GPO abuse documented in financial sector intrusions." },
+          { cls: "apt-mul", name: "Red Teams", note: "SharpGPOAbuse and BloodHound-driven attack paths make this standard advanced red team tradecraft after domain admin." }
+        ],
+        cite: "MITRE ATT&CK T1037.003, T1484.001"
       }
     ]
   }
