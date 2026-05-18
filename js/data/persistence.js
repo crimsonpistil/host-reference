@@ -3134,5 +3134,973 @@ Critical reference - SANS:
         cite: "MITRE ATT&CK T1037.003, T1484.001"
       }
     ]
+  },
+  {
+    id: "T1098",
+    name: "Account Manipulation",
+    desc: "Modifying existing accounts for persistence - password resets, group additions, ACL changes, SID history injection",
+    rows: [
+      {
+        sub: "T1098 - Privileged Group Membership Changes",
+        indicator: "User added to local Administrators, Domain Admins, Enterprise Admins, or other high-privilege group - backdoor admin or privilege retention",
+        sysmon: `// Sysmon EID 1 - net.exe / dsadd / dsmod / Add-LocalGroupMember:
+EventID=1
+Image matches:
+  *\\net.exe OR *\\net1.exe
+  OR *\\dsadd.exe OR *\\dsmod.exe
+  OR *\\powershell.exe
+CommandLine matches:
+  *localgroup*add*
+  OR *group*/add*
+  OR *Add-LocalGroupMember*
+  OR *Add-ADGroupMember*
+  OR *Administrators*
+  OR *Domain Admins*
+  OR *Enterprise Admins*
+
+// Windows Security Event - the gold standard:
+EventID=4732 (member added to security-enabled local group)
+EventID=4728 (member added to security-enabled global group)
+EventID=4756 (member added to security-enabled universal group)`,
+        kibana: `// Process-based: group manipulation commands
+winlog.event_id: 1
+AND process.command_line: (*localgroup*add* OR *Add-LocalGroupMember* OR *Add-ADGroupMember* OR (*group*/add* AND (*Administrators* OR *Domain Admins* OR *Enterprise Admins*)))
+
+// Security event: group membership changes (most reliable)
+winlog.event_id: (4732 OR 4728 OR 4756)
+AND winlog.channel: "Security"
+
+// Tighten to high-privilege groups by SID:
+// S-1-5-32-544 = Administrators (built-in)
+// Domain Admins / Enterprise Admins = dynamic SIDs ending in -512 / -519
+winlog.event_id: (4732 OR 4728 OR 4756)
+AND winlog.event_data.TargetSid: (*-512 OR *-519 OR "S-1-5-32-544")`,
+        powershell: `# Hunt 1: Recent privileged group membership changes (Security log)
+$privGroupEvents = @(4732, 4728, 4756)
+Get-WinEvent -FilterHashtable @{
+  LogName='Security';
+  ID=$privGroupEvents
+} -ErrorAction SilentlyContinue | ForEach-Object {
+  $xml = [xml]$_.ToXml()
+  $data = @{}
+  $xml.Event.EventData.Data | ForEach-Object { $data[$_.Name] = $_.'#text' }
+
+  [PSCustomObject]@{
+    Time = $_.TimeCreated
+    EventID = $_.Id
+    Action = switch ($_.Id) {
+      4732 {'Added to local group'}
+      4728 {'Added to global group'}
+      4756 {'Added to universal group'}
+    }
+    GroupName = $data['TargetUserName']
+    MemberSid = $data['MemberSid']
+    MemberName = $data['MemberName']
+    AddedBy = $data['SubjectUserName']
+  }
+} | Sort-Object Time -Descending
+
+# Hunt 2: Current membership of high-privilege groups
+Write-Host "\`n=== Local Administrators ===" -ForegroundColor Cyan
+Get-LocalGroupMember -Group 'Administrators' |
+  Select Name, ObjectClass, PrincipalSource
+
+# Domain Admins (run on domain-joined host with RSAT)
+if (Get-Module -ListAvailable ActiveDirectory) {
+  Write-Host "\`n=== Domain Admins ===" -ForegroundColor Cyan
+  Import-Module ActiveDirectory
+  Get-ADGroupMember -Identity 'Domain Admins' |
+    Select Name, SamAccountName, ObjectClass, DistinguishedName
+
+  Write-Host "\`n=== Enterprise Admins ===" -ForegroundColor Cyan
+  Get-ADGroupMember -Identity 'Enterprise Admins' |
+    Select Name, SamAccountName, ObjectClass, DistinguishedName
+
+  Write-Host "\`n=== Schema Admins ===" -ForegroundColor Cyan
+  Get-ADGroupMember -Identity 'Schema Admins' |
+    Select Name, SamAccountName, ObjectClass, DistinguishedName
+}
+
+# Hunt 3: Local admin via process execution (Sysmon)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=1
+} | Where-Object {
+  $_.Properties[10].Value -match
+    '(localgroup\\s+(?:administrators|admins)\\s+/add|Add-LocalGroupMember|Add-ADGroupMember.*(?:Domain|Enterprise|Schema)\\s+Admins)'
+} | Select TimeCreated,
+  @{n='User';e={$_.Properties[12].Value}},
+  @{n='CmdLine';e={$_.Properties[10].Value}} |
+  Sort-Object TimeCreated -Descending`,
+        registry: `Local group membership storage:
+- HKLM\\SAM\\SAM\\Domains\\Builtin\\Aliases\\Members\\
+  S-1-5-32\\<group RID>\\
+  Binary values listing member SIDs
+- Default access via SYSTEM only - not readable
+  with typical admin tools without elevation
+- Use Get-LocalGroupMember or net localgroup
+  for live-host enumeration
+
+Domain group membership (DC-side):
+- Stored in ntds.dit on domain controllers
+- 'member' attribute on group objects
+- Backlinks via 'memberOf' attribute on user objects
+- Hunt with Active Directory PowerShell module:
+  Get-ADGroupMember -Identity 'Domain Admins'
+- Or ADSI Edit / ADUC GUI on the DC
+
+Key forensic events to correlate:
+
+Windows Security log (DC for domain, local for workstation):
+4720 - User account created (T1136 - covered separately)
+4722 - User account enabled (re-enabled disabled account)
+4724 - Password reset (admin reset another user's password)
+4725 - User account disabled
+4728 - Member added to security-enabled global group
+4729 - Member removed from security-enabled global group
+4732 - Member added to security-enabled local group
+4733 - Member removed from security-enabled local group
+4738 - User account changed
+4756 - Member added to security-enabled universal group
+4767 - User account unlocked
+4781 - User account name changed
+
+Investigation pivots:
+- Who initiated the change? (SubjectUserName in 4732/4728)
+- Was the change made remotely? Cross-reference with
+  4624 logon events from the same SubjectLogonId
+- Was the new admin used immediately afterward?
+  Look for 4624 LogonType=2 (interactive) or
+  LogonType=3 (network) with the added account
+
+Long-dwell adversary pattern:
+- Add backup admin account
+- Wait days/weeks before using it (defender attention fades)
+- Use only periodically to maintain access
+- Detection requires looking at the membership snapshot,
+  not just real-time additions`,
+        tools: `Tools used to manipulate group membership:
+
+Built-in Windows:
+- net.exe localgroup <group> <user> /add
+- net.exe group <group> <user> /add /domain
+- dsadd / dsmod (AD command-line tools)
+- PowerShell ActiveDirectory module:
+  Add-ADGroupMember -Identity 'Domain Admins'
+    -Members 'compromised_user'
+- PowerShell LocalAccounts module:
+  Add-LocalGroupMember -Group 'Administrators'
+    -Member 'backdoor_user'
+
+Adversary frameworks:
+- Cobalt Strike (built-in 'powershell-import' for AD commands)
+- Empire / Starkiller (privesc and persistence modules)
+- BloodHound + SharpHound (identify privilege paths,
+  then operators execute the membership changes manually)
+- Mimikatz (Kerberos manipulation often paired with
+  group changes for persistence)
+
+Common adversary patterns:
+
+Pattern 1 - 'Add and wait':
+- Add a low-profile existing account to Administrators
+- Don't use immediately
+- Used as backup access if primary persistence is found
+
+Pattern 2 - 'Service account hijack':
+- Identify existing service account (less monitored)
+- Add to Domain Admins
+- Use service account's existing logon patterns to blend in
+
+Pattern 3 - 'Nested group abuse':
+- Add user to a group that's nested INSIDE Administrators
+- E.g. add to 'Help Desk' group if Help Desk is a member
+  of Administrators
+- More evasive because direct admin enumeration may miss
+  nested membership
+
+Detection considerations:
+- Recursive group membership analysis is essential -
+  Get-ADGroupMember -Recursive
+- Some legitimate IT operations cause these events
+  (new admin onboarding, group restructuring) -
+  context matters
+- Frequency baseline helps: changes to Domain Admins
+  in a stable environment should be rare`,
+        ossdetect: `Sigma:
+- win_security_admin_group_modification.yml (EID 4732/4728)
+- proc_creation_win_net_admin_add.yml
+- proc_creation_win_powershell_add_localgroup_member.yml
+
+Atomic Red Team:
+- T1098.007 (Add local user to admin group)
+- T1098 (broader account manipulation tests)
+
+Hayabusa:
+- LocalAdminGroupChange rules (EID 4732)
+- DomainAdminGroupChange rules (EID 4728)
+- High-priority alerts in default ruleset
+
+Velociraptor:
+- Windows.System.LocalGroups
+- Windows.AD.GroupMembership
+- Run on demand for fleet-wide membership snapshots
+
+PingCastle / BloodHound:
+- AD-focused security analysis
+- Identify abnormal group memberships and attack paths
+- Useful for proactive review and baseline establishment
+
+ADRecon (Sense of Security):
+- PowerShell-based AD reconnaissance / audit tool
+- Returns comprehensive privileged group inventory
+
+Microsoft Defender for Identity (if licensed):
+- AD-aware monitoring with built-in alerts
+- Catches anomalous privileged group additions
+- Useful supplementary detection layer`,
+        notes: "Privileged group manipulation is one of the most consequential persistence techniques because it directly grants the adversary administrative authority. The detection lives primarily in Windows Security events (4732 for local groups, 4728/4756 for domain global/universal groups) rather than Sysmon - Security log monitoring is essential for this technique. The high-value events to monitor are additions to: built-in Administrators (SID S-1-5-32-544), Domain Admins (RID 512), Enterprise Admins (RID 519), and Schema Admins. Nested group abuse is worth understanding: defenders often check direct Administrators membership but miss nested memberships - if 'Help Desk' is a member of 'Administrators' and the adversary adds themselves to 'Help Desk', direct enumeration misses them. The recursive enumeration in the PowerShell script handles this. The 'add and wait' pattern is the classic long-dwell adversary tradecraft: backdoor account added, then sits unused for weeks while initial intrusion artifacts are investigated and cleaned. Membership snapshot comparison against a known-good baseline is the only reliable detection for this pattern - real-time event detection works for fresh additions but misses pre-existing manipulation. PingCastle is genuinely useful for proactive AD security review; if you have RSAT and AD access, run it on a domain controller periodically.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Account manipulation for persistence documented extensively across SolarWinds follow-on activity." },
+          { cls: "apt-cn", name: "APT41", note: "Privilege group additions and backdoor account creation documented across multiple sector intrusions." },
+          { cls: "apt-mul", name: "Ransomware", note: "Privileged group additions standard tradecraft before encryption deployment - documented across Ryuk, Conti, BlackCat, LockBit." },
+          { cls: "apt-mul", name: "Red Teams", note: "BloodHound-identified privilege paths + manual group additions are standard advanced red team tradecraft." },
+          { cls: "apt-ir", name: "APT34", note: "Account manipulation for persistence documented in operations against Middle East targets." }
+        ],
+        cite: "MITRE ATT&CK T1098, T1098.007"
+      },
+      {
+        sub: "T1098 - Password Reset and Service Account Manipulation",
+        indicator: "Administrator reset password for another user (especially privileged), or service account credentials modified - credential-based persistence",
+        sysmon: `// Sysmon EID 1 - password reset commands:
+EventID=1
+Image matches:
+  *\\net.exe OR *\\net1.exe
+  OR *\\powershell.exe
+CommandLine matches:
+  *user*<username>* AND *password*
+  OR *Set-ADAccountPassword*
+  OR *Reset-AD*
+
+// Security Events (more reliable than Sysmon for this):
+EventID=4724 (admin reset another user's password)
+EventID=4723 (user changed own password - normal but
+              worth correlating)
+EventID=4738 (user account changed - broader event
+              that fires on many attribute changes
+              including password reset)`,
+        kibana: `// Password reset events (admin reset, not self-change)
+winlog.event_id: 4724
+AND winlog.channel: "Security"
+
+// User account modified - broad attribute changes
+winlog.event_id: 4738
+AND winlog.channel: "Security"
+
+// Process-based detection
+winlog.event_id: 1
+AND process.command_line: (*Set-ADAccountPassword* OR *Reset-AD* OR (*net user* AND *password*))`,
+        powershell: `# Hunt for recent password reset events (admin reset another user)
+Get-WinEvent -FilterHashtable @{
+  LogName='Security';
+  ID=4724
+} -ErrorAction SilentlyContinue | ForEach-Object {
+  $xml = [xml]$_.ToXml()
+  $data = @{}
+  $xml.Event.EventData.Data | ForEach-Object { $data[$_.Name] = $_.'#text' }
+
+  [PSCustomObject]@{
+    Time = $_.TimeCreated
+    TargetAccount = $data['TargetUserName']
+    TargetDomain = $data['TargetDomainName']
+    ResetBy = $data['SubjectUserName']
+    ResetByDomain = $data['SubjectDomainName']
+  }
+} | Sort-Object Time -Descending
+
+# Hunt for kerberos ticket-granting-ticket changes
+# (krbtgt password reset is a common DCSync recovery
+# operation but also an adversary cleanup activity)
+Get-WinEvent -FilterHashtable @{
+  LogName='Security';
+  ID=4738
+} -ErrorAction SilentlyContinue | ForEach-Object {
+  $xml = [xml]$_.ToXml()
+  $data = @{}
+  $xml.Event.EventData.Data | ForEach-Object { $data[$_.Name] = $_.'#text' }
+
+  if ($data['TargetUserName'] -match '(krbtgt|admin|administrator|svc_|service)') {
+    [PSCustomObject]@{
+      Time = $_.TimeCreated
+      Target = $data['TargetUserName']
+      ModifiedBy = $data['SubjectUserName']
+      AttributeChange = $data['AttributeLDAPDisplayName']
+    }
+  }
+} | Sort-Object Time -Descending
+
+# AD attribute hunt - users with recent pwdLastSet
+# (requires RSAT / ActiveDirectory module)
+if (Get-Module -ListAvailable ActiveDirectory) {
+  $cutoff = (Get-Date).AddDays(-30)
+  Get-ADUser -Filter * -Properties PasswordLastSet, MemberOf |
+    Where-Object { $_.PasswordLastSet -gt $cutoff } |
+    Select Name, SamAccountName, PasswordLastSet,
+      @{n='MemberOf';e={($_.MemberOf | ForEach-Object { ($_ -split ',')[0] -replace '^CN=','' }) -join '; '}} |
+    Sort-Object PasswordLastSet -Descending
+}`,
+        registry: `Password storage references:
+
+Local accounts:
+- HKLM\\SAM\\SAM\\Domains\\Account\\Users\\<RID>\\
+  V (binary value containing user account data
+     including encrypted password hash)
+- Default access SYSTEM only - inaccessible to
+  normal admin tools
+- Hash extraction requires reg save + offline parsing
+  (or live-system memory access via Mimikatz etc.)
+- DPAPI master keys protect cached credentials
+
+Domain accounts:
+- Stored in ntds.dit on domain controllers
+- Not directly readable - requires DC privilege
+  or DCSync to extract
+- Password reset events on DC are the primary
+  detection point
+
+Service account specifics:
+- Service accounts have passwords stored in LSA Secrets:
+  HKLM\\SECURITY\\Policy\\Secrets\\<service_account>
+- Each service running as a named account has its
+  password cached here
+- Adversaries with SYSTEM privilege can read these
+  (Mimikatz lsadump::secrets)
+- Recovery scenario: adversary reads service account
+  password, then uses it from elsewhere - no
+  reset event needed, just a normal logon from
+  a new location
+
+Key audit events:
+
+DC-side (domain accounts):
+- 4724 - Admin reset another user's password
+- 4723 - User changed own password
+- 4738 - User account changed (catches password reset
+         and many other attribute changes)
+- 4781 - User account name changed (sAMAccountName)
+- 5136 - Directory service object modified
+         (raw attribute-level changes including
+          password-related attributes)
+
+Local workstation:
+- Same 4724/4723/4738 in workstation Security log
+  for local account changes
+
+Forensic timeline reconstruction:
+- Correlate 4724 (reset) with subsequent 4624 (logon)
+  events for the same TargetUserName
+- If reset by suspicious account, and account then
+  used immediately = high-confidence credential
+  manipulation for access
+
+Service account manipulation patterns:
+- Reset password of low-monitored service account
+- Use the new password for lateral movement / persistence
+- Service still functions because adversary controls
+  the new credentials
+- Detection: pwdLastSet attribute change on service
+  account, then anomalous logon source for that account`,
+        tools: `Tools and frameworks:
+
+Built-in Windows:
+- net user <name> <new_password>
+- net user <name> <new_password> /domain
+- Set-ADAccountPassword (PowerShell AD module)
+- dsmod user <DN> -pwd <new_password>
+- Windows ADUC GUI
+
+Adversary tools:
+- Mimikatz (sekurlsa::pth - pass-the-hash bypasses
+  the need for password reset)
+- Mimikatz (lsadump::secrets - extract service
+  account passwords)
+- Impacket (various credential manipulation)
+- DSInternals (PowerShell module - low-level AD
+  credential operations)
+- Custom scripts using Kerberos APIs
+
+Common adversary patterns:
+
+Pattern 1 - Service account takeover:
+- Identify high-privilege service account
+- Reset its password (or read existing via LSA secrets)
+- Use credentials for lateral movement
+- Service still functions = no operational alert
+
+Pattern 2 - Disabled account reactivation:
+- Find disabled account with previous privileges
+- Reset password and re-enable
+- Account has historic legitimacy - blends in
+- Especially effective with former-employee accounts
+  that weren't fully purged
+
+Pattern 3 - Krbtgt password reset abuse:
+- The krbtgt account encrypts all Kerberos TGTs
+- Adversary with DCSync rights extracts krbtgt hash
+- Creates 'golden tickets' valid for 10 years (default)
+- Even if other persistence is removed, golden tickets
+  remain valid until krbtgt is reset TWICE
+- Detection challenge: krbtgt hash extraction may not
+  generate distinctive events depending on technique
+
+Defensive note - krbtgt rotation:
+- Microsoft recommends krbtgt password reset twice
+  consecutively (with ~10 hour gap) after suspected
+  compromise to invalidate any extracted hashes
+- Reset twice because Kerberos retains previous
+  krbtgt key for backward compatibility
+- This is sometimes called 'krbtgt double-tap'`,
+        ossdetect: `Sigma:
+- win_security_user_password_reset.yml (EID 4724)
+- win_security_user_modified.yml (EID 4738)
+- proc_creation_win_net_user_password.yml
+- proc_creation_win_powershell_set_adaccount_password.yml
+
+Atomic Red Team:
+- T1098 (account manipulation tests including
+  password reset variants)
+
+Hayabusa:
+- AdminPasswordReset rules (EID 4724)
+- ServiceAccountPasswordChange detection
+
+Velociraptor:
+- Windows.AD.UserAccountChanges
+- Windows.AD.PrivilegedUserChanges
+- Windows.EventLogs.AdvancedSecurityAuditing
+
+Microsoft Defender for Identity:
+- Built-in alerts for suspicious password reset
+- AD-aware so it catches DC-side events natively
+- One of the more valuable supplementary tools
+  for this technique class
+
+PingCastle:
+- AD security review tool
+- Identifies abnormal account configurations
+- Useful for proactive baseline establishment
+
+Reference:
+- Microsoft 'Securing Privileged Access' guidance
+- SANS DFIR poster on Active Directory forensics`,
+        notes: "Password reset and service account manipulation is a subtle form of persistence - the account already exists, so there's no creation event to detect; the manipulation is purely a credential operation. The Windows Security event 4724 (admin reset another user's password) is the primary signal but requires context to be useful: legitimate IT help desk operations cause this event constantly. Detection focus should be: who reset whose password, was the target a privileged or service account, was the resetter expected to perform that action, and was the target account used immediately after the reset from an unusual location. The 'pwdLastSet attribute hunt' in the PowerShell script is a useful baseline-deviation approach: list all AD users whose password changed in the last 30 days, focus on privileged accounts and service accounts in that list. Krbtgt password reset is the high-value extreme of this technique - the krbtgt account encrypts all Kerberos TGTs, so adversaries who extract the krbtgt hash can mint 'golden tickets' valid for years. This is why Microsoft recommends 'krbtgt double-tap' (reset twice consecutively) after suspected compromise - one reset isn't enough because Kerberos retains the previous key for backward compatibility. Pair this hunt with privileged group membership analysis (previous indicator) - account manipulation often combines with group additions for compound persistence.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Account manipulation and credential persistence documented across long-dwell espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "Service account password manipulation documented across sector-targeting operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Service account takeover for lateral movement standard across Ryuk, Conti, BlackCat operations." },
+          { cls: "apt-mul", name: "Golden Ticket Operators", note: "Krbtgt manipulation for long-term Kerberos persistence documented across multiple advanced groups." },
+          { cls: "apt-ir", name: "APT34", note: "Account credential manipulation documented in operations targeting Middle East infrastructure." }
+        ],
+        cite: "MITRE ATT&CK T1098"
+      }
+    ]
+  },
+  {
+    id: "T1136",
+    name: "Create Account",
+    desc: "Creating new local or domain accounts for persistence - hidden accounts, RID-cloned accounts, machine accounts",
+    rows: [
+      {
+        sub: "T1136.001 - Local Account Creation",
+        indicator: "New local user account created on workstation or server - backdoor account for persistent local access",
+        sysmon: `// Sysmon EID 1 - account creation commands:
+EventID=1
+Image matches:
+  *\\net.exe OR *\\net1.exe
+  OR *\\powershell.exe
+CommandLine matches:
+  *user*/add*
+  OR *New-LocalUser*
+
+// Security Event (more reliable - all creation methods):
+EventID=4720 (user account created - workstation/local)
+EventID=4722 (user account enabled - account just created
+              is implicitly enabled; this event often
+              fires alongside 4720)
+EventID=4732 (added to local group - follow-up event
+              after creation, often Administrators)`,
+        kibana: `// Account creation events
+winlog.event_id: 4720
+AND winlog.channel: "Security"
+
+// Process-based detection
+winlog.event_id: 1
+AND process.command_line: (*New-LocalUser* OR (*net user* AND */add*))
+
+// Local Administrators addition after creation
+winlog.event_id: 4732
+AND winlog.event_data.TargetSid: "S-1-5-32-544"`,
+        powershell: `# Hunt 1: Recent local user account creation events
+Get-WinEvent -FilterHashtable @{
+  LogName='Security';
+  ID=4720
+} -ErrorAction SilentlyContinue | ForEach-Object {
+  $xml = [xml]$_.ToXml()
+  $data = @{}
+  $xml.Event.EventData.Data | ForEach-Object { $data[$_.Name] = $_.'#text' }
+
+  [PSCustomObject]@{
+    Time = $_.TimeCreated
+    NewAccount = $data['TargetUserName']
+    CreatedBy = $data['SubjectUserName']
+    SubjectDomain = $data['SubjectDomainName']
+  }
+} | Sort-Object Time -Descending
+
+# Hunt 2: Current local account inventory + recent
+$cutoff = (Get-Date).AddDays(-30)
+Get-LocalUser | ForEach-Object {
+  $user = $_
+  $isRecent = $user.PasswordLastSet -gt $cutoff
+
+  $suspicious = @()
+  if ($isRecent) { $suspicious += "Password set within 30 days" }
+  if ([string]::IsNullOrEmpty($user.FullName) -and
+      [string]::IsNullOrEmpty($user.Description)) {
+    $suspicious += "No FullName or Description"
+  }
+  if ($user.Name -match '^[a-z0-9]{1,4}$') {
+    $suspicious += "Short / generic name"
+  }
+
+  # Check if member of Administrators
+  $isAdmin = $false
+  try {
+    Get-LocalGroupMember -Group 'Administrators' -EA SilentlyContinue |
+      ForEach-Object {
+        if ($_.Name -match $user.Name -or $_.SID -eq $user.SID) { $isAdmin = $true }
+      }
+  } catch { }
+  if ($isAdmin) { $suspicious += "Member of Administrators" }
+
+  [PSCustomObject]@{
+    Name = $user.Name
+    FullName = $user.FullName
+    Description = $user.Description
+    Enabled = $user.Enabled
+    PasswordLastSet = $user.PasswordLastSet
+    LastLogon = $user.LastLogon
+    IsAdmin = $isAdmin
+    Suspicious = if ($suspicious) { $suspicious -join '; ' } else { '' }
+  }
+} | Sort-Object Suspicious -Descending | Format-Table -AutoSize
+
+# Hunt 3: Hidden accounts - check SAM registry for
+# accounts not visible to Get-LocalUser
+# (requires SAM access - usually SYSTEM or reg.exe save)
+Write-Host "\`nNote: Use 'reg save HKLM\\SAM samdump.hive'" -ForegroundColor Yellow
+Write-Host "then parse offline with secretsdump or impacket" -ForegroundColor Yellow
+Write-Host "to surface accounts hidden via SAM manipulation" -ForegroundColor Yellow`,
+        registry: `Local account storage:
+HKLM\\SAM\\SAM\\Domains\\Account\\Users\\
+  Names\\<username>\\(default) = (RID)
+  <RID>\\
+    V = (binary - account data including hash)
+    F = (binary - account flags)
+
+Hiding techniques:
+
+1. SAM ACL manipulation:
+- Modify ACL on HKLM\\SAM\\SAM\\Domains\\Account\\Users\\
+  Names\\<username>\\ to deny standard enumeration
+- Get-LocalUser misses the account
+- Account still functions
+- Detection: reg save the SAM hive and parse offline -
+  bypasses live ACL enforcement
+
+2. Special name characters:
+- Append '$' to account name (signals 'computer account'
+  to many tools but creates a normal user)
+- Some enumeration tools filter out '$'-suffixed names
+- Hides from casual review
+- Pattern: backupadmin$, svc_temp$, etc.
+
+3. RID hijacking (rare but documented):
+- Modify the SAM 'F' value to set a different RID
+- Account inherits permissions of the RID's true owner
+- Defender sees a low-privilege account name but
+  the actual permissions are admin-level
+- Detection requires SAM parsing comparing username
+  field against actual RID value
+
+Key audit events:
+- 4720 - User account created
+- 4722 - User account enabled
+- 4724 - Password reset (paired with creation - admin
+         sets initial password)
+- 4738 - User account changed (broader event)
+
+Investigation pivots after 4720:
+- What account created the new user?
+  (SubjectUserName / SubjectLogonId in 4720)
+- Was the new account added to a privileged group
+  immediately afterward? (EID 4732 with same subject)
+- First logon by the new account? (4624 with the
+  new account as TargetUserName)
+- Lifecycle: 4720 (create) -> 4722 (enable) ->
+  4724 (set password) -> 4732 (add to admins) ->
+  4624 (first logon) - this sequence in close
+  proximity is the classic adversary chain`,
+        tools: `Account creation methods:
+
+Built-in Windows:
+- net user <name> <password> /add
+- net user <name> <password> /add /domain (DC)
+- New-LocalUser -Name <name> -Password <secure>
+- New-ADUser (PowerShell AD module)
+- Windows Users and Computers ADUC GUI
+- Computer Management lusrmgr.msc GUI
+
+Adversary frameworks:
+- SharPersist (account creation variants)
+- Empire / Starkiller (privesc and persistence modules)
+- Cobalt Strike (built-in user/group commands)
+- Most commodity malware avoids account creation
+  (too noisy - generates 4720) but it's standard
+  in manual operator persistence
+
+Common adversary patterns:
+
+Pattern 1 - Backup admin:
+- Create account with innocuous name (svc_backup,
+  helpdesk2, _system_user)
+- Add to Administrators
+- Use only sparingly to maintain access
+- Often paired with disabling default Administrator
+
+Pattern 2 - Mimicry account:
+- Create account with name matching legitimate
+  patterns (admin1 if admin exists, IT_Support2
+  if IT_Support exists)
+- Defender at-a-glance review misses one extra account
+
+Pattern 3 - Hidden ($-suffix) account:
+- Create account named like 'backup$' or 'svc_temp$'
+- $-suffix sometimes signals 'computer account' to tools
+- May not appear in standard Get-LocalUser output
+  depending on tool implementation
+
+Pattern 4 - Disable existing, create new:
+- Disable legitimate admin (preventing log review
+  by that user)
+- Create new admin for adversary use
+- Detection: 4725 (account disabled) paired with
+  4720 (account created) in close time = anomalous
+
+Detection considerations:
+- Most environments have very low rates of new
+  local account creation - any 4720 event on a
+  workstation is worth review
+- Server / domain controller account creation is
+  more common (service accounts, admin onboarding)
+- Combine with parent context: was the creating
+  user expected to have user management privileges?`,
+        ossdetect: `Sigma:
+- win_security_local_user_creation.yml (EID 4720)
+- win_security_admin_group_modification.yml (EID 4732)
+- proc_creation_win_net_user_add.yml
+- proc_creation_win_powershell_new_localuser.yml
+
+Atomic Red Team:
+- T1136.001 (local account creation tests)
+- T1136.002 (domain account creation tests)
+
+Hayabusa:
+- LocalAccountCreation rules (EID 4720)
+- High-priority alert in default ruleset
+- LocalAdminAddedAfterCreation (correlates 4720+4732)
+
+Velociraptor:
+- Windows.System.LocalUsers
+- Windows.SAM.OfflineParser (catches hidden accounts)
+
+Sysinternals:
+- AccessChk for ACL inspection on user objects
+- Not specific to account creation but useful for
+  identifying ACL-based hiding
+
+Microsoft Defender:
+- Built-in alerts for suspicious account creation
+- Particularly aggressive on Defender for Endpoint
+  for high-privilege accounts`,
+        notes: "Local account creation is a noisy persistence technique - Windows Security Event 4720 fires reliably on every new user. The challenge is volume in larger environments where IT operations create new accounts regularly. The detection focus should be context: was the creating user expected to have user management rights, was the new account added to a privileged group within minutes (4720 + 4732 correlation), was the new account used from an unusual location at first logon. The 'lifecycle pattern' is the highest-fidelity signal: 4720 (create) -> 4722 (enable) -> 4724 (password set) -> 4732 (add to Administrators) -> 4624 (first logon) all within a short time window is the classic adversary chain. Legitimate IT onboarding usually has gaps between these events (separate help desk tickets, password coordination). Hidden accounts are a more sophisticated subset - SAM ACL manipulation makes the account invisible to Get-LocalUser, requiring offline SAM parsing to surface. The '$' suffix trick is sometimes used to hide accounts from casual review since many tools filter out '$'-suffixed names assuming they're computer accounts. Workstation account creation is rare in most environments - any 4720 on a workstation warrants investigation. Server account creation is more common but still worth context-checking. Pair with the T1098 indicators: account creation + group manipulation are often combined for compound persistence (new account + Administrators membership = backdoor admin).",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Local and domain account creation for persistence documented across espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "Backdoor account creation documented across multiple sector intrusions." },
+          { cls: "apt-mul", name: "Ransomware", note: "Backdoor admin account creation standard pre-encryption tradecraft across most ransomware operations." },
+          { cls: "apt-kp", name: "Lazarus", note: "Local account creation for persistence documented in CISA advisories on DPRK operations." },
+          { cls: "apt-mul", name: "Red Teams", note: "Account creation with mimicry naming standard advanced red team persistence." }
+        ],
+        cite: "MITRE ATT&CK T1136.001"
+      },
+      {
+        sub: "T1136.002 - Domain Account Creation",
+        indicator: "New domain user account created on domain controller - high-impact persistence across the entire AD environment",
+        sysmon: `// On DOMAIN CONTROLLER (where this technique fires):
+
+EventID=4720 (user account created)
+LogName=Security
+// Same event ID as local, but on DC = domain account
+
+// Subsequent events to correlate:
+EventID=4722 (account enabled)
+EventID=4724 (initial password set)
+EventID=4728 (added to Domain Admins or other
+              global group)
+
+// Sysmon process detection (if deployed on DC):
+EventID=1
+Image=*\\net.exe OR *\\powershell.exe OR *\\dsadd.exe
+CommandLine matches:
+  *user*/add*/domain*
+  OR *New-ADUser*
+  OR *dsadd*user*
+
+// AD object creation event (DC-side):
+EventID=5137 (Directory Service object created)
+// More detailed than 4720 - includes the full DN
+// of the new object and the creator's identity`,
+        kibana: `// Domain user creation on DC
+winlog.event_id: 4720
+AND winlog.channel: "Security"
+AND host.name: <domain controller>
+
+// AD object creation
+winlog.event_id: 5137
+AND winlog.event_data.ObjectClass: "user"
+
+// Process-based on DC
+winlog.event_id: 1
+AND host.name: <domain controller>
+AND process.command_line: (*New-ADUser* OR (*net user* AND */add* AND */domain*) OR *dsadd*user*)`,
+        powershell: `# Hunt for recent domain user creation (run on DC or via remote query)
+# Requires Security log access on the domain controller
+
+Get-WinEvent -ComputerName <DC_name> -FilterHashtable @{
+  LogName='Security';
+  ID=4720
+} -ErrorAction SilentlyContinue | ForEach-Object {
+  $xml = [xml]$_.ToXml()
+  $data = @{}
+  $xml.Event.EventData.Data | ForEach-Object { $data[$_.Name] = $_.'#text' }
+
+  [PSCustomObject]@{
+    Time = $_.TimeCreated
+    NewAccount = $data['TargetUserName']
+    TargetDomain = $data['TargetDomainName']
+    CreatedBy = $data['SubjectUserName']
+    SubjectDomain = $data['SubjectDomainName']
+  }
+} | Sort-Object Time -Descending
+
+# AD-side enumeration (requires ActiveDirectory module + permissions)
+if (Get-Module -ListAvailable ActiveDirectory) {
+  Import-Module ActiveDirectory
+  $cutoff = (Get-Date).AddDays(-30)
+
+  # Recently created user accounts
+  Get-ADUser -Filter * -Properties whenCreated, MemberOf,
+    Description, ServicePrincipalName |
+    Where-Object { $_.whenCreated -gt $cutoff } |
+    Select-Object Name, SamAccountName, whenCreated,
+      @{n='Description';e={$_.Description}},
+      @{n='Groups';e={
+        $_.MemberOf | ForEach-Object { ($_ -split ',')[0] -replace '^CN=','' }
+      }},
+      @{n='HasSPN';e={if ($_.ServicePrincipalName) { 'Yes' } else { 'No' }}} |
+    Sort-Object whenCreated -Descending
+
+  # Anomalous patterns
+  Write-Host "\`n=== Accounts with no description ===" -ForegroundColor Yellow
+  Get-ADUser -Filter * -Properties Description, whenCreated |
+    Where-Object {
+      [string]::IsNullOrEmpty($_.Description) -and
+      $_.whenCreated -gt (Get-Date).AddDays(-90)
+    } |
+    Select Name, whenCreated
+
+  Write-Host "\`n=== Accounts in 'CN=Users' default container ===" -ForegroundColor Yellow
+  # Adversary-created accounts often left in default Users
+  # CN rather than moved to proper OUs
+  Get-ADUser -SearchBase "CN=Users,$((Get-ADDomain).DistinguishedName)" -Filter * -Properties whenCreated |
+    Where-Object { $_.whenCreated -gt (Get-Date).AddDays(-30) } |
+    Select Name, whenCreated, DistinguishedName
+}`,
+        registry: `Domain accounts live in ntds.dit on domain controllers,
+not in the workstation registry. The relevant artifacts:
+
+On DOMAIN CONTROLLER:
+- ntds.dit (NTDS database) - contains all domain
+  object data including user accounts
+- C:\\Windows\\NTDS\\ntds.dit (default location)
+- Modifications appear in Directory Service log:
+  Event 5137 (object created)
+  Event 5136 (object modified)
+  Event 5141 (object deleted)
+
+Key events to monitor on DC Security log:
+- 4720 - User account created
+- 4722 - Account enabled
+- 4723 - User changed own password (later, after creation)
+- 4724 - Admin set/reset password
+- 4725 - Account disabled
+- 4726 - Account deleted
+- 4728 - Added to global group (Domain Admins etc.)
+- 4738 - Account changed (general attribute changes)
+- 4781 - Account name changed
+
+Directory Service log events (more detailed):
+- 5136 - Object modified
+- 5137 - Object created
+- 5138 - Object undeleted
+- 5139 - Object moved
+- 5141 - Object deleted
+
+Adversary patterns specific to DC:
+
+Pattern 1 - Add to standard Users CN:
+- New accounts created via 'net user /domain' default to
+  the CN=Users container
+- Legitimate AD admins typically move accounts to
+  proper OUs
+- Accounts left in CN=Users are a soft signal
+
+Pattern 2 - Service Principal Name (SPN) abuse:
+- Set SPN on the new account to enable Kerberoasting
+- Adversary then requests TGS for the SPN and cracks
+  offline
+- Detection: new account WITH a SPN attribute is
+  unusual for non-service accounts
+
+Pattern 3 - LAPS bypass via new admin:
+- LAPS (Local Administrator Password Solution) only
+  manages the BUILT-IN Administrator
+- Creating a NEW domain account and adding to local
+  Administrators on workstations bypasses LAPS
+  rotation
+- Backdoor that survives LAPS password rotation
+
+Investigation pivots after 4720 on DC:
+- Was creator a high-privilege admin? (subjects to scrutiny)
+- Was the new account immediately added to a privileged
+  group? (4728 with same subject)
+- First logon for the new account? (4624 with new acct
+  as target)
+- What workstations did the account log onto?
+  (Pattern analysis - sudden new account logging into
+  many workstations = lateral movement)`,
+        tools: `Tools for domain account creation:
+
+Built-in:
+- New-ADUser (PowerShell ActiveDirectory module)
+- net user /add /domain (legacy command)
+- dsadd user (legacy command-line tool)
+- Active Directory Users and Computers (ADUC GUI)
+- Active Directory Administrative Center (DSAC GUI)
+
+Adversary tools:
+- PowerShell Empire / Starkiller AD modules
+- BloodHound + custom scripts (BloodHound identifies
+  paths, manual creation executed afterward)
+- Mimikatz (typically for credential ops alongside)
+- Impacket (psexec.py + remote AD ops)
+- Cobalt Strike with PowerShell-import for AD cmdlets
+
+Domain account abuse patterns:
+
+Pattern 1 - 'Just another user':
+- Create account with name matching environment
+  conventions (FirstName.LastName, F.LastName, etc.)
+- Often pulled from publicly available employee
+  information (LinkedIn, company website)
+- Looks legitimate at first glance
+- May survive months in environments with poor
+  account hygiene
+
+Pattern 2 - Service account creation:
+- Create account named like a service account
+  (svc_<something>, _service_user, etc.)
+- Set never-expire password
+- Add to Domain Admins or other privileged group
+- Service accounts often have password rotation
+  exemptions = long-lived persistence
+
+Pattern 3 - Computer account abuse (T1136.003):
+- Create COMPUTER account in AD
+- Computer accounts have different audit footprint
+- Some tools/queries filter out computer accounts
+- Used for stealth or Kerberos protocol attacks
+  (S4U2Self abuse, etc.)
+
+Detection considerations:
+- Domain account creation should be FAR rarer than
+  workstation account creation in well-managed
+  environments
+- Establish baseline: how many new domain users per
+  week is normal in your environment?
+- Anomaly detection on creation rate alone catches
+  bulk-creation incidents (mass automated account
+  generation for spam, etc.)
+- Pair user creation with subsequent privilege
+  assignment events for highest-fidelity alerting`,
+        ossdetect: `Sigma:
+- win_security_domain_user_creation.yml (EID 4720 on DC)
+- ad_security_object_creation.yml (EID 5137)
+- proc_creation_win_powershell_new_aduser.yml
+- proc_creation_win_dsadd_user.yml
+
+Atomic Red Team:
+- T1136.002 (domain account creation tests)
+- T1136.003 (computer account creation tests)
+
+Hayabusa:
+- DomainUserCreation rules (EID 4720 on DC)
+- DomainUserPrivEscalation (4720+4728 correlation)
+- ADObjectCreation (EID 5137)
+
+Velociraptor:
+- Windows.AD.UserAccounts
+- Windows.AD.RecentChanges
+- Windows.AD.PrivilegedUserChanges
+
+Microsoft Defender for Identity:
+- Built-in alerts for anomalous user creation
+- AD-aware so it catches DC-side events natively
+- Reputation-based scoring on new accounts
+
+PingCastle:
+- AD security review tool
+- Reports on recent account changes
+- Useful for periodic AD security audit
+
+ADRecon:
+- Comprehensive AD enumeration tool
+- Returns recent account creation alongside other
+  AD metadata
+
+Microsoft documentation:
+- 'Best Practices for Securing Active Directory'
+- Audit policy configuration guidance for DC events`,
+        notes: "Domain account creation (T1136.002) is significantly higher impact than local account creation because the resulting account has domain-wide reach - it can authenticate to any workstation in the domain. The detection point is the Security log on the domain controller, not the workstation. This requires AD audit log forwarding to your SIEM and ensuring DC Security logs are actually being collected (a surprising number of environments don't forward DC logs centrally). The DS audit events (5136/5137) provide more detail than the user creation events but require Directory Service auditing to be enabled in Group Policy - check your audit configuration if these aren't appearing. The 'CN=Users default container' hunt in the PowerShell script is a useful soft signal: legitimate AD admins typically move new accounts to proper OUs after creation, while adversary-created accounts are often left in the default Users container. SPN attribute presence on a new user account is another useful flag - normal user accounts rarely have SPNs, but adversaries set them to enable Kerberoasting. Computer account creation (T1136.003) is sometimes preferred by adversaries because computer accounts have different audit characteristics and some defensive tools filter them out of user-focused queries. The compound pattern - 4720 (create) + 4724 (set password) + 4728 (add to Domain Admins) + 4624 (logon) in close time proximity - is the classic adversary chain and the highest-fidelity multi-event correlation for this technique.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Domain account creation for persistence documented across SolarWinds and long-dwell operations." },
+          { cls: "apt-cn", name: "APT41", note: "Backdoor domain accounts documented across sector-targeting operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Domain admin account creation standard pre-encryption tradecraft across most ransomware operations." },
+          { cls: "apt-mul", name: "FIN6", note: "Domain account creation documented in financial sector intrusions." },
+          { cls: "apt-ir", name: "APT34", note: "Domain account manipulation documented in operations against Middle East infrastructure." }
+        ],
+        cite: "MITRE ATT&CK T1136.002, T1136.003"
+      }
+    ]
   }
 ];
