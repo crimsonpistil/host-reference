@@ -74,9 +74,9 @@
 
   <a href="persistence.html" class="tactic-card" data-tags="persistence ta0003 run keys startup folder wmi subscription service scheduled task shortcut modification autostart">
     <div class="card-id" style="color:#39d353">TA0003</div>
-    <span class="card-pill" style="background:rgba(57,211,83,.12);color:#39d353">5 indicators · 2 of 5 techniques built</span>
+    <span class="card-pill" style="background:rgba(57,211,83,.12);color:#39d353">8 indicators · 3 of 5 techniques built</span>
     <div class="card-name">Persistence</div>
-    <div class="card-desc">Mechanisms ensuring adversary access survives reboots and logouts - registry Run keys, Startup folder, WMI event subscriptions, Windows services, scheduled tasks, shortcut modification. T1547.001 Run Keys / Startup Folder (3 indicators) and T1546.003 WMI Subscription Persistence Hunt (2 indicators) built. Remaining 3 techniques (service hunt, scheduled task persistence angle, shortcut modification) coming next sessions.</div>
+    <div class="card-desc">Mechanisms ensuring adversary access survives reboots and logouts - registry Run keys, Startup folder, WMI event subscriptions, Windows services, scheduled tasks, shortcut modification. T1547.001 Run Keys / Startup Folder (3 indicators), T1546.003 WMI Subscription Persistence Hunt (2 indicators), and T1543.003 Windows Service Persistence Hunt (3 indicators) built. Remaining 2 techniques (scheduled task persistence angle, shortcut modification) coming next sessions.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
@@ -152,7 +152,7 @@
     <div class="info-card">
       <h3>Build status</h3>
       <p><strong>Execution (TA0002) is complete</strong>: all 13 techniques fully built with 32 indicators total. Coverage includes scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files.</p>
-      <p>Currently building: <strong>Persistence (TA0003)</strong> - top 5 techniques first. T1547.001 Registry Run Keys / Startup Folder (3 indicators) and T1546.003 WMI Subscription Persistence Hunt (2 indicators) built. Cross-cited techniques from Execution (WMI subscriptions, scheduled tasks, services) are being built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
+      <p>Currently building: <strong>Persistence (TA0003)</strong> - top 5 techniques first. T1547.001 Registry Run Keys / Startup Folder (3 indicators), T1546.003 WMI Subscription Persistence Hunt (2 indicators), and T1543.003 Windows Service Persistence Hunt (3 indicators) built. Cross-cited techniques from Execution (WMI subscriptions, scheduled tasks, services) are built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
       <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Defense Evasion<br>&rarr;Privilege Escalation<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 

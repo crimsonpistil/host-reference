@@ -1029,16 +1029,633 @@ DEF CON / Black Hat talks:
     desc: "Hunting established services with suspicious config - baseline deviation, binary path analysis, hidden service detection",
     rows: [
       {
-        sub: "T1543.003 - Coming Soon",
-        indicator: "Full content for T1543.003 Service Persistence Hunt coming in next build session",
-        sysmon: "(see widget summary in build session for headline indicator)",
-        kibana: "(coming soon)",
-        powershell: "(coming soon)",
-        registry: "(coming soon)",
-        tools: "(coming soon)",
-        ossdetect: "(coming soon)",
-        notes: "Planned coverage: hunting established services rather than catching creation (complements T1569.002 in Execution). 2-3 indicators planned - service hunting by config anomaly, hidden services via SD manipulation, ServiceDLL svchost-host persistence.",
-        apt: [{ cls: "apt-mul", name: "Coming soon", note: "Full APT attribution in next session" }],
+        sub: "T1543.003 - Service Inventory with Suspicious Configuration",
+        indicator: "Enumerate all registered services and flag those with non-standard paths, unsigned binaries, blank descriptions, or other anomalous configuration",
+        sysmon: `// This indicator is hunting-oriented - PowerShell
+// registry sweep, not Sysmon detection.
+//
+// Sysmon detects service CREATION in real-time via
+// EID 13 (Run/Services registry write) and Windows
+// System Event 7045 - both covered in T1569.002.
+// This indicator finds services that were established
+// before logging coverage began.
+//
+// Sysmon contribution: re-check service event history:
+
+EventID=13 (registry value set)
+TargetObject=*\\Services\\*\\ImagePath
+// Useful for retroactive timeline of when a
+// service was installed or modified
+
+// Windows System Event 7045 (service installed):
+EventID=7045
+LogName=System
+// Captures all service installations including
+// those by sc.exe, PowerShell New-Service,
+// PsExec PSEXESVC, and direct API calls`,
+        kibana: `// Historical Sysmon EID 13 for service registry writes
+winlog.event_id: 13
+AND registry.path: *\\Services\\*\\ImagePath
+
+// Windows System Event 7045 (all service installs)
+winlog.event_id: 7045
+AND winlog.channel: "System"
+
+// Filter to suspicious service file paths
+winlog.event_id: 7045
+AND winlog.event_data.ImagePath: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\* OR *powershell* OR *cmd.exe* OR *rundll32* OR *mshta*)`,
+        powershell: `# Comprehensive service inventory hunt - flag suspicious config
+
+$results = @()
+
+# Pull all services with their full registry config
+Get-ChildItem "HKLM:\\SYSTEM\\CurrentControlSet\\Services" | ForEach-Object {
+  $svc = $_
+  $props = Get-ItemProperty $svc.PSPath -ErrorAction SilentlyContinue
+  if (-not $props.ImagePath) { return }
+
+  $name = $svc.PSChildName
+  $ipRaw = $props.ImagePath
+  # Strip leading quotes, extract just the binary path
+  $ipPath = $ipRaw.TrimStart('"') -replace '^([^"]+).*','$1'
+  $ipPath = [System.Environment]::ExpandEnvironmentVariables($ipPath)
+
+  $suspicious = @()
+
+  # Check 1: ImagePath in user-writable directory
+  if ($ipPath -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public|\\\\Downloads)') {
+    $suspicious += "ImagePath in user-writable path"
+  }
+
+  # Check 2: ImagePath outside standard system/program dirs
+  $standardPaths = @('C:\\\\Windows\\\\','C:\\\\Program Files\\\\','C:\\\\Program Files \\(x86\\)\\\\')
+  $inStandard = $false
+  foreach ($p in $standardPaths) {
+    if ($ipPath -match "^$p") { $inStandard = $true; break }
+  }
+  if (-not $inStandard) {
+    $suspicious += "ImagePath outside standard directories"
+  }
+
+  # Check 3: ImagePath is an interpreter (LOLBin service)
+  if ($ipPath -match '(powershell|cmd\\.exe|wscript|cscript|mshta|rundll32|regsvr32)\\.exe$') {
+    $suspicious += "Service wraps interpreter (LOLBin pattern)"
+  }
+
+  # Check 4: Binary unsigned (check Authenticode)
+  if (Test-Path $ipPath) {
+    $sig = Get-AuthenticodeSignature $ipPath -ErrorAction SilentlyContinue
+    if ($sig.Status -ne 'Valid') {
+      $suspicious += "Binary unsigned or invalid signature ($($sig.Status))"
+    }
+  } else {
+    $suspicious += "Binary file does not exist at ImagePath"
+  }
+
+  # Check 5: Blank Description and DisplayName (anomalous)
+  if ([string]::IsNullOrWhiteSpace($props.Description) -and
+      [string]::IsNullOrWhiteSpace($props.DisplayName)) {
+    $suspicious += "Blank Description AND DisplayName"
+  }
+
+  # Check 6: Auto-start service with no DependOnService
+  # (anomalous for non-Microsoft services)
+  if ($props.Start -eq 2 -and -not $props.DependOnService -and
+      $ipPath -notmatch 'C:\\\\Windows\\\\') {
+    $suspicious += "Auto-start with no dependencies, non-system path"
+  }
+
+  if ($suspicious.Count -gt 0) {
+    $results += [PSCustomObject]@{
+      ServiceName = $name
+      DisplayName = $props.DisplayName
+      ImagePath = $ipRaw
+      StartType = switch ($props.Start) {
+        0 {'Boot'} 1 {'System'} 2 {'Auto'}
+        3 {'Demand'} 4 {'Disabled'} default {$_}
+      }
+      RunAs = $props.ObjectName
+      Description = $props.Description
+      Suspicious = ($suspicious -join '; ')
+    }
+  }
+}
+
+$results | Sort-Object ServiceName | Format-Table -AutoSize`,
+        registry: `Service registry structure:
+HKLM\\SYSTEM\\CurrentControlSet\\Services\\<ServiceName>\\
+  ImagePath     - binary path + arguments
+  Start         - 0=Boot, 1=System, 2=Auto, 3=Demand, 4=Disabled
+  Type          - 0x10=Win32OwnProcess, 0x20=Win32ShareProcess (svchost),
+                  0x110=interactive Win32OwnProcess
+  ObjectName    - run-as account (LocalSystem, NetworkService, etc.)
+  Description   - human-readable description
+  DisplayName   - shown in services.msc
+  DependOnService - service dependencies (REG_MULTI_SZ)
+  ErrorControl  - error handling on failure
+
+Service hunting workflow:
+1. Run the PowerShell sweep above
+2. For each flagged service, investigate:
+   - File hash of ImagePath binary (VirusTotal lookup)
+   - When was the service key last modified?
+     (Get-Item <key> | Select LastWriteTime)
+   - Process activity history for that service name
+   - Network connections from service process
+
+Baseline approach:
+- Capture service inventory on known-good reference
+  system: Get-Service | Export-CSV baseline.csv
+- Diff suspect host:
+  Compare-Object (Import-CSV baseline.csv)
+    (Get-Service | Select Name,DisplayName)
+- New service entries warrant investigation
+
+Last-write timestamps for IR timelining:
+(Get-Item "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\<name>").LastWriteTime
+- Tells you when the service was installed or last
+  modified - useful for correlating with other
+  intrusion timeline events
+
+Standard service binary locations:
+- C:\\Windows\\System32\\
+- C:\\Windows\\SysWOW64\\
+- C:\\Program Files\\<vendor>\\
+- C:\\Program Files (x86)\\<vendor>\\
+- Anything else = investigate`,
+        tools: `Hunting / enumeration tools:
+
+PowerShell (the script above):
+- No tool deploy required
+- Works on any Windows
+- Best for ad-hoc IR triage
+
+Sysinternals autoruns.exe:
+- Services tab - all registered services
+- Highlights unsigned and unverified binaries
+- VirusTotal integration for reputation
+- Single best tool for manual triage
+
+Velociraptor:
+- Windows.System.Services
+  (full service enumeration artifact)
+- Returns ImagePath, signature status, last-write
+  time, and dependencies for each service
+- Best for fleet-wide service hunting
+
+KAPE (Eric Zimmerman):
+- Targets/Compound/SystemHive.tkape
+  (collects SYSTEM registry hive for offline analysis)
+- Combined with RECmd plugins for service enumeration
+
+Sigma rules apply mostly to creation-time
+detection (covered in T1569.002) - hunting
+established services is more of a manual workflow
+
+Adversary tool patterns to recognize:
+- Cobalt Strike services: random short names,
+  ImagePath often points to a DLL via rundll32,
+  or to a small EXE in user-writable location
+- PSEXESVC: well-known PsExec pattern (C:\\Windows\\PSEXESVC.exe)
+- SharPersist: configurable but typically uses
+  legitimate-sounding names with binaries in
+  C:\\ProgramData
+- Empire / Metasploit: predictable naming patterns
+  (mostly addressed by their respective module docs)`,
+        ossdetect: `Sigma:
+- Real-time detection rules cover creation
+  (proc_creation_win_sc_service_creation_*.yml)
+- Hunting existing services is a manual workflow
+
+Atomic Red Team:
+- T1543.003 Test #1 (sc.exe service creation)
+- T1543.003 Test #2 (PowerShell New-Service)
+- Use to validate the hunt: install service via
+  Atomic, run the PowerShell sweep, confirm it
+  surfaces in your detection
+
+Hayabusa:
+- ServiceCreationSuspBinPath rules (real-time)
+- For hunting, use PowerShell or autoruns
+
+Velociraptor:
+- Windows.System.Services (best fleet-wide artifact)
+- Returns full service config including signature
+  status for each ImagePath binary
+
+Reference - SANS DFIR poster:
+'Windows Services Forensics'
+- Comprehensive coverage of service abuse patterns
+- Annual updates with new techniques
+
+Microsoft documentation:
+- Service security and access rights
+- Useful for understanding the technique surface`,
+        notes: "Service hunting is one of the most important persistence-detection workflows in Windows IR. The PowerShell sweep covers the high-fidelity flags: services with binaries in user-writable paths, services wrapping interpreters (LOLBin pattern), unsigned binaries, missing files (orphaned service entries), blank metadata. Each flag alone is moderate confidence; multiple flags on the same service is high confidence. The baseline-and-diff approach is especially powerful for services because legitimate service inventories are stable over time - the same set of services with the same configs runs on every workstation of the same build. Deviations from baseline are immediately suspicious. The unsigned binary check is particularly useful: legitimate Microsoft and major-vendor services are virtually always Authenticode-signed. An unsigned binary running as a service is rare in enterprise environments outside of in-house developed software. Pair this hunt with autoruns.exe for the highest coverage - autoruns includes services in its 200+ autostart inventory and adds VirusTotal reputation lookups that the PowerShell sweep doesn't have. The last-write timestamp trick on the service registry key is genuinely useful in IR timelining: it tells you when the service was installed or last modified, which often correlates with initial compromise events visible in other logs.",
+        apt: [
+          { cls: "apt-ru", name: "APT29", note: "Service-based persistence with custom binaries documented across espionage operations." },
+          { cls: "apt-cn", name: "APT41", note: "Service persistence with binaries in non-standard paths documented in multiple intrusions." },
+          { cls: "apt-kp", name: "Lazarus", note: "Malicious service installation documented in CISA advisories on DPRK operations." },
+          { cls: "apt-mul", name: "Ransomware", note: "Service persistence for propagation and re-encryption documented across Ryuk, Conti, BlackCat, LockBit families." },
+          { cls: "apt-mul", name: "Cobalt Strike", note: "Service-based persistence is built-in - common across red team and APT operations using the framework." }
+        ],
+        cite: "MITRE ATT&CK T1543.003"
+      },
+      {
+        sub: "T1543.003 - ServiceDLL Hijack (svchost-hosted Service Persistence)",
+        indicator: "Service of Type=0x20 (Win32ShareProcess) with ServiceDll registry value pointing to user-writable or unsigned DLL - svchost-loaded malicious DLL",
+        sysmon: `// Real-time detection - registry write to ServiceDll:
+EventID=13
+TargetObject=*\\Services\\*\\Parameters\\ServiceDll
+Details matches:
+  *\\AppData\\* OR *\\Temp\\*
+  OR *\\ProgramData\\* OR *\\Users\\Public\\*
+  OR <DLL path outside System32>
+
+// Real-time detection - svchost loading unsigned DLL:
+EventID=7 (Image Load)
+Image=*\\svchost.exe
+ImageLoaded NOT in standard system paths
+Signed=false`,
+        kibana: `// ServiceDll registry value set
+winlog.event_id: 13
+AND registry.path: *\\Services\\*\\Parameters\\ServiceDll
+AND registry.data.strings: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\*)
+
+// svchost loading unsigned DLL from non-system path
+winlog.event_id: 7
+AND process.name: "svchost.exe"
+AND file.code_signature.signed: false
+AND NOT file.path: ("C:\\\\Windows\\\\System32\\\\*" OR "C:\\\\Windows\\\\SysWOW64\\\\*")`,
+        powershell: `# Hunt for ServiceDll values pointing to suspicious paths
+Get-ChildItem "HKLM:\\SYSTEM\\CurrentControlSet\\Services" | ForEach-Object {
+  $svc = $_
+  $paramKey = Join-Path $svc.PSPath 'Parameters'
+  if (Test-Path $paramKey) {
+    $dll = (Get-ItemProperty $paramKey -Name ServiceDll -EA SilentlyContinue).ServiceDll
+    if ($dll) {
+      $dllExpanded = [System.Environment]::ExpandEnvironmentVariables($dll)
+
+      $suspicious = @()
+
+      # User-writable path
+      if ($dllExpanded -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public)') {
+        $suspicious += "ServiceDll in user-writable path"
+      }
+
+      # Outside standard system / program directories
+      if ($dllExpanded -notmatch '^(C:\\\\Windows\\\\|C:\\\\Program Files)') {
+        $suspicious += "ServiceDll outside standard paths"
+      }
+
+      # Signature check
+      if (Test-Path $dllExpanded) {
+        $sig = Get-AuthenticodeSignature $dllExpanded -EA SilentlyContinue
+        if ($sig.Status -ne 'Valid') {
+          $suspicious += "ServiceDll unsigned ($($sig.Status))"
+        }
+      } else {
+        $suspicious += "ServiceDll file does not exist"
+      }
+
+      if ($suspicious.Count -gt 0) {
+        [PSCustomObject]@{
+          ServiceName = $svc.PSChildName
+          ServiceDll = $dll
+          Resolved = $dllExpanded
+          Suspicious = ($suspicious -join '; ')
+        }
+      }
+    }
+  }
+}
+
+# Cross-reference: which svchost group hosts this service?
+# Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\<name>" -Name ImagePath
+# The ImagePath typically contains: %SystemRoot%\\system32\\svchost.exe -k <group>`,
+        registry: `svchost service architecture:
+- svchost.exe hosts multiple services in one process
+- Service "groups" allow related services to share
+  a single svchost instance (memory efficiency)
+- Each service has:
+  HKLM\\SYSTEM\\CurrentControlSet\\Services\\<Name>\\
+    ImagePath = %SystemRoot%\\system32\\svchost.exe
+                -k <group_name>
+    Parameters\\
+      ServiceDll = <path to DLL implementing service>
+      ServiceMain = <export function name, optional>
+
+The hijack technique:
+- Adversary creates a service of Type=0x20 (shared)
+  with ImagePath pointing to legitimate svchost.exe
+- Sets Parameters\\ServiceDll to point to attacker-
+  controlled DLL
+- When service starts, svchost.exe (trusted Microsoft
+  binary) loads the attacker DLL
+- Process tree shows svchost.exe as the running
+  process - looks legitimate to most monitoring
+
+Why adversaries favor this:
+- Hides under svchost.exe process name (40-100 svchosts
+  run on a typical Windows host - blending is easy)
+- ImagePath is the legitimate Microsoft svchost.exe -
+  bypasses path-based detection
+- Detection requires looking at the ServiceDll parameter
+  rather than the ImagePath
+- The malicious DLL runs in a SYSTEM-privileged
+  process context
+
+Hunting workflow:
+- Enumerate Services with ImagePath=svchost.exe -k *
+- For each, check Parameters\\ServiceDll
+- Flag ServiceDll values outside System32/SysWOW64
+
+Defensive registry:
+- KnownDLLs (HKLM\\SYSTEM\\CurrentControlSet\\Control\\
+  Session Manager\\KnownDLLs) does NOT protect against
+  ServiceDll hijack since the DLL is loaded by explicit
+  path, not by search order`,
+        tools: `Adversary frameworks using ServiceDll hijack:
+- Various long-dwell espionage operators
+- ShadowPad / PlugX variants
+- Some commodity malware (less common - prefers
+  simpler Run key persistence)
+
+Build process:
+- Adversary writes a DLL exporting ServiceMain function
+- Optionally exports SvchostPushServiceGlobals
+  (some service groups require it)
+- DLL placed in attacker-chosen location
+- Service registered via sc.exe or registry edit
+
+Reference DLL structure:
+- DllMain entry point
+- ServiceMain export (the service implementation)
+- ServiceCtrlHandler for SCM control messages
+- Most malicious ServiceDlls implement minimal
+  legitimate-looking service interface, then run
+  attacker code in a separate thread
+
+Detection note: this is a more sophisticated
+persistence than simple service installation,
+typically associated with deliberate operators
+rather than commodity malware. Finding ServiceDll
+hijack on a host is usually a strong indicator
+of APT-level compromise rather than opportunistic
+infection.
+
+Service group context:
+- netsvcs (the most populated group - 30+ services)
+- LocalService, NetworkService, LocalSystemNetworkRestricted
+- Each group has its own svchost instance
+- Adversaries often target netsvcs because it's
+  the most crowded and most generic`,
+        ossdetect: `Sigma:
+- registry_event_servicedll_susp_path.yml
+- image_load_win_svchost_susp_dll.yml
+- registry_event_servicedll_modification.yml
+
+Atomic Red Team:
+- T1543.003 (service variants)
+- Some tests cover ServiceDll modification
+
+Hayabusa:
+- ServiceDllSuspPath rules (EID 13)
+- SvchostUnsignedDllLoad detection (EID 7)
+
+Velociraptor:
+- Windows.System.Services (returns Parameters\\ServiceDll
+  alongside ImagePath for each service)
+- Windows.System.DLL (loaded DLLs per process)
+
+Reference - Microsoft documentation:
+- 'Working with the AllJoyn Service Manager'
+  and similar svchost service implementation docs
+- Useful for understanding the legitimate side
+  of the technique surface
+
+Threat hunting references:
+- PlugX malware family analyses
+- Various China-nexus APT reports documenting
+  ServiceDll hijack tradecraft`,
+        notes: "ServiceDll hijack is a more sophisticated persistence technique than basic service installation - it specifically targets the svchost-hosted service model where multiple services share a single host process. The detection pivot is that you're not looking at the ImagePath (which is legitimate svchost.exe), you're looking at the Parameters\\ServiceDll value which actually points to the executable code. This is a high-value indicator when found because it's predominantly associated with deliberate, capable operators rather than commodity malware - most opportunistic infections use simpler Run key or service-with-EXE persistence rather than going through the trouble of building a proper ServiceDll. ShadowPad and PlugX malware families are the canonical examples and are heavily associated with China-nexus APT operations. The KnownDLLs registry protection does NOT apply here since the DLL is loaded by explicit path, not search order - so this technique works regardless of DLL search order hardening. False positives: legitimate Microsoft services use ServiceDll extensively (it's the standard svchost service pattern), so the filter must include 'path outside System32/SysWOW64' and 'unsigned' to surface anomalies. Pair the Sysmon EID 13 real-time detection with the PowerShell hunt for full coverage.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "ServiceDll hijack documented across multiple sector intrusions - signature tradecraft." },
+          { cls: "apt-cn", name: "ShadowPad", note: "ServiceDll-based persistence via svchost - canonical malware family for this technique." },
+          { cls: "apt-cn", name: "PlugX", note: "Heavy use of svchost ServiceDll persistence - one of the most well-documented examples." },
+          { cls: "apt-cn", name: "Winnti", note: "ServiceDll hijack documented across the broader APT41 / Winnti ecosystem." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "ServiceDll persistence indicates capable operators - rare in commodity malware, common in APT operations." }
+        ],
+        cite: "MITRE ATT&CK T1543.003"
+      },
+      {
+        sub: "T1543.003 - Hidden Services via Security Descriptor Manipulation",
+        indicator: "Service registry key with ACL preventing standard enumeration tools from listing it - service exists but invisible to sc.exe and services.msc",
+        sysmon: `// EID 12 (registry key create/delete) or EID 13
+// catching changes to Service Security Descriptor:
+EventID=13
+TargetObject=*\\Services\\*\\Security
+// The Security value contains the ACL for the
+// service registry key - modifications to it
+// indicate access control changes
+
+// Also watch sc.exe sdset commands:
+EventID=1
+Image=*\\sc.exe
+CommandLine matches: *sdset*
+// sc sdset modifies a service's security descriptor`,
+        kibana: `// Service security descriptor modification
+winlog.event_id: 13
+AND registry.path: *\\Services\\*\\Security
+
+// sc.exe used to set service security
+winlog.event_id: 1
+AND process.name: "sc.exe"
+AND process.command_line: *sdset*`,
+        powershell: `# Hunt for hidden services - registry enumeration bypass
+# Method 1: Compare what sc.exe sees vs what's in the registry
+
+# What sc.exe / Get-Service can see:
+$visible = Get-Service | Select-Object -ExpandProperty Name
+
+# What's actually in the registry:
+$registry = Get-ChildItem "HKLM:\\SYSTEM\\CurrentControlSet\\Services" |
+  Where-Object { $_.GetValue('ImagePath') } |
+  Select-Object -ExpandProperty PSChildName
+
+# Diff: services in registry but not visible to Get-Service
+$hidden = Compare-Object -ReferenceObject $registry -DifferenceObject $visible |
+  Where-Object { $_.SideIndicator -eq '<=' } |
+  Select-Object -ExpandProperty InputObject
+
+if ($hidden) {
+  Write-Host "Potentially hidden services detected:" -ForegroundColor Red
+  $hidden | ForEach-Object {
+    $key = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$_"
+    $props = Get-ItemProperty $key -EA SilentlyContinue
+    [PSCustomObject]@{
+      Name = $_
+      ImagePath = $props.ImagePath
+      DisplayName = $props.DisplayName
+      RegistryKey = $key
+    }
+  }
+} else {
+  Write-Host "No hidden services detected via registry/SCM diff" -ForegroundColor Green
+}
+
+# Method 2: Check for modified service security descriptors
+# (requires reading the binary SD - shown conceptually)
+# Use: sc.exe sdshow <ServiceName>
+# Compare against known-good SD for that service type
+
+# Method 3: Enumerate service security from registry
+Get-ChildItem "HKLM:\\SYSTEM\\CurrentControlSet\\Services" | ForEach-Object {
+  $sec = (Get-ItemProperty $_.PSPath -Name Security -EA SilentlyContinue).Security
+  if ($sec) {
+    # Security value present means SD has been explicitly set
+    # Default services don't have an explicit Security value -
+    # they inherit from the parent key
+    [PSCustomObject]@{
+      ServiceName = $_.PSChildName
+      HasExplicitSecurity = $true
+      ImagePath = (Get-ItemProperty $_.PSPath -Name ImagePath -EA SilentlyContinue).ImagePath
+    }
+  }
+}`,
+        registry: `Service hiding via ACL manipulation:
+
+How it works:
+- Service registry key has a SECURITY_DESCRIPTOR (SD)
+  controlling who can read/modify the key
+- Standard service SDs allow SYSTEM, Administrators,
+  and authenticated users to enumerate
+- Adversary modifies SD to DENY access to
+  Administrators and SYSTEM (or just deny READ to
+  the specific accounts used by sc.exe / services.msc)
+- sc.exe and services.msc can't see the service
+- Service still runs because the SCM uses a different
+  privilege level than user enumeration tools
+
+The Security value:
+HKLM\\SYSTEM\\CurrentControlSet\\Services\\<Name>\\Security
+- Binary REG_BINARY value containing the SD
+- Optional - if absent, service uses default SD
+- Presence of this value on a non-system service
+  is itself unusual
+
+Detection approaches:
+
+1. Diff registry vs SCM enumeration (shown in script):
+   - List services from HKLM\\SYSTEM\\...Services\\
+   - List services from Get-Service / sc query
+   - Difference = services hidden via ACL
+
+2. Inspect service SD directly:
+   sc.exe sdshow <ServiceName>
+   - Returns SDDL string
+   - Compare against known-good SD format
+   - Adversary SDs typically contain explicit DENY
+     ACEs (D:...DENY... in SDDL format)
+
+3. Check for explicit Security value:
+   - Most services don't have an explicit Security
+     value (they inherit from parent)
+   - A non-system service with explicit Security
+     value warrants investigation
+
+Reset hidden service ACL (if found):
+sc.exe sdset <ServiceName>
+  D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)
+  (A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)
+  (A;;CCLCSWLOCRRC;;;IU)
+  (A;;CCLCSWLOCRRC;;;SU)
+(restores default service SD)
+
+Memory forensics for confirmation:
+- Volatility psscan: lists running processes
+  including those hidden from standard tools
+- Match running svchost / service processes
+  against registry-enumerated services to identify
+  processes belonging to hidden services`,
+        tools: `Service hiding tradecraft:
+
+Known adversary toolkits with hidden service support:
+- Various custom China-nexus implants
+- Some advanced ransomware variants
+- Custom red team implants for evasion
+
+Standard implementation:
+- After installing the service, run:
+  sc.exe sdset <ServiceName> <restrictive_SDDL>
+- Or modify the Security value in registry directly
+- Tools available for SDDL manipulation:
+  - sc.exe sdshow / sdset (built-in)
+  - PsService (Sysinternals)
+  - Custom code using Win32 API
+    (RegSetKeySecurity, SetServiceObjectSecurity)
+
+Why this technique is relatively rare:
+- More sophisticated than typical malware
+- Many adversaries don't bother because basic
+  persistence works fine against most defenders
+- When you DO see it, treat as high-confidence
+  evidence of capable / deliberate operator
+
+Detection note:
+- Defenders running sc query or services.msc will
+  miss hidden services entirely
+- The registry diff approach is the most reliable
+  detection - works even against SDs that deny
+  access to all standard enumeration paths
+- Velociraptor's service enumeration uses registry
+  reads, so it surfaces hidden services that sc.exe
+  cannot see
+
+Real-world examples:
+- Reported in Mandiant and CrowdStrike intrusion
+  reports on advanced operators
+- Less common than ServiceDll hijack but appears
+  in long-dwell espionage cases`,
+        ossdetect: `Sigma:
+- registry_event_service_security_descriptor_change.yml
+- proc_creation_win_sc_sdset.yml
+
+Atomic Red Team:
+- T1543.003 has tests for service modification
+- Hidden service variant less commonly automated
+
+Hayabusa:
+- ServiceSDModification rules (EID 13)
+- ScSdSetExecution rules (EID 1)
+
+Velociraptor:
+- Windows.System.Services
+  (enumerates from registry - surfaces hidden services
+  that sc.exe / Get-Service cannot see)
+- Windows.Registry.NTUser
+- Best tool for fleet-wide hidden service hunting
+
+Reference:
+- Microsoft service security documentation
+- Windows Internals 7th edition - chapter on services
+- Various APT analyses describing service hiding
+  tradecraft
+
+Manual workflow:
+1. Run registry/SCM diff script (shown above)
+2. For any flagged services, run sc.exe sdshow
+3. Compare SDDL against baseline
+4. Examine ImagePath and binary signature
+5. Restore default ACL only after collecting
+   forensic evidence`,
+        notes: "Service hiding via security descriptor manipulation is one of the more sophisticated persistence techniques in Windows - it specifically targets the gap between how services are stored (registry) and how they're typically enumerated (Service Control Manager via sc.exe). The technique works because Windows allows arbitrary ACLs on service registry keys, and the standard enumeration tools respect those ACLs - so if the ACL denies your account read access, the service appears not to exist from your perspective. The registry-vs-SCM diff approach is the most reliable detection because it bypasses the ACL entirely: you're reading the registry directly and comparing against what the SCM returns. Any service in the registry that doesn't appear in the SCM enumeration is either hidden, broken, or in an unusual state - all warrant investigation. This is a relatively rare technique - more common in APT-level operations than commodity malware - so finding it is a strong signal of deliberate compromise. Pair with the ServiceDll hijack indicator: an adversary using ServiceDll hijack AND hiding the service via SD manipulation has built a particularly stealthy persistence layer that defeats most standard defender workflows. Velociraptor's Windows.System.Services artifact reads directly from the registry and is the best fleet-wide tool for surfacing this technique.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Service hiding via SD manipulation documented in long-dwell intrusion reports." },
+          { cls: "apt-cn", name: "Advanced China-nexus", note: "Service hiding tradecraft associated with capable operators - documented across multiple campaigns." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "Service hiding indicates deliberate evasion focus - rare in opportunistic intrusions." },
+          { cls: "apt-mul", name: "Red Teams", note: "Custom implants supporting service hiding documented in red team toolkits." }
+        ],
         cite: "MITRE ATT&CK T1543.003"
       }
     ]
