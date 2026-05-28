@@ -4102,5 +4102,543 @@ Microsoft documentation:
         cite: "MITRE ATT&CK T1136.002, T1136.003"
       }
     ]
+  },
+  {
+    id: "T1546.015",
+    name: "Event Triggered Execution: Component Object Model Hijacking",
+    desc: "CLSID registry manipulation to redirect COM object instantiation to attacker-controlled DLLs - sophisticated persistence",
+    rows: [
+      {
+        sub: "T1546.015 - HKCU CLSID Hijack (User Hive Shadow)",
+        indicator: "CLSID registry key created or modified in HKCU\\Software\\Classes\\CLSID - shadows HKLM entry, redirects legitimate COM instantiation to attacker DLL",
+        sysmon: `// Real-time detection - CLSID write to HKCU (user hive):
+EventID=13
+TargetObject matches:
+  *\\Software\\Classes\\CLSID\\{*}\\InprocServer32\\(Default)
+  OR *\\Software\\Classes\\CLSID\\{*}\\InprocServer32\\
+       LoadWithoutCOM
+  OR *\\Software\\Classes\\CLSID\\{*}\\LocalServer32\\(Default)
+  OR *\\Software\\Classes\\Wow6432Node\\CLSID\\{*}\\
+       InprocServer32\\(Default)
+
+// HKCU writes are particularly suspicious because:
+// 1. Per-user scope - any user can write (no admin needed)
+// 2. Takes precedence over HKLM (machine-wide) entry
+// 3. Effectively 'shadows' the legitimate COM object
+// 4. Adversary code runs whenever any process in that
+//    user's session instantiates the hijacked COM object`,
+        kibana: `// HKCU CLSID write (the canonical hijack location)
+winlog.event_id: 13
+AND registry.path: (*\\Software\\Classes\\CLSID\\* AND (*\\InprocServer32\\* OR *\\LocalServer32\\*))
+
+// 32-bit variant via Wow6432Node
+winlog.event_id: 13
+AND registry.path: *\\Wow6432Node\\CLSID\\*\\InprocServer32\\*
+
+// The DLL path written is in registry.data.strings -
+// flag if it's in user-writable territory:
+winlog.event_id: 13
+AND registry.path: *\\Software\\Classes\\CLSID\\*\\InprocServer32\\*
+AND registry.data.strings: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\* OR *\\Public\\*)`,
+        powershell: `# Hunt for HKCU CLSID shadow entries that hijack HKLM COM objects
+
+# 1. Enumerate all CLSIDs defined in HKCU
+$hkcuClsids = @()
+$paths = @(
+  'HKCU:\\Software\\Classes\\CLSID',
+  'HKCU:\\Software\\Classes\\Wow6432Node\\CLSID'
+)
+foreach ($p in $paths) {
+  if (Test-Path $p) {
+    Get-ChildItem $p -EA SilentlyContinue | ForEach-Object {
+      $clsid = $_.PSChildName
+      $inproc = (Get-ItemProperty "$($_.PSPath)\\InprocServer32" -EA SilentlyContinue).'(default)'
+      $local = (Get-ItemProperty "$($_.PSPath)\\LocalServer32" -EA SilentlyContinue).'(default)'
+      if ($inproc -or $local) {
+        $hkcuClsids += [PSCustomObject]@{
+          CLSID = $clsid
+          InprocServer = $inproc
+          LocalServer = $local
+          Hive = $p
+        }
+      }
+    }
+  }
+}
+
+# 2. For each HKCU CLSID, check if same CLSID exists in HKLM
+# If both exist = the HKCU one shadows HKLM = potential hijack
+$results = foreach ($entry in $hkcuClsids) {
+  $hklmPath = "HKLM:\\Software\\Classes\\CLSID\\$($entry.CLSID)"
+  $hklmExists = Test-Path $hklmPath
+  $hklmInproc = if ($hklmExists) {
+    (Get-ItemProperty "$hklmPath\\InprocServer32" -EA SilentlyContinue).'(default)'
+  }
+
+  $suspicious = @()
+  if ($hklmExists) {
+    $suspicious += "SHADOWS HKLM entry"
+    if ($hklmInproc -ne $entry.InprocServer) {
+      $suspicious += "Different target DLL than HKLM"
+    }
+  }
+  $target = if ($entry.InprocServer) { $entry.InprocServer } else { $entry.LocalServer }
+  if ($target -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public)') {
+    $suspicious += "Target in user-writable path"
+  }
+  if ($target -and (Test-Path $target)) {
+    $sig = Get-AuthenticodeSignature $target -EA SilentlyContinue
+    if ($sig.Status -ne 'Valid') {
+      $suspicious += "Target unsigned ($($sig.Status))"
+    }
+  }
+
+  if ($suspicious.Count -gt 0) {
+    [PSCustomObject]@{
+      CLSID = $entry.CLSID
+      HKCU_Target = $target
+      HKLM_Target = $hklmInproc
+      Hive = $entry.Hive
+      Suspicious = $suspicious -join '; '
+    }
+  }
+}
+
+$results | Sort-Object Suspicious -Descending | Format-Table -AutoSize
+
+# 3. Also check the per-user hives across all users
+Get-ChildItem 'HKU:\\' -EA SilentlyContinue | Where-Object {
+  $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$'
+} | ForEach-Object {
+  $sid = $_.PSChildName
+  $key = "HKU:\\$sid\\Software\\Classes\\CLSID"
+  if (Test-Path $key) {
+    Get-ChildItem $key -EA SilentlyContinue | ForEach-Object {
+      $target = (Get-ItemProperty "$($_.PSPath)\\InprocServer32" -EA SilentlyContinue).'(default)'
+      if ($target) {
+        [PSCustomObject]@{
+          UserSID = $sid
+          CLSID = $_.PSChildName
+          Target = $target
+        }
+      }
+    }
+  }
+}`,
+        registry: `COM object resolution order in Windows:
+
+When a process calls CoCreateInstance(CLSID):
+1. Check HKCU\\Software\\Classes\\CLSID\\{CLSID}  <-- HIJACK HERE
+2. Check HKLM\\Software\\Classes\\CLSID\\{CLSID}
+3. Use whichever resolves first
+
+The HKCU shadow attack:
+- Adversary creates HKCU\\Software\\Classes\\CLSID\\
+  {legitimate-CLSID}\\InprocServer32\\
+  with (Default) value pointing to attacker DLL
+- Windows COM resolution finds HKCU entry first
+- Application instantiating the legitimate object
+  actually loads the attacker DLL
+- Adversary code runs inside the calling application's
+  process
+
+Why HKCU specifically:
+- NO ADMIN REQUIRED - any user can write to HKCU
+- Per-user persistence - survives reboots
+- Affects every process in that user's session
+- Harder to detect than HKLM because HKLM enumeration
+  is more commonly checked
+
+High-value hijack targets:
+{CLSID} values most often targeted by adversaries
+(these are loaded by many legitimate processes):
+
+- {ABE3B9A4-257D-4571-A14F-AAD7E1A6FFAB}
+  (Microsoft Outlook CategoryEditor)
+- {00021401-0000-0000-C000-000000000046}
+  (ShellLink - LNK file handler, loaded constantly)
+- {AB8902B4-09CA-4BB6-B78D-A8F59079A8D5}
+  (Thumbnail handler)
+- {0010890e-8789-413c-adbc-48f5b511b3af}
+  (Windows Search)
+- Various ATL CLSIDs used by Office, IE, etc.
+
+Reference databases:
+- 'CLSID' registry values are documented at:
+  HKEY_CLASSES_ROOT\\CLSID\\
+- Each numbered subkey is a COM class
+- InprocServer32 = DLL-hosted (in-process)
+- LocalServer32 = EXE-hosted (out-of-process)
+
+Detection complications:
+- Legitimate software DOES use HKCU\\Software\\Classes
+  for per-user COM registration (rare but happens)
+- True positives are HKCU entries that:
+  1. Shadow an existing HKLM entry, AND
+  2. Point to a DLL in user-writable / unusual path
+- Both conditions together = high confidence
+
+Forensic timeline reconstruction:
+- (Get-Item <CLSID_key>).LastWriteTime indicates
+  when the hijack was established
+- Cross-reference with process activity around
+  that timestamp to identify what triggered the
+  hijack creation`,
+        tools: `COM Hijacking tradecraft:
+
+Tool support:
+- Acehash / Empire / SharPersist (built-in COM hijack
+  modules)
+- Custom DLL development (the attacker's DLL must
+  implement the COM interface of the legitimate
+  object being hijacked, or at least its DllMain
+  to gain execution)
+- Process Monitor (procmon) can identify which
+  CLSIDs are queried by a target process - used
+  by adversaries to identify viable hijack targets
+
+The "phantom" hijack variant (T1546.015):
+- Hijack a CLSID that EXISTS in HKLM but where the
+  DLL is MISSING or not normally loaded
+- Process queries the CLSID, Windows finds no DLL
+  in HKLM, falls back to HKCU
+- Adversary's HKCU entry resolves the previously-
+  empty CLSID and the DLL loads
+- More common than the shadow variant in modern
+  malware because shadow attacks may break the
+  original application functionality
+
+Threat groups using this technique:
+- APT41 - documented COM hijacking in operations
+- ZxShell - uses COM hijack for persistence
+- Cobalt Group - COM hijacking documented
+- Various China-nexus operators
+- BadEthernet APT
+- Less common in commodity malware (too sophisticated;
+  Run keys work fine for opportunistic infections)
+
+Why this technique is rare but valuable for adversaries:
+- Highly evasive - HKCU rarely checked by IR tools
+- Persistence + execution combined (every COM call
+  is execution opportunity)
+- Doesn't appear in autoruns.exe by default
+- Survives most standard cleanup procedures
+
+Tool that surfaces this technique:
+- COMRogue (open-source COM hijack detector)
+- AutorunsToWinEventLog (forwards autoruns output
+  to event log - autoruns DOES catch most COM
+  hijacks but isn't always run)
+- Velociraptor Windows.Registry.COM artifact`,
+        ossdetect: `Sigma:
+- registry_event_com_hijack_hkcu.yml
+- registry_event_com_inprocserver_hkcu.yml
+- registry_event_com_phantom_dll_hijack.yml
+
+Atomic Red Team:
+- T1546.015 Test #1 (HKCU CLSID hijack)
+- T1546.015 Test #2 (Phantom CLSID hijack)
+
+Hayabusa:
+- COMHijackHKCUWrite rules
+- COMSuspiciousInprocServer detection
+
+Velociraptor:
+- Windows.Registry.COM
+- Windows.Sys.AutoRuns (captures COM hijacks)
+- Best fleet-wide tooling for this technique
+
+Sysinternals autoruns.exe:
+- Coverage of COM hijack locations under the
+  'Codecs', 'Image Hijacks', and CLSID-related
+  tabs
+- Highlights suspicious unsigned DLLs in COM
+  registration
+
+COMRogue (open-source tool):
+- Specifically designed for COM hijack detection
+- Scans HKCU and HKLM for shadow / phantom entries
+
+Reference research:
+- 'Beyond good ol' Run key' series (Hexacorn)
+  - Comprehensive ongoing series cataloging
+    every Windows persistence vector including
+    deep coverage of COM hijack variants
+  - hexacorn.com/blog
+- Foundational defender reference for understanding
+  the technique surface`,
+        notes: "COM hijacking via HKCU shadow entries is one of the more sophisticated persistence techniques in Windows. The attack leverages a fundamental Windows COM resolution behavior: HKCU\\Software\\Classes is checked before HKLM\\Software\\Classes when resolving CLSIDs. This means any user can effectively override machine-wide COM object definitions for their own session - no admin required. The detection is genuinely difficult because legitimate software occasionally uses HKCU CLSID entries for per-user COM registration. The high-fidelity signal is the combination of (1) HKCU CLSID entry that shadows an existing HKLM entry AND (2) the HKCU target DLL points to user-writable / unsigned binary. Both conditions together are essentially zero false positive. Single-condition detection generates too much noise to be useful. The phantom variant (hijacking CLSIDs where HKLM exists but the DLL is missing) is more common in modern malware than the shadow variant because phantom hijacking doesn't break the original application functionality. APT41 and ZxShell are the canonical examples but the technique appears across China-nexus operators broadly. The PowerShell hunt script is genuinely useful here because manual review of CLSIDs is impractical (thousands of legitimate COM objects exist); the script focuses specifically on the shadow + suspicious target combination that indicates malicious intent. Hexacorn's blog series 'Beyond good ol' Run key' has the most thorough public coverage of COM hijack variants if you want to dig deeper.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "COM hijacking documented across multiple sector intrusions - canonical advanced persistence example." },
+          { cls: "apt-cn", name: "ZxShell", note: "COM hijack-based persistence is signature tradecraft for this malware family." },
+          { cls: "apt-cn", name: "Cobalt Group", note: "COM hijacking documented in financial sector operations." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "COM hijacking indicates deliberate sophisticated tradecraft - rare in commodity malware, common in capable APT operations." },
+          { cls: "apt-mul", name: "Red Teams", note: "Empire and SharPersist COM hijack modules make this standard advanced red team tradecraft." }
+        ],
+        cite: "MITRE ATT&CK T1546.015"
+      },
+      {
+        sub: "T1546.015 - Treat Path Variants and Phantom DLL Hijacking",
+        indicator: "CLSID with InprocServer32 pointing to non-existent DLL (phantom hijack opportunity), or TreatAs / ProgID redirection - alternative COM hijack vectors",
+        sysmon: `// EID 13 - TreatAs key modification:
+EventID=13
+TargetObject matches:
+  *\\Classes\\CLSID\\{*}\\TreatAs\\(Default)
+// TreatAs redirects one CLSID to another - subtle hijack
+
+// EID 13 - ProgID hijack:
+EventID=13
+TargetObject matches:
+  *\\Classes\\<ProgID>\\CLSID\\(Default)
+// ProgID is the human-readable name (e.g., 'Excel.Application')
+// Redirecting the ProgID's CLSID redirects all callers
+
+// EID 7 - unexpected DLL loaded into a process via COM:
+EventID=7
+ImageLoaded matches:
+  *\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\*
+Signed=false
+// Cross-reference: was the loading process expected
+// to load DLLs from this location?`,
+        kibana: `// TreatAs hijacking
+winlog.event_id: 13
+AND registry.path: (*\\Classes\\CLSID\\*\\TreatAs\\*)
+
+// ProgID redirection
+winlog.event_id: 13
+AND registry.path: (*\\Classes\\* AND *\\CLSID\\* AND NOT *\\Classes\\CLSID\\*)
+
+// Unsigned DLL loaded by COM-instantiated process
+winlog.event_id: 7
+AND file.code_signature.signed: false
+AND file.path: (*\\AppData\\* OR *\\Temp\\* OR *\\ProgramData\\*)`,
+        powershell: `# Hunt for phantom CLSIDs - HKLM entries pointing to
+# missing DLLs that adversaries can fill via HKCU shadow
+
+$phantoms = @()
+
+Get-ChildItem 'HKLM:\\Software\\Classes\\CLSID' -EA SilentlyContinue | ForEach-Object {
+  $clsid = $_.PSChildName
+  $inproc = (Get-ItemProperty "$($_.PSPath)\\InprocServer32" -EA SilentlyContinue).'(default)'
+  if ($inproc) {
+    # Expand environment variables
+    $expanded = [System.Environment]::ExpandEnvironmentVariables($inproc)
+    if (-not (Test-Path $expanded)) {
+      $phantoms += [PSCustomObject]@{
+        CLSID = $clsid
+        ReferencedDLL = $inproc
+        Resolved = $expanded
+        Status = 'PHANTOM - HKLM references missing DLL'
+      }
+    }
+  }
+}
+
+Write-Host "Phantom CLSIDs (HKLM entries with missing DLLs):" -ForegroundColor Cyan
+$phantoms | Format-Table -AutoSize
+
+# Now hunt for TreatAs redirections (rare in legitimate software)
+Write-Host "\`nTreatAs redirections:" -ForegroundColor Cyan
+Get-ChildItem 'HKLM:\\Software\\Classes\\CLSID' -EA SilentlyContinue | ForEach-Object {
+  $treatAsKey = Join-Path $_.PSPath 'TreatAs'
+  if (Test-Path $treatAsKey) {
+    $treatAs = (Get-ItemProperty $treatAsKey -EA SilentlyContinue).'(default)'
+    if ($treatAs) {
+      [PSCustomObject]@{
+        SourceCLSID = $_.PSChildName
+        TreatAsCLSID = $treatAs
+        Hive = 'HKLM'
+      }
+    }
+  }
+}
+
+# HKCU TreatAs is more suspicious
+Get-ChildItem 'HKCU:\\Software\\Classes\\CLSID' -EA SilentlyContinue | ForEach-Object {
+  $treatAsKey = Join-Path $_.PSPath 'TreatAs'
+  if (Test-Path $treatAsKey) {
+    $treatAs = (Get-ItemProperty $treatAsKey -EA SilentlyContinue).'(default)'
+    if ($treatAs) {
+      [PSCustomObject]@{
+        SourceCLSID = $_.PSChildName
+        TreatAsCLSID = $treatAs
+        Hive = 'HKCU - SUSPICIOUS'
+      }
+    }
+  }
+}
+
+# Look for processes that loaded DLLs from temp/appdata
+# via COM instantiation (Sysmon EID 7 review)
+Get-WinEvent -FilterHashtable @{
+  LogName='Microsoft-Windows-Sysmon/Operational';
+  ID=7
+} -MaxEvents 5000 -ErrorAction SilentlyContinue | Where-Object {
+  $loaded = $_.Properties[5].Value
+  $loaded -match '\\.(dll|ocx)$' -and
+  $loaded -match '(AppData|Temp|ProgramData|\\\\Users\\\\Public)' -and
+  $_.Properties[13].Value -eq 'false'  # unsigned
+} | Select TimeCreated,
+  @{n='LoadingProcess';e={($_.Properties[4].Value -split '\\\\')[-1]}},
+  @{n='LoadedDLL';e={$_.Properties[5].Value}}`,
+        registry: `Alternative COM hijack mechanisms:
+
+TreatAs redirection:
+HKEY_CLASSES_ROOT\\CLSID\\{source-CLSID}\\TreatAs\\(Default)
+- (Default) value is another CLSID
+- Tells COM: 'when source-CLSID is requested, use
+  TreatAs-CLSID instead'
+- Subtle persistence: redirects every COM call
+  for the source CLSID without modifying the
+  source's own InprocServer32
+- Rare in legitimate software - high-fidelity
+  indicator
+
+ProgID -> CLSID redirection:
+HKEY_CLASSES_ROOT\\<ProgID>\\CLSID\\(Default)
+- ProgID is the friendly name like 'Excel.Application'
+- (Default) value is the CLSID for that ProgID
+- Adversary writes HKCU\\Software\\Classes\\<ProgID>\\
+  CLSID\\(Default) pointing to attacker CLSID
+- When code calls CoCreateInstance via ProgID
+  ('Excel.Application'), the lookup hits the
+  hijacked CLSID first
+- Subtle - the CLSID itself isn't modified, just
+  the name->CLSID mapping
+
+Phantom CLSID hijacking:
+- Some HKLM CLSIDs point to DLLs that don't exist
+  (legacy entries, removed software, etc.)
+- Adversary writes the missing DLL path in HKCU
+- When the CLSID is queried, HKCU resolves to the
+  attacker DLL
+- No 'shadow' - HKLM didn't have a working entry
+  to begin with
+- Detection: enumerate HKLM CLSIDs and check if
+  the referenced DLL actually exists - missing
+  DLLs are hijack opportunities
+
+LocalServer32 variant:
+HKEY_CLASSES_ROOT\\CLSID\\{CLSID}\\LocalServer32\\(Default)
+- Same idea as InprocServer32 but for out-of-process
+  COM servers (EXEs instead of DLLs)
+- Less common but documented
+- Hijacks process-server COM instantiation
+
+InprocHandler32 variant:
+HKEY_CLASSES_ROOT\\CLSID\\{CLSID}\\InprocHandler32\\(Default)
+- Used for embedded objects
+- Rarely abused but worth knowing
+
+CodeBase / RuntimeVersion:
+- Used by .NET COM-callable wrappers
+- Adversaries occasionally abuse for .NET-based
+  hijacks
+- Path: HKEY_CLASSES_ROOT\\CLSID\\{CLSID}\\
+  InprocServer32\\Codebase
+
+Hexacorn's blog catalogs dozens of these variants -
+COM hijacking has a very broad attack surface that
+defenders rarely fully cover.`,
+        tools: `Phantom hijack identification tools:
+
+procmon (Sysinternals):
+- Capture process activity, filter to 'CreateFile'
+  events on .dll paths returning NAME NOT FOUND
+- These are DLLs that processes tried to load and
+  couldn't find - phantom hijack opportunities
+- Adversaries use this proactively to identify
+  high-value targets
+
+COMRogue:
+- Open-source tool specifically for COM hijack
+  hunting
+- Scans both HKCU/HKLM for shadow and phantom
+  conditions
+
+Custom phantom hunters:
+- The PowerShell script above identifies HKLM
+  CLSIDs pointing to non-existent DLLs
+- Run on a clean reference system to baseline,
+  then on suspect systems to identify which
+  phantoms have been filled
+
+Used by adversaries:
+- APT41, ShadowPad operators
+- Various China-nexus groups
+- Some sophisticated ransomware variants
+  (less common - persistence is usually a
+  secondary concern in encrypt-and-exit operations)
+
+The TreatAs hijack is particularly rare in
+commodity malware but appears in advanced
+adversary operations specifically because of
+its evasiveness:
+- TreatAs redirection doesn't appear in standard
+  CLSID enumeration (it's a key, not a value of
+  the CLSID itself)
+- Many COM hunting tools miss TreatAs entirely
+- Adversaries deliberately choose it for that reason
+
+Tradecraft note:
+Building a working COM hijack requires the attacker
+DLL to either implement the COM interface correctly
+(so the calling application doesn't crash) or to
+load the legitimate DLL itself after running
+attacker code (proxy pattern). The proxy approach
+is more common in advanced operations - the
+attacker DLL exports the same functions, runs the
+implant code, then forwards calls to the original.
+This makes the hijack invisible to user-visible
+behavior, persisting longer.`,
+        ossdetect: `Sigma:
+- registry_event_com_treatas_hijack.yml
+- registry_event_com_progid_redirect.yml
+- registry_event_com_phantom_dll.yml
+- image_load_win_com_susp_path.yml (EID 7)
+
+Atomic Red Team:
+- T1546.015 (broad COM hijacking tests)
+- Includes phantom and shadow variants
+
+Hayabusa:
+- COMTreatAsModification rules
+- COMProgIDHijack detection
+- COMPhantomDLLLoad rules
+
+Velociraptor:
+- Windows.Registry.COM
+- Windows.System.DLL (catches the load-time artifact)
+- Windows.Sys.AutoRuns
+
+Hexacorn 'Beyond good ol' Run key' series:
+- The most comprehensive public catalog of
+  COM hijack variants and other persistence
+- Required reading for advanced persistence hunting
+- hexacorn.com/blog
+
+Microsoft documentation:
+- Component Object Model architecture
+- Registry-based COM activation
+- Useful for understanding the legitimate side
+  of the technique surface
+
+procmon (Sysinternals):
+- Not detection per se, but essential investigation
+  tool for COM hijack triage
+- Captures live DLL load events with full call stack
+- Identifies which process loaded the suspect DLL
+  via what COM call`,
+        notes: "This indicator covers the COM hijack variants beyond simple HKCU shadow attacks - phantom DLL hijacking, TreatAs redirection, and ProgID->CLSID hijacking. These are increasingly sophisticated and increasingly rare to detect because defender tooling rarely covers all of them. Phantom hijacking is particularly worth understanding: many Windows installations have HKLM CLSID entries that point to DLLs that no longer exist (legacy software references, removed components, version-specific paths). An adversary can fill these phantom entries via HKCU shadow without 'breaking' anything - the legitimate application was already broken (the DLL was missing), and now suddenly the CLSID resolves to attacker code. The phantom-CLSID hunt in the PowerShell script identifies these opportunities proactively: enumerate HKLM CLSIDs, check each referenced DLL for existence on disk, surface the mismatches. Run this on a clean baseline reference and on suspect hosts; new phantoms-filled-in on the suspect host indicate hijacks. TreatAs redirection is even rarer in legitimate software and is essentially zero false positive when found - it's an alternative key under a CLSID that says 'use this OTHER CLSID instead.' Adversaries use it because most COM hunting tools don't check the TreatAs key at all. The Hexacorn blog series remains the canonical public reference for understanding the full breadth of COM-related persistence; if you're seriously hunting this technique, that's where to look for additional variants beyond what's covered here.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Phantom and shadow COM hijack variants documented across long-dwell operations." },
+          { cls: "apt-cn", name: "ShadowPad", note: "COM hijacking documented as one persistence mechanism alongside service-based persistence." },
+          { cls: "apt-cn", name: "Advanced China-nexus", note: "TreatAs and phantom variants documented in capable operator operations." },
+          { cls: "apt-mul", name: "Advanced Operators", note: "Multi-variant COM hijacking indicates deliberate sophisticated tradecraft - very rare in commodity malware." },
+          { cls: "apt-mul", name: "Red Teams", note: "Phantom and TreatAs variants documented in advanced red team toolkits for evasive persistence." }
+        ],
+        cite: "MITRE ATT&CK T1546.015"
+      }
+    ]
   }
 ];
