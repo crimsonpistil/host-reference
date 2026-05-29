@@ -1,23 +1,23 @@
-// ── HUNT REFERENCE — core.js ──
+// ── HUNT REFERENCE - core.js ──
 // Shared UI logic for all tactic pages.
 // DATA must be loaded before this file via a tactic-specific data/*.js script tag.
 
 // ── CMS TEMPLATES ──
 const CMS_TEMPLATES = {
   // ── Execution (TA0002) ──
-  'T1059.001': { title:'T1059.001 — PowerShell', body:`## TAG - EXECUTION\n### Technique: PowerShell, T1059.001\n- Time:\n- Host:\n- User Account:\n- Parent Process:\n- Process Command Line:\n- Encoded Payload (decoded):\n- ScriptBlock Content (Event 4104):\n- AMSI Result:\n- Outbound Network Connections:\n- Tool Inferred: (Empire / Cobalt Strike / Nishang / manual)\n\nNotes:` },
-  'T1059.003': { title:'T1059.003 — Windows Command Shell', body:`## TAG - EXECUTION\n### Technique: Windows Command Shell, T1059.003\n- Time:\n- Host:\n- User Account:\n- Parent Process:\n- Command Line:\n- Discovery Commands Observed:\n- Obfuscation Pattern: (caret / quote / hex / none)\n- Subsequent Process Spawned:\n\nNotes:` },
-  'T1059.005': { title:'T1059.005 — Visual Basic', body:`## TAG - EXECUTION\n### Technique: Visual Basic, T1059.005\n- Time:\n- Host:\n- User Account:\n- Parent Process: (Office app?)\n- Script Path:\n- Script Content (sanitized):\n- Network Activity:\n\nNotes:` },
-  'T1059.007': { title:'T1059.007 — JavaScript', body:`## TAG - EXECUTION\n### Technique: JavaScript, T1059.007\n- Time:\n- Host:\n- User Account:\n- Engine: (wscript / cscript / mshta)\n- Script Path:\n- Script Content (sanitized):\n\nNotes:` },
-  T1047: { title:'T1047 — Windows Management Instrumentation', body:`## TAG - EXECUTION\n### Technique: WMI, T1047\n- Time:\n- Host:\n- User Account:\n- Process: (wmic.exe / Win32_Process)\n- Command Line:\n- Target Host (if remote):\n- WMI Subscription Created (Y/N):\n\nNotes:` },
-  'T1053.005': { title:'T1053.005 — Scheduled Task', body:`## TAG - EXECUTION\n### Technique: Scheduled Task, T1053.005\n- Time:\n- Host:\n- User Account:\n- Task Name:\n- Task Action / Binary:\n- Task Trigger:\n- Run-As Account: (SYSTEM elevation?)\n- Created Locally or Remotely:\n\nNotes:` },
-  'T1569.002': { title:'T1569.002 — Service Execution', body:`## TAG - EXECUTION\n### Technique: Service Execution, T1569.002\n- Time:\n- Host:\n- User Account:\n- Service Name:\n- binPath:\n- Service Type / Start Type:\n- Tool Inferred: (sc.exe / PsExec / Impacket)\n\nNotes:` },
-  'T1218.005': { title:'T1218.005 — Mshta', body:`## TAG - EXECUTION\n### Technique: Mshta, T1218.005\n- Time:\n- Host:\n- User Account:\n- mshta.exe Command Line:\n- HTA Source: (URL / inline VBS / inline JS)\n- Subsequent Process Spawned:\n- Outbound Network:\n\nNotes:` },
-  'T1218.011': { title:'T1218.011 — Rundll32', body:`## TAG - EXECUTION\n### Technique: Rundll32, T1218.011\n- Time:\n- Host:\n- User Account:\n- rundll32.exe Command Line:\n- DLL Path:\n- Export Function:\n- DLL Signed (Y/N):\n\nNotes:` },
-  'T1218.010': { title:'T1218.010 — Regsvr32', body:`## TAG - EXECUTION\n### Technique: Regsvr32, T1218.010\n- Time:\n- Host:\n- User Account:\n- regsvr32.exe Command Line:\n- /i: URL or Path:\n- Scriptlet Content (.sct):\n- Squiblydoo Pattern (Y/N):\n\nNotes:` },
-  T1106: { title:'T1106 — Native API', body:`## TAG - EXECUTION\n### Technique: Native API, T1106\n- Time:\n- Host:\n- User Account:\n- Process Created Without CLI Trace:\n- Module Load Pattern:\n- CreateRemoteThread Observed (EID 8):\n- Memory Region Analysis:\n\nNotes:` },
-  T1129: { title:'T1129 — Shared Modules', body:`## TAG - EXECUTION\n### Technique: Shared Modules / DLL Side-Loading, T1129\n- Time:\n- Host:\n- User Account:\n- Loading Process:\n- DLL Path:\n- DLL Signed (Y/N):\n- Search Order Hijack (Y/N):\n\nNotes:` },
-  'T1204.002': { title:'T1204.002 — User Execution: Malicious File', body:`## TAG - EXECUTION\n### Technique: User Execution: Malicious File, T1204.002\n- Time:\n- Host:\n- User Account:\n- File Path:\n- File Type: (.exe / .lnk / .iso / .img / .one)\n- Source: (email attachment / browser download / removable media)\n- MOTW Present (Y/N):\n- Subsequent Activity:\n\nNotes:` },
+  'T1059.001': { title:'T1059.001 - PowerShell', body:`## TAG - EXECUTION\n### Technique: PowerShell, T1059.001\n- Time:\n- Host:\n- User Account:\n- Parent Process:\n- Process Command Line:\n- Encoded Payload (decoded):\n- ScriptBlock Content (Event 4104):\n- AMSI Result:\n- Outbound Network Connections:\n- Tool Inferred: (Empire / Cobalt Strike / Nishang / manual)\n\nNotes:` },
+  'T1059.003': { title:'T1059.003 - Windows Command Shell', body:`## TAG - EXECUTION\n### Technique: Windows Command Shell, T1059.003\n- Time:\n- Host:\n- User Account:\n- Parent Process:\n- Command Line:\n- Discovery Commands Observed:\n- Obfuscation Pattern: (caret / quote / hex / none)\n- Subsequent Process Spawned:\n\nNotes:` },
+  'T1059.005': { title:'T1059.005 - Visual Basic', body:`## TAG - EXECUTION\n### Technique: Visual Basic, T1059.005\n- Time:\n- Host:\n- User Account:\n- Parent Process: (Office app?)\n- Script Path:\n- Script Content (sanitized):\n- Network Activity:\n\nNotes:` },
+  'T1059.007': { title:'T1059.007 - JavaScript', body:`## TAG - EXECUTION\n### Technique: JavaScript, T1059.007\n- Time:\n- Host:\n- User Account:\n- Engine: (wscript / cscript / mshta)\n- Script Path:\n- Script Content (sanitized):\n\nNotes:` },
+  T1047: { title:'T1047 - Windows Management Instrumentation', body:`## TAG - EXECUTION\n### Technique: WMI, T1047\n- Time:\n- Host:\n- User Account:\n- Process: (wmic.exe / Win32_Process)\n- Command Line:\n- Target Host (if remote):\n- WMI Subscription Created (Y/N):\n\nNotes:` },
+  'T1053.005': { title:'T1053.005 - Scheduled Task', body:`## TAG - EXECUTION\n### Technique: Scheduled Task, T1053.005\n- Time:\n- Host:\n- User Account:\n- Task Name:\n- Task Action / Binary:\n- Task Trigger:\n- Run-As Account: (SYSTEM elevation?)\n- Created Locally or Remotely:\n\nNotes:` },
+  'T1569.002': { title:'T1569.002 - Service Execution', body:`## TAG - EXECUTION\n### Technique: Service Execution, T1569.002\n- Time:\n- Host:\n- User Account:\n- Service Name:\n- binPath:\n- Service Type / Start Type:\n- Tool Inferred: (sc.exe / PsExec / Impacket)\n\nNotes:` },
+  'T1218.005': { title:'T1218.005 - Mshta', body:`## TAG - EXECUTION\n### Technique: Mshta, T1218.005\n- Time:\n- Host:\n- User Account:\n- mshta.exe Command Line:\n- HTA Source: (URL / inline VBS / inline JS)\n- Subsequent Process Spawned:\n- Outbound Network:\n\nNotes:` },
+  'T1218.011': { title:'T1218.011 - Rundll32', body:`## TAG - EXECUTION\n### Technique: Rundll32, T1218.011\n- Time:\n- Host:\n- User Account:\n- rundll32.exe Command Line:\n- DLL Path:\n- Export Function:\n- DLL Signed (Y/N):\n\nNotes:` },
+  'T1218.010': { title:'T1218.010 - Regsvr32', body:`## TAG - EXECUTION\n### Technique: Regsvr32, T1218.010\n- Time:\n- Host:\n- User Account:\n- regsvr32.exe Command Line:\n- /i: URL or Path:\n- Scriptlet Content (.sct):\n- Squiblydoo Pattern (Y/N):\n\nNotes:` },
+  T1106: { title:'T1106 - Native API', body:`## TAG - EXECUTION\n### Technique: Native API, T1106\n- Time:\n- Host:\n- User Account:\n- Process Created Without CLI Trace:\n- Module Load Pattern:\n- CreateRemoteThread Observed (EID 8):\n- Memory Region Analysis:\n\nNotes:` },
+  T1129: { title:'T1129 - Shared Modules', body:`## TAG - EXECUTION\n### Technique: Shared Modules / DLL Side-Loading, T1129\n- Time:\n- Host:\n- User Account:\n- Loading Process:\n- DLL Path:\n- DLL Signed (Y/N):\n- Search Order Hijack (Y/N):\n\nNotes:` },
+  'T1204.002': { title:'T1204.002 - User Execution: Malicious File', body:`## TAG - EXECUTION\n### Technique: User Execution: Malicious File, T1204.002\n- Time:\n- Host:\n- User Account:\n- File Path:\n- File Type: (.exe / .lnk / .iso / .img / .one)\n- Source: (email attachment / browser download / removable media)\n- MOTW Present (Y/N):\n- Subsequent Activity:\n\nNotes:` },
 };
 
 // ── STATE ──
@@ -351,7 +351,7 @@ function render() {
 
   if (sidebarStats) {
     sidebarStats.innerHTML = DATA.map(t =>
-      `<div><span style="color:var(--accent);font-family:var(--mono)">${t.id}</span> — ${t.rows.length}</div>`
+      `<div><span style="color:var(--accent);font-family:var(--mono)">${t.id}</span> - ${t.rows.length}</div>`
     ).join('') + `<div style="margin-top:6px;color:var(--text2)">Total: <strong>${totalRows}</strong></div>`;
   }
 
@@ -368,7 +368,7 @@ function toggleSelect(rowId, cb) {
 
 function exportSelected() {
   if (!selectedRows.size) return;
-  let out = `Hunt Reference — Selected Indicators\nExported: ${new Date().toLocaleString()}\n${'='.repeat(60)}\n\n`;
+  let out = `Hunt Reference - Selected Indicators\nExported: ${new Date().toLocaleString()}\n${'='.repeat(60)}\n\n`;
   selectedRows.forEach(rowId => {
     const entry = rowRegistry[rowId];
     if (!entry) return;
@@ -397,7 +397,7 @@ function toggleHuntItem(rowId, starBtn) {
       techId: entry.techId,
       severity: 'high',
       addedAt: Date.now(),
-      row: entry.row  // full row data — enables cross-tactic export from any page
+      row: entry.row  // full row data - enables cross-tactic export from any page
     };
     starBtn.innerHTML = '&#9733;';
     starBtn.classList.add('starred');
@@ -420,7 +420,7 @@ function renderHunt() {
 
   if (countEl) { countEl.textContent = keys.length; countEl.style.display = 'inline'; }
 
-  // Sort by addedAt ascending — oldest first, building a hunt timeline.
+  // Sort by addedAt ascending - oldest first, building a hunt timeline.
   // Items added before persistence existed have no addedAt and sort as 0 (top).
   const sortedKeys = keys.slice().sort((a, b) => {
     const ta = huntItems[a].addedAt || 0;
@@ -444,16 +444,24 @@ function renderHunt() {
       <span class="hunt-item-tech">${item.techId}</span>
       <span class="hunt-item-name">${esc(item.indicator)}</span>
       ${ts ? `<span class="hunt-item-ts" title="Added">${ts}</span>` : ''}
-      <select class="sev-sel sev-${item.severity}" onchange="setSev('${rowId}',this)">
+      <select class="sev-sel sev-${item.severity}" data-rowid="${rowId}">
         <option value="critical" ${item.severity==='critical'?'selected':''}>CRITICAL</option>
         <option value="high"     ${item.severity==='high'    ?'selected':''}>HIGH</option>
         <option value="medium"   ${item.severity==='medium'  ?'selected':''}>MEDIUM</option>
         <option value="low"      ${item.severity==='low'     ?'selected':''}>LOW</option>
       </select>
-      <button class="hunt-remove" onclick="removeHunt('${rowId}')">&#10005;</button>
+      <button class="hunt-remove" data-rowid="${rowId}">&#10005;</button>
     </div>`;
   });
   list.innerHTML = html;
+
+  // CSP-safe: wire up handlers via listeners instead of inline on* attributes
+  list.querySelectorAll('.sev-sel').forEach(sel => {
+    sel.addEventListener('change', () => setSev(sel.dataset.rowid, sel));
+  });
+  list.querySelectorAll('.hunt-remove').forEach(btn => {
+    btn.addEventListener('click', () => removeHunt(btn.dataset.rowid));
+  });
 }
 
 function setSev(rowId, sel) {
@@ -515,7 +523,7 @@ function exportHunt(fmt) {
       const r = getRow(rowId);
       if (!r) return;
       const ts = item.addedAt ? new Date(item.addedAt).toLocaleString() : 'unknown';
-      out += `[${i+1}] [${item.severity.toUpperCase()}] ${item.techId} — ${r.indicator}\nAdded: ${ts}\n${'-'.repeat(50)}\nSYSMON:\n${r.sysmon}\n\nKIBANA:\n${r.kibana}\n\nPOWERSHELL:\n${r.powershell}\n\nREGISTRY/ARTIFACTS:\n${r.registry || '(none)'}\n\nTOOLS:\n${r.tools || '(none)'}\n\nOSS DETECTIONS:\n${r.ossdetect || '(none)'}\n\nNOTES:\n${r.notes}\n\n${'='.repeat(60)}\n\n`;
+      out += `[${i+1}] [${item.severity.toUpperCase()}] ${item.techId} - ${r.indicator}\nAdded: ${ts}\n${'-'.repeat(50)}\nSYSMON:\n${r.sysmon}\n\nKIBANA:\n${r.kibana}\n\nPOWERSHELL:\n${r.powershell}\n\nREGISTRY/ARTIFACTS:\n${r.registry || '(none)'}\n\nTOOLS:\n${r.tools || '(none)'}\n\nOSS DETECTIONS:\n${r.ossdetect || '(none)'}\n\nNOTES:\n${r.notes}\n\n${'='.repeat(60)}\n\n`;
     });
     download(out, 'hunt_package.txt', 'text/plain');
   }
@@ -610,8 +618,97 @@ document.querySelectorAll('.fbtn[data-apt]').forEach(btn => {
   });
 });
 
+// CSP-safe wiring for static header / hunt-panel buttons (replaces inline onclick)
+document.getElementById('export-selected-btn')?.addEventListener('click', exportSelected);
+document.querySelector('.hunt-btn')?.addEventListener('click', toggleHunt);
+document.querySelectorAll('.hunt-export-btn').forEach(btn => {
+  const act = btn.dataset.act;
+  if (act === 'txt' || act === 'csv') {
+    btn.addEventListener('click', () => exportHunt(act));
+  } else if (act === 'clear') {
+    btn.addEventListener('click', clearHunt);
+  }
+});
+
 // ── INIT ──
 loadHunts();
 render();
 applyFilters();
 renderHunt();
+
+// ── SIDEBAR COLLAPSE ──
+(function () {
+  const sidebar   = document.getElementById('sidebar');
+  const toggle    = document.getElementById('sidebar-toggle');
+  const container = document.querySelector('.container');
+  const backdrop  = document.getElementById('sidebar-backdrop');
+  const mobileBtn = document.getElementById('mobile-sidebar-btn');
+  if (!sidebar || !toggle) return;
+
+  const MOBILE_BP = 900;
+  const isMobile  = () => window.innerWidth <= MOBILE_BP;
+
+  const PREF_KEY = 'sidebar_collapsed';
+  let desktopCollapsed = localStorage.getItem(PREF_KEY) === '1';
+
+  function applyDesktop() {
+    sidebar.classList.toggle('collapsed', desktopCollapsed);
+    if (container) container.classList.toggle('sidebar-collapsed', desktopCollapsed);
+    toggle.setAttribute('title', desktopCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    toggle.innerHTML = desktopCollapsed ? '&#9654;' : '&#9776;';
+  }
+
+  function openMobile() {
+    sidebar.classList.add('mobile-open');
+    sidebar.classList.remove('collapsed');
+    if (backdrop) backdrop.classList.add('active');
+    if (mobileBtn) mobileBtn.classList.add('hidden');
+  }
+
+  function closeMobile() {
+    sidebar.classList.remove('mobile-open');
+    sidebar.classList.add('collapsed');
+    if (backdrop) backdrop.classList.remove('active');
+    if (mobileBtn) mobileBtn.classList.remove('hidden');
+  }
+
+  function initState() {
+    if (isMobile()) {
+      sidebar.classList.add('collapsed');
+      sidebar.classList.remove('mobile-open');
+      if (container) container.classList.remove('sidebar-collapsed');
+      if (backdrop) backdrop.classList.remove('active');
+      if (mobileBtn) mobileBtn.classList.remove('hidden');
+    } else {
+      sidebar.classList.remove('mobile-open', 'collapsed');
+      if (backdrop) backdrop.classList.remove('active');
+      if (mobileBtn) mobileBtn.classList.add('hidden');
+      applyDesktop();
+    }
+  }
+
+  toggle.addEventListener('click', () => {
+    if (!isMobile()) {
+      desktopCollapsed = !desktopCollapsed;
+      localStorage.setItem(PREF_KEY, desktopCollapsed ? '1' : '0');
+      applyDesktop();
+    }
+  });
+
+  if (mobileBtn) mobileBtn.addEventListener('click', openMobile);
+  if (backdrop)  backdrop.addEventListener('click', closeMobile);
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && isMobile() && sidebar.classList.contains('mobile-open')) {
+      closeMobile();
+    }
+  });
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(initState, 80);
+  });
+
+  initState();
+})();

@@ -8,7 +8,7 @@
 </head>
 <body>
 <header>
-  <a href="index.html" class="logo">ATT&amp;CK <span>// Host Reference</span></a>
+  <a href="index.html" class="logo">ATT&amp;CK <span>Host Reference</span></a>
   <div class="site-switcher">
     <a href="https://hunt.6b74.dev" class="switcher-side">NETWORK</a>
     <span class="switcher-side active">HOST</span>
@@ -50,8 +50,8 @@
   </div>
   <div class="header-right">
     <span class="stat" id="stats">Loading...</span>
-    <button class="export-btn" id="export-selected-btn" onclick="exportSelected()" style="display:none">&#8595; Export Selected</button>
-    <button class="hunt-btn" onclick="toggleHunt()">&#9733; My Hunts <span id="hunt-count" style="background:var(--amber);color:#000;border-radius:10px;padding:0 5px;font-size:9px;display:none">0</span></button>
+    <button class="export-btn" id="export-selected-btn" style="display:none">&#8595; Export Selected</button>
+    <button class="hunt-btn">&#9733; My Hunts <span id="hunt-count" style="background:var(--amber);color:#000;border-radius:10px;padding:0 5px;font-size:9px;display:none">0</span></button>
   </div>
 </header>
 
@@ -69,26 +69,33 @@
     <div class="hunt-title">&#9733; My Hunt Package <span style="font-weight:400;color:var(--text3);font-size:10px">- persists across tabs and sessions, sorted by time added</span></div>
     <div id="hunt-list"><div class="hunt-empty">No indicators added. Click &#9734; on any row.</div></div>
     <div class="hunt-export-row">
-      <button class="hunt-export-btn" onclick="exportHunt('txt')">&#8595; Export TXT</button>
-      <button class="hunt-export-btn" onclick="exportHunt('csv')">&#8595; Export CSV</button>
-      <button class="hunt-export-btn" onclick="clearHunt()" style="color:var(--red);border-color:var(--red)">&#10005; Clear All</button>
+      <button class="hunt-export-btn" data-act="txt">&#8595; Export TXT</button>
+      <button class="hunt-export-btn" data-act="csv">&#8595; Export CSV</button>
+      <button class="hunt-export-btn" data-act="clear" style="color:var(--red);border-color:var(--red)">&#10005; Clear All</button>
     </div>
   </div>
 </div>
 
 <div class="container">
-  <nav class="sidebar">
-    <div class="sidebar-title">Techniques</div>
-    <div id="toc"></div>
-    <hr class="sidebar-divider">
-    <div class="sidebar-title">Quick Stats</div>
-    <div id="sidebar-stats" style="font-size:11px;color:var(--text3);line-height:2"></div>
+  <nav class="sidebar" id="sidebar">
+    <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar">&#9776;</button>
+    <div class="sidebar-inner">
+      <div class="sidebar-title">Techniques</div>
+      <div id="toc"></div>
+      <hr class="sidebar-divider">
+      <div class="sidebar-title">Quick Stats</div>
+      <div id="sidebar-stats" style="font-size:11px;color:var(--text3);line-height:2"></div>
+    </div>
   </nav>
   <main>
     <div class="no-results" id="no-results">No matching indicators found.</div>
     <div id="content"></div>
   </main>
 </div>
+<!-- mobile sidebar backdrop -->
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+<!-- mobile floating toggle -->
+<button class="mobile-sidebar-btn" id="mobile-sidebar-btn">&#9776; Techniques</button>
 
 <script src="js/data/execution.js"></script>
 <script src="js/core.js"></script>

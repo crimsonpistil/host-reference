@@ -53,7 +53,7 @@
     <a href="https://hunt.6b74.dev" class="switcher-side">NETWORK</a>
     <span class="switcher-side active">HOST</span>
   </div>
-  <div class="index-title">MITRE ATT&amp;CK // Host Analyst Reference</div>
+  <div class="index-title">MITRE ATT&amp;CK Host Analyst Reference</div>
   <div class="index-sub">Host analyst threat hunting: indicators, detection syntax, and APT attribution across the attack lifecycle</div>
   <div class="index-search-wrap">
     <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
@@ -166,14 +166,6 @@
   <p>built by <a href="https://6b74.dev" style="color:var(--accent)">tonk</a></p>
 </footer>
 
-<script>
-document.getElementById('tactic-search').addEventListener('input', function() {
-  const q = this.value.toLowerCase().trim();
-  document.querySelectorAll('.tactic-card').forEach(card => {
-    const text = (card.textContent + ' ' + (card.dataset.tags || '')).toLowerCase();
-    card.style.display = !q || text.includes(q) ? '' : 'none';
-  });
-});
-</script>
+<script src="js/index.js"></script>
 </body>
 </html>
