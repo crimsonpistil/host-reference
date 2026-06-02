@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>[Host] Privilege Escalation Hunt Ref (TA0004)</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+  <a href="index.html" class="logo">ATT&amp;CK <span>Host Reference</span></a>
+  <div class="site-switcher">
+    <a href="https://hunt.6b74.dev" class="switcher-side">NETWORK</a>
+    <span class="switcher-side active">HOST</span>
+  </div>
+  <span class="tactic-badge" style="color:#ffa600;border-color:#ffa60040;background:#ffa60012">TA0004 - Privilege Escalation</span>
+  <div class="search-row">
+    <div class="search-box">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zm-5.242 1.656a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z"/></svg>
+      <input type="text" id="search" placeholder="Search indicators, syntax, APT actors..." autocomplete="off">
+    </div>
+    <div class="search-box" style="max-width:180px">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4z"/></svg>
+      <input type="text" id="apt-search" placeholder="APT actor..." autocomplete="off">
+    </div>
+  </div>
+  <div class="filter-row">
+    <span class="filter-label">TTP</span>
+    <button class="fbtn active" data-tech="all">All</button>
+    <button class="fbtn" data-tech="T1548.002">T1548.002</button>
+    <button class="fbtn" data-tech="T1134">T1134</button>
+    <button class="fbtn" data-tech="T1055">T1055</button>
+    <button class="fbtn" data-tech="T1068">T1068</button>
+  </div>
+  <div class="filter-row">
+    <span class="filter-label">Origin</span>
+    <button class="fbtn" data-apt="CN">CN</button>
+    <button class="fbtn" data-apt="RU">RU</button>
+    <button class="fbtn" data-apt="IR">IR</button>
+    <button class="fbtn" data-apt="KP">KP</button>
+  </div>
+  <div class="header-right">
+    <span class="stat" id="stats">Loading...</span>
+    <button class="export-btn" id="export-selected-btn" style="display:none">&#8595; Export Selected</button>
+    <button class="hunt-btn">&#9733; My Hunts <span id="hunt-count" style="background:var(--amber);color:#000;border-radius:10px;padding:0 5px;font-size:9px;display:none">0</span></button>
+  </div>
+</header>
+
+<nav class="tactic-nav">
+  <a href="execution.html" class="current" style="color:#a371f7">TA0002 - Execution</a>
+  <a href="persistence.html" style="color:#39d353">TA0003 - Persistence</a>
+  <span style="color:var(--text3);opacity:.5">TA0004 - Privilege Escalation (planned)</span>
+  <span style="color:var(--text3);opacity:.5">TA0005 - Defense Evasion (planned)</span>
+  <span style="color:var(--text3);opacity:.5">TA0006 - Credential Access (planned)</span>
+  <span style="color:var(--text3);opacity:.5">TA0007 - Discovery (planned)</span>
+</nav>
+
+<div id="hunt-panel">
+  <div class="hunt-inner">
+    <div class="hunt-title">&#9733; My Hunt Package <span style="font-weight:400;color:var(--text3);font-size:10px">- persists across tabs and sessions, sorted by time added</span></div>
+    <div id="hunt-list"><div class="hunt-empty">No indicators added. Click &#9734; on any row.</div></div>
+    <div class="hunt-export-row">
+      <button class="hunt-export-btn" data-act="txt">&#8595; Export TXT</button>
+      <button class="hunt-export-btn" data-act="csv">&#8595; Export CSV</button>
+      <button class="hunt-export-btn" data-act="clear" style="color:var(--red);border-color:var(--red)">&#10005; Clear All</button>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <nav class="sidebar" id="sidebar">
+    <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar" title="Toggle sidebar">&#9776;</button>
+    <div class="sidebar-inner">
+      <div class="sidebar-title">Techniques</div>
+      <div id="toc"></div>
+      <hr class="sidebar-divider">
+      <div class="sidebar-title">Quick Stats</div>
+      <div id="sidebar-stats" style="font-size:11px;color:var(--text3);line-height:2"></div>
+    </div>
+  </nav>
+  <main>
+    <div class="no-results" id="no-results">No matching indicators found.</div>
+    <div id="content"></div>
+  </main>
+</div>
+<!-- mobile sidebar backdrop -->
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+<!-- mobile floating toggle -->
+<button class="mobile-sidebar-btn" id="mobile-sidebar-btn">&#9776; Techniques</button>
+
+<script src="js/data/privilege_escalation.js"></script>
+<script src="js/core.js"></script>
+</body>
+</html>

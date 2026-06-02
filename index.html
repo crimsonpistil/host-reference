@@ -85,13 +85,13 @@
 <span class="section-label">Coming Soon</span>
 <div class="tactic-grid">
 
-  <div class="tactic-card soon" data-tags="privilege escalation">
+  <a href="privilege_escalation.html" class="tactic-card" data-tags="privilege escalation ta0004 uac bypass fodhelper token manipulation impersonation potato process injection hollowing thread hijack byovd vulnerable driver exploitation">
     <div class="card-id" style="color:#ffa600">TA0004</div>
-    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">Planned</span>
+    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">10 indicators · 4 techniques</span>
     <div class="card-name">Privilege Escalation</div>
-    <div class="card-desc">Token manipulation, UAC bypass, named pipe impersonation, exploitation patterns. Builds on Execution telemetry.</div>
-    <div class="card-count">Coming soon</div>
-  </div>
+    <div class="card-desc">Elevating from user to admin/SYSTEM. First pass covers the core, high-signal techniques: T1548.002 UAC Bypass (fodhelper/mock-folder/eventvwr-cmstp, 3), T1134 Access Token Manipulation (theft + create-process-with-token, 2), T1055 Process Injection (remote-thread DLL/PE, hollowing, thread hijack, 3), T1068 Exploitation incl. BYOVD vulnerable drivers and Potato-family coercion (2). 10 indicators total. Long-tail techniques to follow.</div>
+    <div class="card-count">&#9654; Open reference</div>
+  </a>
 
   <div class="tactic-card soon" data-tags="defense evasion">
     <div class="card-id" style="color:#f85149">TA0005</div>
@@ -136,7 +136,7 @@
         <li>Search or filter to narrow indicators by technique or APT actor</li>
         <li>Each row has tabs for Sysmon · Kibana · PowerShell · Registry/Artifacts · Tools · OSS Detections · Notes · APT</li>
         <li>Click the &#9733; star to add to your hunt list (persisted across sessions)</li>
-        <li>Open <strong>My Hunts</strong> to review and export your hunt as TXT or CSV with a CMS-ready template</li>
+        <li>Open <strong>My Hunts</strong> to review and export your hunt as TXT or CSV. A per-technique case template is also available on each row for structured note-taking.</li>
       </ul>
       <div class="info-callout">
         Use the <strong>NETWORK</strong> / <strong>HOST</strong> switcher in the header to jump to the network reference for the complementary lens on the same techniques.
@@ -153,7 +153,8 @@
       <h3>Build status</h3>
       <p><strong>Execution (TA0002) is complete</strong>: all 13 techniques fully built with 32 indicators total. Coverage includes scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files.</p>
       <p><strong>Persistence (TA0003) actively expanding</strong>: 20 indicators across 9 techniques. Top 5 most-common techniques complete. Long-tail high-value techniques being added including sophisticated APT-level tradecraft. Built: T1547.001 Run Keys / Startup Folder (3), T1546.003 WMI Subscription Hunt (2), T1543.003 Service Persistence Hunt (3), T1053.005 Scheduled Task Persistence Angle (2), T1547.009 Shortcut Modification (2), T1037 Boot/Logon Init Scripts including GPO logon scripts (2), T1098 Account Manipulation - group changes and password resets (2), T1136 Create Account - local and domain (2), T1546.015 COM Hijacking - HKCU shadow and phantom/TreatAs variants (2). Cross-cited techniques from Execution are built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
-      <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Defense Evasion<br>&rarr;Privilege Escalation<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
+      <p><strong>Privilege Escalation (TA0004) first pass</strong>: 10 indicators across 4 core techniques. T1548.002 Bypass UAC (fodhelper/computerdefaults registry hijack, mock trusted-directory and auto-elevator DLL hijack, eventvwr/cmstp, 3), T1134 Access Token Manipulation (token theft incl. Potato pattern, create-process-with-token, 2), T1055 Process Injection (remote-thread DLL/PE injection, process hollowing, thread execution hijacking, 3), T1068 Exploitation (bring-your-own-vulnerable-driver / BYOVD, and local service exploitation incl. SeImpersonate-coercion Potato chains, 2). Long-tail techniques to follow.</p>
+      <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Privilege Escalation<br>&rarr;Defense Evasion<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 
   </div>

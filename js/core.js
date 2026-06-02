@@ -2,7 +2,7 @@
 // Shared UI logic for all tactic pages.
 // DATA must be loaded before this file via a tactic-specific data/*.js script tag.
 
-// ── CMS TEMPLATES ──
+// ── CASE TEMPLATES ──
 const CMS_TEMPLATES = {
   // ── Execution (TA0002) ──
   'T1059.001': { title:'T1059.001 - PowerShell', body:`## TAG - EXECUTION\n### Technique: PowerShell, T1059.001\n- Time:\n- Host:\n- User Account:\n- Parent Process:\n- Process Command Line:\n- Encoded Payload (decoded):\n- ScriptBlock Content (Event 4104):\n- AMSI Result:\n- Outbound Network Connections:\n- Tool Inferred: (Empire / Cobalt Strike / Nishang / manual)\n\nNotes:` },
@@ -18,6 +18,10 @@ const CMS_TEMPLATES = {
   T1106: { title:'T1106 - Native API', body:`## TAG - EXECUTION\n### Technique: Native API, T1106\n- Time:\n- Host:\n- User Account:\n- Process Created Without CLI Trace:\n- Module Load Pattern:\n- CreateRemoteThread Observed (EID 8):\n- Memory Region Analysis:\n\nNotes:` },
   T1129: { title:'T1129 - Shared Modules', body:`## TAG - EXECUTION\n### Technique: Shared Modules / DLL Side-Loading, T1129\n- Time:\n- Host:\n- User Account:\n- Loading Process:\n- DLL Path:\n- DLL Signed (Y/N):\n- Search Order Hijack (Y/N):\n\nNotes:` },
   'T1204.002': { title:'T1204.002 - User Execution: Malicious File', body:`## TAG - EXECUTION\n### Technique: User Execution: Malicious File, T1204.002\n- Time:\n- Host:\n- User Account:\n- File Path:\n- File Type: (.exe / .lnk / .iso / .img / .one)\n- Source: (email attachment / browser download / removable media)\n- MOTW Present (Y/N):\n- Subsequent Activity:\n\nNotes:` },
+  'T1548.002': { title:'T1548.002 - Bypass User Account Control', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Bypass UAC, T1548.002\n- Time:\n- Host:\n- User Account:\n- Method: (fodhelper / computerdefaults / eventvwr / cmstp / mock-folder / sdclt)\n- Auto-Elevating Binary:\n- Registry Handler Hijacked: (ms-settings / mscfile / other)\n- Child Process + Integrity:\n- Registry Artifact Deleted After (Y/N):\n\nNotes:` },
+  T1134: { title:'T1134 - Access Token Manipulation', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Access Token Manipulation, T1134\n- Time:\n- Host:\n- Source Process / Account:\n- Target Token / Account Impersonated:\n- Sub-Technique: (.001 theft / .002 create-process-with-token / .005 SID-history)\n- SeImpersonate / SeAssignPrimaryToken Held (Y/N):\n- Potato Pattern (named-pipe coercion) (Y/N):\n- Resulting Context: (SYSTEM / admin)\n- Resulting Process + Parent:\n\nNotes:` },
+  T1055: { title:'T1055 - Process Injection', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Process Injection, T1055\n- Time:\n- Host:\n- Source Process:\n- Target Process:\n- Sub-Technique: (.001 DLL / .002 PE / .003 thread-hijack / .012 hollowing)\n- Sysmon EID 8 (CreateRemoteThread) (Y/N):\n- EID 10 Access Rights:\n- Start Address Non-Image (Y/N):\n- Memory-Forensics Confirmation: (PE-sieve / malfind / hollowfind)\n\nNotes:` },
+  T1068: { title:'T1068 - Exploitation for Privilege Escalation', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Exploitation for Privilege Escalation, T1068\n- Time:\n- Host:\n- Vector: (BYOVD / local CVE / Potato coercion / service exploit)\n- Driver or CVE:\n- Driver Path + Signed (Y/N):\n- Vulnerable-Driver List Match: (loldrivers / MS blocklist)\n- Service/Pipe Artifact:\n- Resulting SYSTEM Process + Parent:\n\nNotes:` },
 };
 
 // ── STATE ──
@@ -181,7 +185,7 @@ function buildRow(row, techId, rowId) {
     ['oss', 'OSS Detections'],
     ['not', 'Notes'],
     ['apt', 'APT'],
-    ['cms', 'CMS Template'],
+    ['cms', 'Case Template'],
   ];
   const tabBar = document.createElement('div');
   tabBar.className = 'tab-bar';
@@ -265,7 +269,7 @@ function buildRow(row, techId, rowId) {
         d.appendChild(hdr);
         d.appendChild(pre);
       } else {
-        d.innerHTML = '<span style="color:var(--text3);font-size:12px">No CMS template for this technique yet.</span>';
+        d.innerHTML = '<span style="color:var(--text3);font-size:12px">No case template for this technique yet.</span>';
       }
       return d;
     })(),

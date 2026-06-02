@@ -63,10 +63,10 @@ APT class values: `apt-cn` (China), `apt-ru` (Russia), `apt-ir` (Iran), `apt-kp`
 
 | Tactic | ID | Techniques | Indicators |
 |---|---|---|---|
-| Execution | TA0002 | 1 of 13 built | 4 |
-| Persistence | TA0003 | planned | - |
+| Execution | TA0002 | 13 of 13 built | 32 |
+| Persistence | TA0003 | 9 built | 20 |
+| Privilege Escalation | TA0004 | 4 built (first pass) | 10 |
 | Defense Evasion | TA0005 | planned | - |
-| Privilege Escalation | TA0004 | planned | - |
 | Credential Access (host) | TA0006 | planned | - |
 | Discovery (host) | TA0007 | planned | - |
 
