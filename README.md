@@ -13,7 +13,7 @@ Offline-first single-page reference for host-based threat hunting. Each indicato
 - **PowerShell** hunt script (runs against Windows event logs directly)
 - **Registry / file artifacts** to investigate
 - **Adversary tools** known to use the technique
-- **OSS detections** — Sigma rule references, Velociraptor artifacts, Hayabusa rules, Atomic Red Team test IDs
+- **OSS detections** - Sigma rule references, Velociraptor artifacts, Hayabusa rules, Atomic Red Team test IDs
 - **APT attribution** with color-coded origin chips
 - **Operational notes** with FP guidance and edge cases
 
@@ -40,7 +40,7 @@ Adding a new tactic:
 
 ```js
 {
-  sub: "T1059.001 — Encoded Command Execution",
+  sub: "T1059.001 - Encoded Command Execution",
   indicator: "powershell.exe with -EncodedCommand argument...",
   sysmon: `EventID=1\nImage=*\\powershell.exe\nCommandLine=*-enc*`,
   kibana: `winlog.event_id: 1 AND process.name: ...`,
@@ -63,9 +63,9 @@ APT class values: `apt-cn` (China), `apt-ru` (Russia), `apt-ir` (Iran), `apt-kp`
 
 | Tactic | ID | Techniques | Indicators |
 |---|---|---|---|
-| Execution | TA0002 | 13 of 13 built | 32 |
+| Execution | TA0002 | 16 built (13 win, 3 linux + 1 shared) | 36 |
 | Persistence | TA0003 | 9 built | 20 |
-| Privilege Escalation | TA0004 | 4 built (first pass) | 10 |
+| Privilege Escalation | TA0004 | 13 built (complete) | 21 |
 | Defense Evasion | TA0005 | planned | - |
 | Credential Access (host) | TA0006 | planned | - |
 | Discovery (host) | TA0007 | planned | - |

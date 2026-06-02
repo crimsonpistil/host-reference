@@ -15,6 +15,7 @@ const DATA = [
     rows: [
       {
         sub: "T1547.001 - Real-Time Registry Run Key Modification",
+        os: "win",
         indicator: "Sysmon EID 13 - registry value written to Run/RunOnce key, especially with target in user-writable path",
         sysmon: `EventID=13
 TargetObject matches (any of):
@@ -188,6 +189,7 @@ Sysinternals autoruns.exe:
       },
       {
         sub: "T1547.001 - Hunt Established Autostart Persistence",
+        os: "win",
         indicator: "Enumerate all known Run keys, RunOnce variants, Startup folders, Winlogon hooks, and IFEO debuggers - find what already persists",
         sysmon: `// This indicator is hunting-oriented - sweeping
 // existing autostart locations rather than catching
@@ -391,6 +393,7 @@ Reference: SANS poster
       },
       {
         sub: "T1547.001 - Suspicious Value Names and Spoofing Patterns",
+        os: "win",
         indicator: "Autostart entry value name mimics legitimate software, contains random strings, or has anomalous characteristics suggesting impersonation",
         sysmon: `// EID 13 with value-name-specific filtering:
 EventID=13
@@ -603,6 +606,7 @@ Reference: SANS DFIR
     rows: [
       {
         sub: "T1546.003 - Live Enumeration of WMI Event Subscriptions",
+        os: "win",
         indicator: "Direct query of WMI subscription namespaces (root\\subscription) on live host - find established filter/consumer/binding triples",
         sysmon: `// This indicator is hunting-oriented - PowerShell
 // WMI queries against live host, not Sysmon detection.
@@ -811,6 +815,7 @@ MITRE / community references:
       },
       {
         sub: "T1546.003 - Suspicious Consumer Patterns and Trigger Analysis",
+        os: "win",
         indicator: "WMI consumer with execution-capable type pointing to interpreter, or filter with persistence-intent trigger (system boot, logon, perfdata polling)",
         sysmon: `// Real-time Sysmon detection of suspicious patterns
 // during subscription creation (EID 19/20/21):
@@ -1030,6 +1035,7 @@ DEF CON / Black Hat talks:
     rows: [
       {
         sub: "T1543.003 - Service Inventory with Suspicious Configuration",
+        os: "win",
         indicator: "Enumerate all registered services and flag those with non-standard paths, unsigned binaries, blank descriptions, or other anomalous configuration",
         sysmon: `// This indicator is hunting-oriented - PowerShell
 // registry sweep, not Sysmon detection.
@@ -1263,6 +1269,7 @@ Microsoft documentation:
       },
       {
         sub: "T1543.003 - ServiceDLL Hijack (svchost-hosted Service Persistence)",
+        os: "win",
         indicator: "Service of Type=0x20 (Win32ShareProcess) with ServiceDll registry value pointing to user-writable or unsigned DLL - svchost-loaded malicious DLL",
         sysmon: `// Real-time detection - registry write to ServiceDll:
 EventID=13
@@ -1450,6 +1457,7 @@ Threat hunting references:
       },
       {
         sub: "T1543.003 - Hidden Services via Security Descriptor Manipulation",
+        os: "win",
         indicator: "Service registry key with ACL preventing standard enumeration tools from listing it - service exists but invisible to sc.exe and services.msc",
         sysmon: `// EID 12 (registry key create/delete) or EID 13
 // catching changes to Service Security Descriptor:
@@ -1667,6 +1675,7 @@ Manual workflow:
     rows: [
       {
         sub: "T1053.005 - Tasks with Persistence-Intent Triggers",
+        os: "win",
         indicator: "Enumerate scheduled tasks and filter to those with OnLogon, AtStartup, OnEvent, or short-interval triggers - the persistence-specific subset",
         sysmon: `// This indicator is hunting-oriented - PowerShell
 // enumeration of established tasks rather than
@@ -1906,6 +1915,7 @@ PowerShell native (the script above):
       },
       {
         sub: "T1053.005 - Hidden Scheduled Tasks (SD Manipulation and Tree Hiding)",
+        os: "win",
         indicator: "Tasks present in C:\\Windows\\System32\\Tasks XML but missing from schtasks.exe enumeration - registry/filesystem diff reveals hidden tasks",
         sysmon: `// Hidden task creation typically involves direct
 // registry/filesystem manipulation rather than
@@ -2154,6 +2164,7 @@ KAPE (Eric Zimmerman):
     rows: [
       {
         sub: "T1547.009 - LNK File in Startup Folder",
+        os: "win",
         indicator: "LNK shortcut written to per-user or all-users Startup folder - file launched at every logon",
         sysmon: `// Real-time detection - LNK file create in Startup folder:
 EventID=11
@@ -2409,6 +2420,7 @@ LECmd by Eric Zimmerman:
       },
       {
         sub: "T1547.009 - Modified Existing LNK with Malicious Target",
+        os: "win",
         indicator: "Pre-existing legitimate LNK shortcut modified to point to attacker-controlled binary - hijacks normal user behavior",
         sysmon: `// Modification of existing LNK (vs creation):
 EventID=11 (FileCreate fires on overwrite too)
@@ -2680,6 +2692,7 @@ Reference:
     rows: [
       {
         sub: "T1037.001 - Registry-Based Logon Script (UserInitMprLogonScript)",
+        os: "win",
         indicator: "HKCU\\Environment\\UserInitMprLogonScript value set - obscure registry-based logon script trigger with near-zero legitimate use",
         sysmon: `// Real-time registry write to the logon script value:
 EventID=13
@@ -2873,6 +2886,7 @@ Sysinternals autoruns.exe:
       },
       {
         sub: "T1037.003 - Network Logon Script (Group Policy)",
+        os: "win",
         indicator: "Logon or startup script configured via Group Policy - distributed from domain controller SYSVOL to all targeted workstations",
         sysmon: `// On workstation receiving GPO logon scripts:
 
@@ -3142,6 +3156,7 @@ Critical reference - SANS:
     rows: [
       {
         sub: "T1098 - Privileged Group Membership Changes",
+        os: "win",
         indicator: "User added to local Administrators, Domain Admins, Enterprise Admins, or other high-privilege group - backdoor admin or privilege retention",
         sysmon: `// Sysmon EID 1 - net.exe / dsadd / dsmod / Add-LocalGroupMember:
 EventID=1
@@ -3371,6 +3386,7 @@ Microsoft Defender for Identity (if licensed):
       },
       {
         sub: "T1098 - Password Reset and Service Account Manipulation",
+        os: "win",
         indicator: "Administrator reset password for another user (especially privileged), or service account credentials modified - credential-based persistence",
         sysmon: `// Sysmon EID 1 - password reset commands:
 EventID=1
@@ -3612,6 +3628,7 @@ Reference:
     rows: [
       {
         sub: "T1136.001 - Local Account Creation",
+        os: "win",
         indicator: "New local user account created on workstation or server - backdoor account for persistent local access",
         sysmon: `// Sysmon EID 1 - account creation commands:
 EventID=1
@@ -3845,6 +3862,7 @@ Microsoft Defender:
       },
       {
         sub: "T1136.002 - Domain Account Creation",
+        os: "win",
         indicator: "New domain user account created on domain controller - high-impact persistence across the entire AD environment",
         sysmon: `// On DOMAIN CONTROLLER (where this technique fires):
 
@@ -4110,6 +4128,7 @@ Microsoft documentation:
     rows: [
       {
         sub: "T1546.015 - HKCU CLSID Hijack (User Hive Shadow)",
+        os: "win",
         indicator: "CLSID registry key created or modified in HKCU\\Software\\Classes\\CLSID - shadows HKLM entry, redirects legitimate COM instantiation to attacker DLL",
         sysmon: `// Real-time detection - CLSID write to HKCU (user hive):
 EventID=13
@@ -4379,6 +4398,7 @@ Reference research:
       },
       {
         sub: "T1546.015 - Treat Path Variants and Phantom DLL Hijacking",
+        os: "win",
         indicator: "CLSID with InprocServer32 pointing to non-existent DLL (phantom hijack opportunity), or TreatAs / ProgID redirection - alternative COM hijack vectors",
         sysmon: `// EID 13 - TreatAs key modification:
 EventID=13

@@ -11,6 +11,7 @@ const DATA = [
     rows: [
       {
         sub: "T1059.001 - Encoded Command Execution",
+        os: "win",
         indicator: "powershell.exe with -EncodedCommand argument - base64-obfuscated payload",
         sysmon: `EventID=1
 Image=*\\powershell.exe
@@ -83,6 +84,7 @@ YARA:
       },
       {
         sub: "T1059.001 - Suspicious Parent Process",
+        os: "win",
         indicator: "powershell.exe spawned by Office, Adobe, or other unusual parent - phishing chain indicator",
         sysmon: `EventID=1
 Image=*\\powershell.exe
@@ -173,6 +175,7 @@ ImageFileName IN ("powershell.exe","cmd.exe")`,
       },
       {
         sub: "T1059.001 - Suspicious ScriptBlock Content",
+        os: "win",
         indicator: "PowerShell ScriptBlock containing IEX/DownloadString/Invoke-Expression - fileless execution patterns",
         sysmon: `[ScriptBlockLogging required - separate event channel]
 EventID=4104 in
@@ -258,6 +261,7 @@ Velociraptor:
       },
       {
         sub: "T1059.001 - Execution Policy Bypass",
+        os: "win",
         indicator: "powershell.exe with -ExecutionPolicy Bypass - script restrictions disabled",
         sysmon: `EventID=1
 Image=*\\powershell.exe
@@ -343,6 +347,7 @@ Velociraptor:
     rows: [
       {
         sub: "T1059.003 - Suspicious Parent Process",
+        os: "win",
         indicator: "cmd.exe spawned by Office, Adobe, or scripting host - phishing or macro execution chain",
         sysmon: `EventID=1
 Image=*\\cmd.exe
@@ -429,6 +434,7 @@ Velociraptor:
       },
       {
         sub: "T1059.003 - Post-Compromise Recon Command Burst",
+        os: "win",
         indicator: "Rapid sequence of discovery commands from cmd.exe - whoami, ipconfig, net user, systeminfo within short window",
         sysmon: `EventID=1
 Image=*\\cmd.exe OR *\\whoami.exe
@@ -561,6 +567,7 @@ Velociraptor:
       },
       {
         sub: "T1059.003 - DOSfuscation / Command Obfuscation",
+        os: "win",
         indicator: "cmd.exe command string with excessive carets, quoted null insertions, or comma/semicolon delimiters - obfuscated shell syntax",
         sysmon: `EventID=1
 Image=*\\cmd.exe
@@ -671,6 +678,7 @@ Velociraptor:
     rows: [
       {
         sub: "T1059.005 - Office Macro Spawning Script Host",
+        os: "win",
         indicator: "wscript.exe or cscript.exe spawned by Office application - VBA macro executing VBScript payload",
         sysmon: `EventID=1
 Image=*\\wscript.exe OR *\\cscript.exe
@@ -769,6 +777,7 @@ YARA:
       },
       {
         sub: "T1059.005 - ISO/LNK Container Dropping VBScript",
+        os: "win",
         indicator: "wscript.exe executing .vbs file from mounted ISO, %TEMP%, or %APPDATA% - post-MOTW container evasion chain",
         sysmon: `EventID=1
 Image=*\\wscript.exe OR *\\cscript.exe
@@ -901,6 +910,7 @@ Any.run / VirusTotal sandbox:
     rows: [
       {
         sub: "T1059.007 - WSH Executing JScript from Suspicious Path",
+        os: "win",
         indicator: "wscript.exe or cscript.exe running .js or .jse file from %TEMP%, %APPDATA%, or mounted container path",
         sysmon: `EventID=1
 Image=*\\wscript.exe OR *\\cscript.exe
@@ -1029,6 +1039,7 @@ Static analysis:
       },
       {
         sub: "T1059.007 - Office or Browser Spawning WSH with JScript Payload",
+        os: "win",
         indicator: "wscript.exe with .js argument spawned by Office app, browser, or explorer.exe - delivery chain execution",
         sysmon: `EventID=1
 Image=*\\wscript.exe OR *\\cscript.exe
@@ -1146,6 +1157,7 @@ Gootloader-specific:
     rows: [
       {
         sub: "T1047 - Local Process Creation via wmic",
+        os: "win",
         indicator: "wmic.exe with 'process call create' argument - spawning a process via WMI to avoid direct cmd/PS execution",
         sysmon: `EventID=1
 Image=*\\wmic.exe
@@ -1260,6 +1272,7 @@ Velociraptor:
       },
       {
         sub: "T1047 - Remote WMI Execution",
+        os: "win",
         indicator: "wmic.exe with /node: flag targeting remote host - lateral movement via WMI over DCOM/RPC",
         sysmon: `// On SOURCE host - wmic with remote /node: target:
 EventID=1
@@ -1390,6 +1403,7 @@ Network-side (complements host detection):
       },
       {
         sub: "T1047 - WMI Event Subscription Persistence",
+        os: "win",
         indicator: "WMI EventFilter, EventConsumer, or FilterToConsumerBinding creation - fileless persistence via WMI repository",
         sysmon: `// Sysmon has three dedicated WMI persistence event IDs:
 
@@ -1499,6 +1513,7 @@ Set-WmiInstance -Namespace root\subscription
   -Class __FilterToConsumerBinding -Arguments @{
     Filter=$filter; Consumer=$consumer
   }`,
+        ossdetect: "Sigma:\n- sysmon_wmi_event_subscription.yml\n- sysmon_wmi_persistence_script_event_consumer.yml\n- proc_creation_win_wmic_eventconsumer_creation.yml\n\nAtomic Red Team:\n- T1546.003 (WMI event subscription tests)\n- T1047 (WMI execution tests)\n\nHayabusa:\n- WMIEventSubscription (Sysmon EID 19/20/21) rules\n\nVelociraptor:\n- Windows.Persistence.PermanentWMIEvents\n- Windows.Detection.WMIProcessCreation\n\nSysinternals autoruns.exe:\n- WMI tab enumerates __EventFilter / __EventConsumer /\n  __FilterToConsumerBinding entries",
         notes: "WMI event subscription persistence is the most forensically evasive standard persistence technique on Windows. There is no registry run key, no scheduled task XML, no startup folder file - the persistence object lives entirely inside the WMI repository binary (OBJECTS.DATA), which most IR tools and AV products do not inspect by default. Sysmon EID 19/20/21 are the primary detection mechanism and are only logged if Sysmon is deployed with WMI monitoring enabled in its config - verify your Sysmon config actually captures these before assuming you have coverage. The three-event chain (19 = filter registered, 20 = consumer registered, 21 = binding created) tells the complete story: what triggers it, what it does, and that it is now armed. In practice, EID 21 (binding) is the highest-value single alert because a filter and consumer registered independently are less meaningful than when they are bound together. Two consumer types are dangerous: CommandLineEventConsumer (runs a shell command) and ActiveScriptEventConsumer (runs VBScript or JScript inline - no file on disk at all). Legitimate WMI subscriptions exist (SCCM, some AV products) - baseline your environment before alerting on all subscription activity. The root\\subscription namespace is the canonical adversary location; legitimate subscriptions more often live under root\\cimv2 or vendor-specific namespaces.",
         apt: [
           { cls: "apt-ru", name: "APT29", note: "WMI subscription persistence documented in multiple long-dwell espionage operations." },
@@ -1518,6 +1533,7 @@ Set-WmiInstance -Namespace root\subscription
     rows: [
       {
         sub: "T1053.005 - Suspicious Task Creation via schtasks.exe",
+        os: "win",
         indicator: "schtasks.exe /create with action pointing to suspicious binary path or scripting interpreter",
         sysmon: `EventID=1
 Image=*\\schtasks.exe
@@ -1656,6 +1672,7 @@ Sysinternals autoruns.exe:
       },
       {
         sub: "T1053.005 - Remote Scheduled Task Creation",
+        os: "win",
         indicator: "schtasks.exe /create with /s flag targeting remote host - lateral movement or remote persistence via Task Scheduler",
         sysmon: `// On SOURCE host:
 EventID=1
@@ -1781,6 +1798,7 @@ Velociraptor:
       },
       {
         sub: "T1053.005 - Scheduled Task Action Pointing to Suspicious Binary",
+        os: "win",
         indicator: "Existing or newly created scheduled task with action path in user-writable directory or running a scripting interpreter",
         sysmon: `// Sysmon does not directly inspect task XML content -
 // use Windows Security Event 4698 for this.
@@ -1931,6 +1949,7 @@ Sysinternals autoruns.exe:
     rows: [
       {
         sub: "T1569.002 - sc.exe Service Creation with Suspicious binPath",
+        os: "win",
         indicator: "sc.exe create with binPath pointing to suspicious binary, user-writable path, or scripting interpreter",
         sysmon: `EventID=1
 Image=*\\sc.exe
@@ -2056,6 +2075,7 @@ Sysinternals autoruns.exe:
       },
       {
         sub: "T1569.002 - PsExec Service Signature (PSEXESVC)",
+        os: "win",
         indicator: "PSEXESVC service installation or PSEXESVC.exe drop on target host - PsExec lateral movement artifact",
         sysmon: `// On DESTINATION host:
 
@@ -2204,6 +2224,7 @@ Network-side complement:
       },
       {
         sub: "T1569.002 - Service Binary in Non-Standard Path",
+        os: "win",
         indicator: "Registered service with ImagePath outside standard system directories - hunting for malicious persistence via service registry",
         sysmon: `// Real-time: Sysmon EID 13 (registry value set)
 // catches service ImagePath being written:
@@ -2347,6 +2368,7 @@ Sysinternals autoruns.exe:
     rows: [
       {
         sub: "T1218.005 - mshta.exe with Remote URL Argument",
+        os: "win",
         indicator: "mshta.exe invoked with HTTP/HTTPS URL or UNC path - fetches and executes remote HTA payload",
         sysmon: `EventID=1
 Image=*\\mshta.exe
@@ -2470,6 +2492,7 @@ LOLBAS project:
       },
       {
         sub: "T1218.005 - mshta.exe with Inline Script Payload",
+        os: "win",
         indicator: "mshta.exe with vbscript: or javascript: protocol handler in command line - fileless inline execution",
         sysmon: `EventID=1
 Image=*\\mshta.exe
@@ -2569,6 +2592,7 @@ LOLBAS project:
     rows: [
       {
         sub: "T1218.011 - rundll32.exe Loading DLL from Suspicious Path",
+        os: "win",
         indicator: "rundll32.exe with DLL argument pointing to user-writable path or non-standard location",
         sysmon: `EventID=1
 Image=*\\rundll32.exe
@@ -2694,6 +2718,7 @@ LOLBAS project:
       },
       {
         sub: "T1218.011 - rundll32.exe with JavaScript Protocol",
+        os: "win",
         indicator: "rundll32.exe with javascript: in command line - abuses MSHTML library to execute inline JScript or fetch remote scriptlet",
         sysmon: `EventID=1
 Image=*\\rundll32.exe
@@ -2786,6 +2811,7 @@ Casey Smith research:
       },
       {
         sub: "T1218.011 - rundll32.exe with No Arguments",
+        os: "win",
         indicator: "rundll32.exe process running with empty or near-empty command line - process hollowing or thread injection target",
         sysmon: `EventID=1
 Image=*\\rundll32.exe
@@ -2918,6 +2944,7 @@ Get-InjectedThread (Jared Atkinson):
     rows: [
       {
         sub: "T1218.010 - Squiblydoo (Remote Scriptlet Execution)",
+        os: "win",
         indicator: "regsvr32.exe with /i: flag pointing to remote URL and scrobj.dll - classic Casey Smith Squiblydoo AppLocker bypass",
         sysmon: `EventID=1
 Image=*\\regsvr32.exe
@@ -3071,6 +3098,7 @@ Casey Smith (subTee):
       },
       {
         sub: "T1218.010 - regsvr32.exe Loading DLL from Suspicious Path",
+        os: "win",
         indicator: "regsvr32.exe registering or unregistering a DLL from user-writable path - non-Squiblydoo abuse pattern",
         sysmon: `EventID=1
 Image=*\\regsvr32.exe
@@ -3197,6 +3225,7 @@ Velociraptor:
     rows: [
       {
         sub: "T1106 - Native API Process Creation and Memory Injection Artifacts",
+        os: "win",
         indicator: "Process spawned with empty command line, suspicious cross-process memory access, or remote thread injection - Native API execution bypassing Win32 layer",
         sysmon: `// Three Sysmon event IDs cover Native API abuse:
 
@@ -3378,6 +3407,122 @@ Dedicated injection detection tools:
           { cls: "apt-mul", name: "Red Teams", note: "Direct syscall techniques (Syswhispers, HellsGate) are standard modern red team evasion tradecraft." }
         ],
         cite: "MITRE ATT&CK T1106, T1055"
+      },
+      {
+        sub: "T1106 - Linux Fileless Execution (memfd_create / execve from anonymous fd)",
+        os: "linux",
+        indicator: "Execution from an anonymous in-memory file (memfd) or a process whose backing executable has been deleted - fileless execution via memfd_create + execve, leaving no on-disk binary",
+        sysmon: `// Sysmon for Linux ProcessCreate (EID 1)
+EventID=1
+Image matches an anonymous/deleted backing file:
+  /memfd:*  (anonymous memory file descriptor)
+  OR *(deleted) in the resolved image path
+CurrentDirectory / parentage may look normal - the tell
+  is the in-memory or unlinked image source.
+
+// memfd_create is a syscall - best captured by auditd
+// (see Auditd/Shell) or eBPF tooling; Sysmon for Linux
+// surfaces the resulting exec with a /memfd: image path.`,
+        kibana: `// Execution from an anonymous memory fd or deleted binary
+process.executable: ("/memfd:*" OR *"(deleted)"*)
+
+// Process exe path under /proc that resolves to memfd
+process.name: *
+AND process.executable: "/memfd:*"
+
+// auditd: execve where the path is an anonymous fd
+auditd.data.syscall: "execve"
+AND process.executable: ("/memfd:*" OR *memfd*)
+
+// Correlate: a downloader (curl/wget) with NO subsequent
+// file write but a new process from /memfd: shortly after`,
+        powershell: `# (Auditd / Shell hunt - Linux row)
+
+# Hunt running processes executing from memfd or a deleted file
+for p in $(ls /proc | grep -E '^[0-9]+$'); do
+  exe=$(ls -l /proc/$p/exe 2>/dev/null)
+  echo "$exe" | grep -qE 'memfd:|\\(deleted\\)' && \\
+    echo "PID $p : $(cat /proc/$p/comm 2>/dev/null) : $exe"
+done
+
+# auditd rule to catch memfd_create + execve:
+#   -a always,exit -F arch=b64 -S memfd_create -k fileless
+#   -a always,exit -F arch=b64 -S execve -F exe=/memfd: -k fileless
+ausearch -k fileless -i 2>/dev/null
+
+# List anonymous memory-backed files held open by processes
+ls -l /proc/*/exe 2>/dev/null | grep -E 'memfd:|deleted'
+
+# Cross-check: recently-spawned processes with no on-disk path
+for p in $(ls /proc | grep -E '^[0-9]+$'); do
+  if readlink /proc/$p/exe 2>/dev/null | grep -q 'memfd\\|deleted'; then
+    echo "=== PID $p ==="; tr '\\0' ' ' < /proc/$p/cmdline; echo
+  fi
+done`,
+        registry: `(File Artifacts - Linux row)
+
+No registry, and by design almost no on-disk artifact -
+that's the point of fileless execution. What evidence
+exists lives in memory / /proc:
+
+Process evidence (the only reliable surface):
+  /proc/<pid>/exe -> '/memfd:<name> (deleted)' or
+    '<path> (deleted)' - the defining indicator
+  /proc/<pid>/maps - the executable region backed by an
+    anonymous mapping rather than a file
+  /proc/<pid>/cmdline , /proc/<pid>/environ
+  /proc/<pid>/fd - may show the memfd file descriptor
+
+memfd_create mechanics:
+  - memfd_create() makes an anonymous file in RAM
+  - the payload is written to that fd, then execve'd
+  - nothing ever touches the filesystem
+  - common in Linux malware loaders, ELF-in-memory
+    runners (e.g. ddexec, in-memory ELF loaders)
+
+Investigation pivots:
+- The '(deleted)' or '/memfd:' image path is the highest-
+  fidelity single indicator of fileless execution
+- Capture process memory (/proc/<pid>/mem via gcore, or
+  the memfd content) for the payload before the process
+  exits - it's gone on termination
+- Pairs with a download step that left no file on disk`,
+        tools: `memfd_create-based ELF loaders (ddexec, fileless ELF
+  runners, memrun-style tooling)
+Metasploit - Linux meterpreter in-memory execution
+Sliver / Mythic - fileless Linux stager options
+DDexec / EzuriLoader (ELF crypter+memory loader)
+Manual operators - 'fileless ELF' via memfd is an
+  increasingly common EDR-evasion step on Linux
+GTFOBins - some entries enable in-memory exec chains`,
+        ossdetect: `Sigma (Linux rules):
+- lnx_auditd_memfd_create_execution.yml
+- lnx_proc_exe_deleted_binary.yml
+
+Atomic Red Team:
+- T1106 (native API / fileless execution tests)
+
+Auditd:
+- memfd_create + execve syscall rules (-k fileless)
+
+Sysmon for Linux:
+- ProcessCreate (EID 1) surfaces /memfd: image paths
+
+eBPF tooling (strongest for this):
+- Falco ("Fileless execution via memfd_create" rule)
+- Tetragon / Tracee - syscall-level memfd + exec detection
+- These see the syscall directly, before the exec resolves
+
+Velociraptor:
+- Linux process artifacts flagging deleted/memfd exe links`,
+        notes: "This is the Linux counterpart to the Windows Native API row, and it centers on fileless execution via memfd_create - the dominant Linux EDR-evasion execution technique. The mechanism: memfd_create() creates an anonymous file that exists only in RAM, the payload (typically an ELF) is written to that file descriptor, and execve runs it directly - nothing ever touches disk, so file-based AV and integrity monitoring see nothing. The defining, highest-fidelity indicator is a process whose /proc/<pid>/exe symlink resolves to '/memfd:...' or shows '(deleted)' - that single check catches the overwhelming majority of fileless Linux execution and is trivially scriptable across /proc. Because syscall visibility is what really nails this, eBPF tooling (Falco, Tetragon, Tracee) is the strongest detector - they see the memfd_create and execve syscalls directly, before the exec resolves; auditd with memfd_create+execve rules is the next best and works without eBPF. Sysmon for Linux surfaces the resulting exec with a /memfd: image path. Critical IR note: the payload lives only in memory and vanishes when the process exits, so if you find one, capture the memfd content or process memory (gcore, /proc/<pid>/mem) immediately - there's no on-disk copy to recover later. This frequently pairs with a download step that deliberately left no file (curl piped straight into a memory loader), so correlate with network egress that has no matching file write.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "In-memory ELF execution and fileless loaders used to evade Linux EDR." },
+          { cls: "apt-kp", name: "Lazarus", note: "Fileless Linux payloads documented in supply-chain and financial intrusions." },
+          { cls: "apt-mul", name: "TeamTNT", note: "memfd-based fileless execution adopted in Linux cryptojacking toolkits to evade detection." },
+          { cls: "apt-mul", name: "Red Team", note: "memfd_create ELF loaders (ddexec-style) are standard modern Linux EDR-evasion tradecraft." },
+        ],
+        cite: "MITRE ATT&CK T1106",
       }
     ]
   },
@@ -3388,6 +3533,7 @@ Dedicated injection detection tools:
     rows: [
       {
         sub: "T1129 - DLL Side-Loading via Trusted Executable",
+        os: "win",
         indicator: "Microsoft-signed or vendor-signed binary loading an unsigned DLL from same directory - classic DLL side-loading pattern",
         sysmon: `// EID 7 (Image Load) is the primary detection event:
 EventID=7
@@ -3531,6 +3677,7 @@ LOLBAS project:
       },
       {
         sub: "T1129 - DLL Search Order Hijacking",
+        os: "win",
         indicator: "Unsigned DLL placed in earlier search-order location than a legitimate system DLL - exploits Windows DLL resolution order",
         sysmon: `// EID 7 (Image Load) showing unexpected DLL path:
 EventID=7
@@ -3694,6 +3841,7 @@ Spartacus tool:
     rows: [
       {
         sub: "T1204.002 - Container File Execution from Suspicious Path",
+        os: "win",
         indicator: "Process spawned from inside a mounted ISO/IMG/VHD container, or from a downloaded ZIP extraction path - post-MOTW user execution",
         sysmon: `// Process executing from mounted ISO drive letter:
 EventID=1
@@ -3859,6 +4007,7 @@ Velociraptor:
       },
       {
         sub: "T1204.002 - LNK File with Suspicious Target",
+        os: "win",
         indicator: "User-launched LNK shortcut with target invoking cmd/powershell or pointing to a script file - common phishing primitive",
         sysmon: `// Sysmon does not directly parse LNK file content,
 // but catches the execution that LNK launches:
@@ -4015,6 +4164,373 @@ LECmd by Eric Zimmerman:
           { cls: "apt-mul", name: "Commodity Phishing", note: "LNK is the most common single file type in post-MOTW commodity phishing delivery." }
         ],
         cite: "MITRE ATT&CK T1204.002, T1566.001"
+      }
+    ]
+  },
+  {
+    id: "T1059.004",
+    name: "Command and Scripting Interpreter: Unix Shell",
+    desc: "Adversaries abuse bash, sh, dash, or zsh to execute commands, scripts, and pipelines - the primary interactive and scripted execution surface on Linux.",
+    rows: [
+      {
+        sub: "T1059.004 - Suspicious Shell Execution (curl|bash, base64, reverse shells)",
+        os: "linux",
+        indicator: "A shell (bash/sh/dash) spawned with piped-download execution, base64-decoded payloads, or reverse-shell one-liners - especially from a network-facing service parent",
+        sysmon: `// Sysmon for Linux ProcessCreate (EID 1)
+EventID=1
+Image=*/bash OR */sh OR */dash OR */zsh
+CommandLine matches (any of):
+  *curl* *| *bash*  OR  *wget* *| *sh*       (curl|bash)
+  *base64* *-d*  OR  *base64* *--decode*      (decode+run)
+  *bash -i* OR */dev/tcp/*  OR  *nc * *-e *    (reverse shell)
+  *python* *-c* *socket*                       (py revshell)
+  *eval* OR *exec(*
+
+// Network-facing parent is the escalator of suspicion:
+ParentImage=*/nginx OR */httpd OR */apache2
+  OR */java OR */node OR */php-fpm OR */sshd`,
+        kibana: `// Shell with download-pipe-execute or decode-execute
+process.name: ("bash" OR "sh" OR "dash" OR "zsh")
+AND process.command_line: (*curl* OR *wget* OR *base64* OR *"/dev/tcp/"* OR *"bash -i"* OR *"nc -e"* OR *"socket"*)
+
+// Shell spawned by a network-facing service (webshell / RCE)
+process.name: ("bash" OR "sh" OR "dash")
+AND process.parent.name: ("nginx" OR "httpd" OR "apache2" OR "java" OR "node" OR "php-fpm" OR "tomcat" OR "sshd")
+AND NOT process.command_line: (*"/usr/lib"* OR *logrotate* OR *"apt"*)
+
+// auditd execve of a shell with suspicious args (if shipping auditd)
+auditd.data.syscall: "execve"
+AND process.title: (*curl*bash* OR *base64*-d* OR *"/dev/tcp/"*)`,
+        powershell: `# (Auditd / Shell hunt - this is a Linux row)
+
+# auditd: log all execve (baseline rule), then hunt shells
+# /etc/audit/rules.d/execve.rules:
+#   -a always,exit -F arch=b64 -S execve -k exec
+#   -a always,exit -F arch=b32 -S execve -k exec
+ausearch -k exec -i | grep -E 'bash|/bin/sh|dash' |
+  grep -E 'curl|wget|base64|/dev/tcp/|nc .*-e|bash -i'
+
+# Live: shells whose parent is a web/app service (RCE/webshell)
+ps -eo pid,ppid,user,comm,args --sort=start_time |
+  awk '$4 ~ /bash|sh|dash/ {print}' |
+  grep -E 'nginx|httpd|apache|java|node|php'
+
+# Shell history sweep for download-pipe-exec patterns
+for h in /home/*/.bash_history /root/.bash_history; do
+  grep -HnE 'curl.*\\| *bash|wget.*\\| *sh|base64 *-d|/dev/tcp/' "$h" 2>/dev/null
+done
+
+# Sysmon for Linux (if deployed) - same EID 1 model as Windows
+grep -a 'curl\\|base64\\|/dev/tcp/' /var/log/syslog 2>/dev/null  # adjust to your Sysmon sink`,
+        registry: `(File Artifacts - Linux row)
+
+No registry on Linux. Relevant execution artifacts:
+
+Shell history files (primary forensic source):
+  ~/.bash_history , ~/.zsh_history , ~/.sh_history
+  /root/.bash_history
+  - Note: attackers often unset HISTFILE, set
+    HISTSIZE=0, or 'rm' history - absence/truncation is
+    itself a signal. Check HISTCONTROL / HISTFILE in
+    ~/.bashrc, ~/.profile for tampering.
+
+Dropped payloads (common locations):
+  /tmp, /var/tmp, /dev/shm  (world-writable, memory-backed)
+  ~/.cache, ~/.config  (blend-in user dirs)
+  /tmp/.<hidden>  (dot-prefixed to hide from ls)
+
+Execution evidence:
+  /proc/<pid>/cmdline , /proc/<pid>/exe (symlink to binary,
+    or '(deleted)' if the binary was unlinked while running
+    - a strong fileless-execution tell)
+  /proc/<pid>/environ , /proc/<pid>/cwd
+
+Investigation pivots:
+- A process whose /proc/<pid>/exe points to a deleted file
+  is running fileless - high suspicion
+- Payloads in /dev/shm or /tmp/.hidden with execute bit
+- History tampering (HISTFILE unset) on a user that
+  shouldn't be doing admin work`,
+        tools: `Metasploit / Meterpreter (Linux payloads)
+Sliver / Havoc / Mythic (Linux implants)
+msfvenom-generated bash/python reverse shells
+pupy, Merlin, other cross-platform C2
+GTFOBins - the reference for living-off-the-land Unix
+  binaries (shell escapes, download+exec via legit tools)
+Manual operators - curl|bash and /dev/tcp reverse shells
+  are the most common hands-on-keyboard Linux execution
+Web-exploitation frameworks dropping shell payloads`,
+        ossdetect: `Sigma (Linux rules):
+- lnx_shell_susp_curl_pipe_bash.yml
+- lnx_shell_susp_rev_shell_pattern.yml
+- lnx_shell_susp_base64_decode_exec.yml
+- lnx_auditd_susp_shell_from_web_service.yml
+
+Atomic Red Team:
+- T1059.004 (Unix shell execution tests)
+
+Auditd:
+- execve logging (-S execve -k exec) is the foundation
+- aushape / go-audit for shipping to a SIEM
+
+Sysmon for Linux:
+- ProcessCreate (EID 1) rules mirroring the Windows set
+
+Other:
+- Falco (syscall-level: "Shell in container", "Run shell
+  untrusted") - strong for containerized Linux workloads
+- auditbeat / Elastic Defend on Linux endpoints`,
+        notes: "Unix shell is the Linux analogue of the PowerShell/cmd execution rows on the Windows side, and the highest-volume execution surface on Linux. The single most valuable pattern to hunt is a shell spawned by a network-facing service (nginx, apache, php-fpm, tomcat, java, node) - that lineage almost always means a webshell or exploited RCE, exactly mirroring the Windows 'Office spawns powershell' logic. After that, the content patterns: curl|bash and wget|sh (download-pipe-execute), base64 -d piped to a shell (obfuscated payloads), and reverse-shell one-liners (bash -i >& /dev/tcp/.../..., nc -e, python -c socket). Telemetry: auditd execve logging is the foundation and should be enabled with a catch-all execve rule keyed for easy searching; Sysmon for Linux gives you the same EID 1 ProcessCreate model you already use on Windows, so the detection logic ports cleanly. Don't rely on shell history as a primary control - attackers routinely unset HISTFILE or truncate it, so treat history tampering itself as a signal. A process whose /proc/<pid>/exe link shows '(deleted)' is running a binary that was unlinked while executing - a strong fileless tell worth a dedicated check. For containerized Linux, Falco is the strongest runtime detector. Baseline legitimate automation (config-management agents, cron-driven maintenance scripts, package managers running shells) to keep curl|bash and service-spawned-shell rules from drowning in deployment noise.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Linux shell payloads and reverse shells used extensively against Linux servers and appliances." },
+          { cls: "apt-ru", name: "APT28", note: "Unix shell execution incl. reverse shells documented against Linux infrastructure targets." },
+          { cls: "apt-kp", name: "Lazarus", note: "Linux shell-based loaders and reverse shells in financial/supply-chain intrusions." },
+          { cls: "apt-mul", name: "Cryptojacking / TeamTNT", note: "curl|bash droppers are the near-universal delivery for Linux coinminers and worms." },
+        ],
+        cite: "MITRE ATT&CK T1059.004",
+      }
+    ]
+  },
+  {
+    id: "T1059.006",
+    name: "Command and Scripting Interpreter: Python",
+    desc: "Adversaries use Python (a default interpreter on most Linux distros) for execution, reverse shells, and tooling - via python -c one-liners, scripts, or imported modules.",
+    rows: [
+      {
+        sub: "T1059.006 - Python One-Liner / Script Execution",
+        os: "linux",
+        indicator: "python/python3 invoked with -c inline code (especially socket/pty/os.system), or running a script from a writable/temp path, often spawning or spawned by a shell",
+        sysmon: `// Sysmon for Linux ProcessCreate (EID 1)
+EventID=1
+Image=*/python OR */python2 OR */python3
+CommandLine matches:
+  *-c* *socket*  OR  *-c* *pty.spawn*          (reverse shell)
+  *-c* *os.system* OR *-c* *subprocess*         (command exec)
+  *-c* *base64* OR *-c* *exec(*  OR *-c* *eval(*
+  */tmp/* OR */dev/shm/* OR *.py running from a writable dir
+
+// Parent/child lineage:
+ParentImage=*/bash spawned by a web service, OR
+Image=*/python with ChildProcess=*/bash (py -> shell)`,
+        kibana: `// Python inline execution with shell/socket primitives
+process.name: ("python" OR "python2" OR "python3")
+AND process.command_line: (*"-c"* AND (*socket* OR *pty.spawn* OR *os.system* OR *subprocess* OR *"exec("* OR *base64*))
+
+// Python running a script from a writable/temp path
+process.name: ("python" OR "python3")
+AND process.command_line: (*"/tmp/"* OR *"/dev/shm/"* OR *"/var/tmp/"*)
+AND NOT process.command_line: (*"/usr/lib/python"* OR *site-packages*)
+
+// Python spawned by a network service (RCE)
+process.name: ("python" OR "python3")
+AND process.parent.name: ("nginx" OR "apache2" OR "httpd" OR "php-fpm" OR "java" OR "node")`,
+        powershell: `# (Auditd / Shell hunt - Linux row)
+
+# auditd execve hunt for python with suspicious args
+ausearch -k exec -i | grep -E 'python[23]?' |
+  grep -E -- '-c .*socket|pty.spawn|os.system|subprocess|exec\\(|base64|/tmp/|/dev/shm/'
+
+# Live python processes + their command lines
+ps -eo pid,ppid,user,comm,args | awk '$4 ~ /python/' |
+  grep -E 'socket|pty|os.system|subprocess|/tmp/|/dev/shm/'
+
+# Python scripts in writable/temp dirs (dropped tooling)
+find /tmp /var/tmp /dev/shm /home -maxdepth 3 -name '*.py' \\
+  -newermt '-7 days' 2>/dev/null -ls
+
+# Check for python processes with a deleted backing file
+for p in $(pgrep -f python); do
+  ls -l /proc/$p/exe 2>/dev/null | grep -q deleted && echo "PID $p python (deleted)"
+done`,
+        registry: `(File Artifacts - Linux row)
+
+No registry. Python execution artifacts:
+
+Dropped scripts / payloads:
+  /tmp/*.py , /dev/shm/*.py , /var/tmp/*.py
+  ~/.cache , ~/.local  (user-context tooling)
+  __pycache__ directories with recent .pyc files
+
+Interpreter & module evidence:
+  /proc/<pid>/cmdline (the -c payload or script path)
+  /proc/<pid>/exe (interpreter binary; '(deleted)' = tell)
+  Imported modules via /proc/<pid>/maps (loaded .so files)
+  PYTHONSTARTUP / PYTHONPATH env tampering
+    (check /proc/<pid>/environ and shell rc files)
+
+Persistence-adjacent (worth noting):
+  sitecustomize.py / usercustomize.py - auto-imported by
+    the interpreter; a planted one runs on every python
+    launch (a python-specific persistence/exec trick)
+
+Investigation pivots:
+- python -c with socket/pty.spawn is almost always a
+  reverse shell - very high fidelity
+- A .py in /dev/shm or /tmp executed recently
+- sitecustomize.py outside the standard library path`,
+        tools: `msfvenom python/meterpreter reverse shells
+pty.spawn upgrade (the standard 'upgrade to interactive
+  TTY' step after a basic reverse shell)
+Sliver / Mythic python stagers
+Empire (has Python/Linux agents)
+pupy (Python-based cross-platform RAT)
+GTFOBins - python entries for shell escape / SUID abuse
+Manual operators - python -c reverse shells are second
+  only to bash for hands-on Linux execution`,
+        ossdetect: `Sigma (Linux rules):
+- lnx_python_reverse_shell.yml
+- lnx_susp_python_inline_exec.yml
+- lnx_auditd_python_pty_spawn.yml
+
+Atomic Red Team:
+- T1059.006 (Python execution tests)
+
+Auditd:
+- execve logging captures the python -c command line
+
+Sysmon for Linux:
+- ProcessCreate (EID 1) for python with suspicious args
+
+Falco:
+- "Python spawned shell" / interpreter-in-container rules
+  (strong for containerized workloads)`,
+        notes: "Python is included as its own execution row because it ships by default on virtually every Linux distribution, making it a reliable interpreter for attackers who can't count on their own tooling being present. The two highest-value patterns: python -c with socket or pty.spawn (the canonical Python reverse shell, and the standard 'upgrade to interactive TTY' step that follows a basic shell), and python running a script from /tmp, /dev/shm, or /var/tmp (dropped tooling). The pty.spawn pattern in particular is almost never legitimate and is extremely high-fidelity. As with the shell row, a python process spawned by a network-facing service points at RCE/webshell, and a python process whose /proc/<pid>/exe shows '(deleted)' is running fileless. One Python-specific persistence/execution wrinkle worth knowing: sitecustomize.py and usercustomize.py are auto-imported on every interpreter start, so a planted copy outside the standard library is both execution and persistence - check for those. Telemetry is the same stack as the shell row (auditd execve, Sysmon for Linux EID 1, Falco for containers). Baseline legitimate Python automation heavily - many infra tools (Ansible, salt, cloud agents, monitoring) are Python and will generate -c and subprocess activity; scope the suspicious-args rules to socket/pty/temp-path patterns rather than alerting on all python -c.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Python tooling and reverse shells used against Linux server estates." },
+          { cls: "apt-ir", name: "MuddyWater", note: "Python-based payloads and post-exploitation documented against Linux/cross-platform targets." },
+          { cls: "apt-mul", name: "TeamTNT", note: "Python components in Linux cryptojacking and worm toolkits." },
+          { cls: "apt-mul", name: "Red Team", note: "python -c reverse shells and pty.spawn upgrades are standard Linux post-ex tradecraft." },
+        ],
+        cite: "MITRE ATT&CK T1059.006",
+      }
+    ]
+  },
+  {
+    id: "T1053.003",
+    name: "Scheduled Task/Job: Cron",
+    desc: "Adversaries use cron (crontabs, /etc/cron.*, systemd timers) to execute code on a schedule - for execution and persistence. This row is the execution/abuse-detection angle.",
+    rows: [
+      {
+        sub: "T1053.003 - Cron Job / Crontab Abuse",
+        os: "linux",
+        indicator: "Creation or modification of a crontab or /etc/cron.* entry invoking a shell/interpreter or a payload in a writable path - or cron spawning a suspicious child",
+        sysmon: `// Sysmon for Linux: file modify (EID 11) of cron locations,
+// and ProcessCreate (EID 1) of cron-spawned children.
+EventID=11 (FileCreate / modify)
+TargetFilename matches:
+  /etc/crontab
+  /etc/cron.d/*  /etc/cron.hourly/*  /etc/cron.daily/*
+  /var/spool/cron/*  /var/spool/cron/crontabs/*
+  /etc/systemd/system/*.timer
+
+EventID=1 (cron-spawned execution)
+ParentImage=*/cron OR */crond OR */CRON
+Image=*/bash OR */sh OR */python* OR */curl OR */wget
+CommandLine = a payload / download / reverse shell`,
+        kibana: `// Cron file modification
+winlog.event_id: 11
+AND file.path: ("/etc/crontab" OR "/etc/cron.d/*" OR "/etc/cron.hourly/*" OR "/etc/cron.daily/*" OR "/etc/cron.weekly/*" OR "/var/spool/cron/*" OR "/etc/systemd/system/*.timer")
+
+// cron daemon spawning a suspicious child
+process.parent.name: ("cron" OR "crond" OR "CRON")
+AND process.name: ("bash" OR "sh" OR "python" OR "python3" OR "curl" OR "wget" OR "nc")
+AND process.command_line: (*curl* OR *base64* OR *"/dev/tcp/"* OR *"/tmp/"* OR *"/dev/shm/"*)
+
+// auditd watch on cron paths (if configured)
+auditd.data.key: "cron_persist"`,
+        powershell: `# (Auditd / Shell hunt - Linux row)
+
+# Enumerate ALL cron entries across the system (review each)
+for u in $(cut -f1 -d: /etc/passwd); do
+  crontab -l -u "$u" 2>/dev/null | grep -v '^#' | sed "s/^/[$u] /"
+done
+cat /etc/crontab 2>/dev/null
+ls -la /etc/cron.d/ /etc/cron.hourly/ /etc/cron.daily/ \\
+  /etc/cron.weekly/ /etc/cron.monthly/ 2>/dev/null
+cat /etc/cron.d/* 2>/dev/null
+ls -la /var/spool/cron/ /var/spool/cron/crontabs/ 2>/dev/null
+
+# systemd timers (the modern cron)
+systemctl list-timers --all
+for t in /etc/systemd/system/*.timer; do echo "== $t =="; cat "$t"; done 2>/dev/null
+
+# auditd watch rules for cron tampering:
+#   -w /etc/crontab -p wa -k cron_persist
+#   -w /etc/cron.d/ -p wa -k cron_persist
+#   -w /var/spool/cron/ -p wa -k cron_persist
+ausearch -k cron_persist -i 2>/dev/null
+
+# Flag cron entries invoking shells/downloads/temp paths
+grep -RnE 'curl|wget|base64|/dev/tcp/|/tmp/|/dev/shm/|bash -i' \\
+  /etc/crontab /etc/cron.* /var/spool/cron 2>/dev/null`,
+        registry: `(File Artifacts - Linux row)
+
+No registry. Cron artifact locations (all worth a sweep):
+
+System-wide:
+  /etc/crontab               (master system crontab)
+  /etc/cron.d/*              (drop-in system cron files)
+  /etc/cron.hourly|daily|weekly|monthly/*  (script dirs)
+
+Per-user:
+  /var/spool/cron/<user>            (RHEL/CentOS)
+  /var/spool/cron/crontabs/<user>   (Debian/Ubuntu)
+
+systemd timers (modern equivalent):
+  /etc/systemd/system/*.timer + matching *.service
+  /usr/lib/systemd/system/*.timer
+  ~/.config/systemd/user/*.timer  (user timers)
+
+Logs:
+  /var/log/cron , /var/log/syslog (cron execution lines)
+  journalctl -u cron / journalctl -u crond
+
+Investigation pivots:
+- Any cron entry invoking curl/wget/base64, a reverse
+  shell, or a payload in /tmp,/dev/shm is the signature
+- @reboot entries (run at boot) are favored for persistence
+- Dot-prefixed or odd-named files in /etc/cron.d
+- A user crontab for an account that shouldn't have one
+  (service accounts, nologin users)
+- systemd .timer pointing at a .service that runs a
+  writable-path binary`,
+        tools: `Built-in: crontab -e / direct file writes (no tooling
+  needed - cron abuse is a few lines)
+Metasploit - cron persistence modules
+Empire / Sliver Linux persistence modules
+LinPEAS / linux-smart-enumeration - flag writable cron
+  files and misconfigured cron (recon)
+GTFOBins - entries abusing cron-invoked SUID helpers
+Manual operators - @reboot cron and /etc/cron.d drops are
+  among the most common Linux persistence/exec methods`,
+        ossdetect: `Sigma (Linux rules):
+- lnx_auditd_cron_file_modification.yml
+- lnx_cron_susp_command.yml
+- lnx_systemd_timer_creation.yml
+
+Atomic Red Team:
+- T1053.003 (cron job tests)
+
+Auditd:
+- -w watches on /etc/crontab, /etc/cron.d/, /var/spool/cron
+
+Sysmon for Linux:
+- FileCreate (EID 11) on cron paths; ProcessCreate (EID 1)
+  for cron-spawned children
+
+Falco:
+- "Schedule Cron Jobs" / write-below-etc rules
+
+Velociraptor:
+- Linux.Sys.Crontab artifact (fleet-wide cron enumeration)`,
+        notes: "Cron is both an execution and a persistence technique; this row focuses on detecting the abuse, and it pairs with the eventual Linux persistence coverage. The detection surface is broad because cron has many homes - the master /etc/crontab, drop-in files in /etc/cron.d, the script directories (/etc/cron.hourly|daily|weekly|monthly), per-user spools (/var/spool/cron on RHEL, /var/spool/cron/crontabs on Debian), and increasingly systemd .timer units which are the modern replacement and easy to overlook. Two detection angles: file modification on any of those locations (auditd watch rules keyed for easy searching, or Sysmon for Linux EID 11), and cron-spawned children that are suspicious (cron/crond as parent of a shell, python, curl, or a /tmp payload). The content tells are the same as elsewhere - curl/wget/base64, reverse shells, payloads in writable paths - plus the cron-specific @reboot directive favored for boot persistence. The proactive play is a full cron enumeration sweep across all users and all locations including systemd timers, flagging any entry that invokes a downloader, a shell, or a writable-path binary, and any crontab belonging to a service/nologin account that shouldn't have one. This needs auditd watch rules on the cron paths to catch reliably in real time - note that as a prerequisite. Baseline legitimate scheduled maintenance (logrotate, package-update timers, monitoring agents) before alerting.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Cron-based execution and persistence on compromised Linux servers documented across operations." },
+          { cls: "apt-ru", name: "APT28", note: "Cron persistence used to maintain access on Linux infrastructure." },
+          { cls: "apt-mul", name: "TeamTNT / Kinsing", note: "Cron (esp. /etc/cron.d and @reboot) is the staple persistence/re-exec for Linux cryptojacking worms." },
+          { cls: "apt-mul", name: "Rocke / 8220 Gang", note: "Cron-based re-infection loops are signature behavior for Linux coinminer crews." },
+        ],
+        cite: "MITRE ATT&CK T1053.003",
       }
     ]
   }

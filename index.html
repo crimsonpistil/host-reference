@@ -66,9 +66,9 @@
 
   <a href="execution.html" class="tactic-card" data-tags="execution ta0002 powershell cmd vbscript jscript wmi scheduled task service mshta rundll32 regsvr32 native api shared modules user execution">
     <div class="card-id" style="color:#a371f7">TA0002</div>
-    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">32 indicators · 13 techniques</span>
+    <span class="card-pill" style="background:rgba(163,113,247,.12);color:#a371f7">36 indicators · 16 techniques · WIN + LINUX</span>
     <div class="card-name">Execution</div>
-    <div class="card-desc">Code execution via interpreters and signed binaries - complete coverage of all 13 Execution techniques. PowerShell, cmd.exe, VBScript, JScript, WMI (local/remote/persistence), scheduled tasks, service execution, mshta, rundll32, regsvr32 (Squiblydoo), Native API injection, DLL side-loading / search-order hijacking, and user execution via container files and LNK shortcuts. 32 indicators total across the tactic.</div>
+    <div class="card-desc">Code execution via interpreters and signed binaries. Windows (32): PowerShell, cmd, VBScript, JScript, WMI, scheduled tasks, service execution, mshta, rundll32, regsvr32, Native API, DLL side-loading, user execution. Linux (4): T1059.004 Unix Shell (curl|bash, reverse shells, service-spawned shells), T1059.006 Python (-c reverse shells, pty.spawn), T1053.003 Cron (crontab/cron.d/systemd timers), T1106 fileless execution (memfd_create). 36 indicators total - filter by OS in the header.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
@@ -87,9 +87,9 @@
 
   <a href="privilege_escalation.html" class="tactic-card" data-tags="privilege escalation ta0004 uac bypass fodhelper token manipulation impersonation potato process injection hollowing thread hijack byovd vulnerable driver exploitation">
     <div class="card-id" style="color:#ffa600">TA0004</div>
-    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">10 indicators · 4 techniques</span>
+    <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">21 indicators · 13 techniques</span>
     <div class="card-name">Privilege Escalation</div>
-    <div class="card-desc">Elevating from user to admin/SYSTEM. First pass covers the core, high-signal techniques: T1548.002 UAC Bypass (fodhelper/mock-folder/eventvwr-cmstp, 3), T1134 Access Token Manipulation (theft + create-process-with-token, 2), T1055 Process Injection (remote-thread DLL/PE, hollowing, thread hijack, 3), T1068 Exploitation incl. BYOVD vulnerable drivers and Potato-family coercion (2). 10 indicators total. Long-tail techniques to follow.</div>
+    <div class="card-desc">Elevating from user to admin/SYSTEM - full TA0004 coverage (Windows-relevant techniques). UAC bypass (T1548.002, 3), token manipulation incl. Potato + SID-history (T1134/.005, 3), process injection - remote-thread/hollowing/thread-hijack (T1055, 3), exploitation incl. BYOVD (T1068, 2), service registry/path/permission weaknesses (T1574.011/.005, 3), DLL search-order hijack priv-esc angle (T1574.001, 1), accessibility & IFEO triggered execution (T1546.008/.012, 2), GPO & domain-trust modification (T1484.001/.002, 2), container escape (T1611, 1), and account manipulation / AdminSDHolder (T1098, 1). 21 indicators across 13 techniques.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
@@ -126,7 +126,8 @@
     <div class="info-card">
       <h3>What this is</h3>
       <p>The <strong>host-side</strong> companion to the <a href="https://hunt.6b74.dev" style="color:var(--accent)">network threat hunt reference</a>. Where the network reference covers what adversaries do across the wire, this site covers what they do inside the endpoint: process execution, persistence, privilege escalation, host-side credential theft.</p>
-      <p>Each indicator includes Sysmon Event IDs, paste-ready Kibana KQL, PowerShell hunt scripts, registry/file artifacts, adversary tool attribution, and references to open-source detection projects (Sigma, Velociraptor, Hayabusa, etc.).</p>
+      <p>Covers both <strong>Windows</strong> and <strong>Linux</strong> endpoints. Each indicator is tagged <span style="color:var(--accent)">WIN</span> or <span style="color:#f0a020">LINUX</span>; use the OS filter in any tactic header to narrow to one platform, or leave it off to see both. Windows rows lead with Sysmon / PowerShell / registry; Linux rows lead with Sysmon for Linux / auditd / shell, with file artifacts in place of registry.</p>
+      <p>Each indicator includes detection telemetry, paste-ready Kibana KQL, hunt scripts, file/registry artifacts, adversary tool attribution, and references to open-source detection projects (Sigma, Velociraptor, Hayabusa, Falco, etc.).</p>
     </div>
 
     <div class="info-card">
@@ -153,7 +154,7 @@
       <h3>Build status</h3>
       <p><strong>Execution (TA0002) is complete</strong>: all 13 techniques fully built with 32 indicators total. Coverage includes scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files.</p>
       <p><strong>Persistence (TA0003) actively expanding</strong>: 20 indicators across 9 techniques. Top 5 most-common techniques complete. Long-tail high-value techniques being added including sophisticated APT-level tradecraft. Built: T1547.001 Run Keys / Startup Folder (3), T1546.003 WMI Subscription Hunt (2), T1543.003 Service Persistence Hunt (3), T1053.005 Scheduled Task Persistence Angle (2), T1547.009 Shortcut Modification (2), T1037 Boot/Logon Init Scripts including GPO logon scripts (2), T1098 Account Manipulation - group changes and password resets (2), T1136 Create Account - local and domain (2), T1546.015 COM Hijacking - HKCU shadow and phantom/TreatAs variants (2). Cross-cited techniques from Execution are built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
-      <p><strong>Privilege Escalation (TA0004) first pass</strong>: 10 indicators across 4 core techniques. T1548.002 Bypass UAC (fodhelper/computerdefaults registry hijack, mock trusted-directory and auto-elevator DLL hijack, eventvwr/cmstp, 3), T1134 Access Token Manipulation (token theft incl. Potato pattern, create-process-with-token, 2), T1055 Process Injection (remote-thread DLL/PE injection, process hollowing, thread execution hijacking, 3), T1068 Exploitation (bring-your-own-vulnerable-driver / BYOVD, and local service exploitation incl. SeImpersonate-coercion Potato chains, 2). Long-tail techniques to follow.</p>
+      <p><strong>Privilege Escalation (TA0004) complete</strong> (Windows-relevant techniques): 21 indicators across 13 techniques. Core: T1548.002 Bypass UAC (3), T1134 Access Token Manipulation incl. Potato pattern (2), T1055 Process Injection - remote-thread DLL/PE, hollowing, thread hijack (3), T1068 Exploitation incl. BYOVD and SeImpersonate-coercion (2). Config/hijack: T1574.011 Service Registry Permissions (1), T1574.005/.009/.010 Unquoted Path & Weak Service Permissions (2), T1574.001 DLL Search-Order Hijack priv-esc angle (1). Token/directory: T1134.005 SID-History Injection (1), T1484.001/.002 GPO & Domain-Trust Modification (2), T1098 Account Manipulation incl. AdminSDHolder (1). Triggered execution: T1546.008 Accessibility Features (1), T1546.012 IFEO Injection (1). Container: T1611 Escape to Host (1). Linux/macOS-only sub-techniques (T1548.001/.003/.004 setuid/sudo) are out of scope for this Windows host kit. Techniques shared with Persistence (T1543.003, T1546.003/.015, T1053.005, T1547.x, T1037) are covered in that tactic with persistence framing.</p>
       <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Privilege Escalation<br>&rarr;Defense Evasion<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 

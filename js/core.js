@@ -9,8 +9,11 @@ const CMS_TEMPLATES = {
   'T1059.003': { title:'T1059.003 - Windows Command Shell', body:`## TAG - EXECUTION\n### Technique: Windows Command Shell, T1059.003\n- Time:\n- Host:\n- User Account:\n- Parent Process:\n- Command Line:\n- Discovery Commands Observed:\n- Obfuscation Pattern: (caret / quote / hex / none)\n- Subsequent Process Spawned:\n\nNotes:` },
   'T1059.005': { title:'T1059.005 - Visual Basic', body:`## TAG - EXECUTION\n### Technique: Visual Basic, T1059.005\n- Time:\n- Host:\n- User Account:\n- Parent Process: (Office app?)\n- Script Path:\n- Script Content (sanitized):\n- Network Activity:\n\nNotes:` },
   'T1059.007': { title:'T1059.007 - JavaScript', body:`## TAG - EXECUTION\n### Technique: JavaScript, T1059.007\n- Time:\n- Host:\n- User Account:\n- Engine: (wscript / cscript / mshta)\n- Script Path:\n- Script Content (sanitized):\n\nNotes:` },
+  'T1059.004': { title:'T1059.004 - Unix Shell', body:`## TAG - EXECUTION\n### Technique: Unix Shell, T1059.004 [LINUX]\n- Time:\n- Host:\n- User / UID:\n- Shell: (bash / sh / dash / zsh)\n- Parent Process: (web service? sshd?)\n- Command Line:\n- Pattern: (curl|bash / base64 -d / reverse shell / other)\n- /proc/<pid>/exe deleted (Y/N):\n- History Tampering (HISTFILE unset?) (Y/N):\n\nNotes:` },
+  'T1059.006': { title:'T1059.006 - Python', body:`## TAG - EXECUTION\n### Technique: Python, T1059.006 [LINUX]\n- Time:\n- Host:\n- User / UID:\n- Interpreter: (python / python3)\n- Parent Process:\n- Command Line / -c payload:\n- Pattern: (socket / pty.spawn / os.system / temp-path script)\n- Script Path (if any):\n- sitecustomize.py planted (Y/N):\n\nNotes:` },
   T1047: { title:'T1047 - Windows Management Instrumentation', body:`## TAG - EXECUTION\n### Technique: WMI, T1047\n- Time:\n- Host:\n- User Account:\n- Process: (wmic.exe / Win32_Process)\n- Command Line:\n- Target Host (if remote):\n- WMI Subscription Created (Y/N):\n\nNotes:` },
   'T1053.005': { title:'T1053.005 - Scheduled Task', body:`## TAG - EXECUTION\n### Technique: Scheduled Task, T1053.005\n- Time:\n- Host:\n- User Account:\n- Task Name:\n- Task Action / Binary:\n- Task Trigger:\n- Run-As Account: (SYSTEM elevation?)\n- Created Locally or Remotely:\n\nNotes:` },
+  'T1053.003': { title:'T1053.003 - Cron', body:`## TAG - EXECUTION\n### Technique: Cron, T1053.003 [LINUX]\n- Time:\n- Host:\n- User / UID:\n- Location: (/etc/crontab / cron.d / spool / systemd .timer)\n- Schedule: (@reboot? interval?)\n- Command / Payload:\n- Invokes: (shell / downloader / temp-path binary)\n- Crontab Owner Expected (Y/N):\n\nNotes:` },
   'T1569.002': { title:'T1569.002 - Service Execution', body:`## TAG - EXECUTION\n### Technique: Service Execution, T1569.002\n- Time:\n- Host:\n- User Account:\n- Service Name:\n- binPath:\n- Service Type / Start Type:\n- Tool Inferred: (sc.exe / PsExec / Impacket)\n\nNotes:` },
   'T1218.005': { title:'T1218.005 - Mshta', body:`## TAG - EXECUTION\n### Technique: Mshta, T1218.005\n- Time:\n- Host:\n- User Account:\n- mshta.exe Command Line:\n- HTA Source: (URL / inline VBS / inline JS)\n- Subsequent Process Spawned:\n- Outbound Network:\n\nNotes:` },
   'T1218.011': { title:'T1218.011 - Rundll32', body:`## TAG - EXECUTION\n### Technique: Rundll32, T1218.011\n- Time:\n- Host:\n- User Account:\n- rundll32.exe Command Line:\n- DLL Path:\n- Export Function:\n- DLL Signed (Y/N):\n\nNotes:` },
@@ -22,11 +25,21 @@ const CMS_TEMPLATES = {
   T1134: { title:'T1134 - Access Token Manipulation', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Access Token Manipulation, T1134\n- Time:\n- Host:\n- Source Process / Account:\n- Target Token / Account Impersonated:\n- Sub-Technique: (.001 theft / .002 create-process-with-token / .005 SID-history)\n- SeImpersonate / SeAssignPrimaryToken Held (Y/N):\n- Potato Pattern (named-pipe coercion) (Y/N):\n- Resulting Context: (SYSTEM / admin)\n- Resulting Process + Parent:\n\nNotes:` },
   T1055: { title:'T1055 - Process Injection', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Process Injection, T1055\n- Time:\n- Host:\n- Source Process:\n- Target Process:\n- Sub-Technique: (.001 DLL / .002 PE / .003 thread-hijack / .012 hollowing)\n- Sysmon EID 8 (CreateRemoteThread) (Y/N):\n- EID 10 Access Rights:\n- Start Address Non-Image (Y/N):\n- Memory-Forensics Confirmation: (PE-sieve / malfind / hollowfind)\n\nNotes:` },
   T1068: { title:'T1068 - Exploitation for Privilege Escalation', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Exploitation for Privilege Escalation, T1068\n- Time:\n- Host:\n- Vector: (BYOVD / local CVE / Potato coercion / service exploit)\n- Driver or CVE:\n- Driver Path + Signed (Y/N):\n- Vulnerable-Driver List Match: (loldrivers / MS blocklist)\n- Service/Pipe Artifact:\n- Resulting SYSTEM Process + Parent:\n\nNotes:` },
+  'T1574.011': { title:'T1574.011 - Services Registry Permissions Weakness', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Services Registry Permissions Weakness, T1574.011\n- Time:\n- Host:\n- Service Name + RunAs Account:\n- Value Modified: (ImagePath / ServiceDll / FailureCommand)\n- New Value / Payload Path:\n- Modifying Process:\n- Weak-ACL Confirmed (Y/N):\n- Service Restart Observed (Y/N):\n\nNotes:` },
+  'T1574.005': { title:'T1574.005 - Unquoted Path / Weak Service Permissions', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Unquoted Path / Weak Service File Permissions, T1574.005/.009/.010\n- Time:\n- Host:\n- Service Name + RunAs Account:\n- Variant: (unquoted path / writable binary / writable folder)\n- Intercept Path or Planted File:\n- services.exe Child Path:\n- Resulting Context: (SYSTEM)\n\nNotes:` },
+  'T1134.005': { title:'T1134.005 - SID-History Injection', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: SID-History Injection, T1134.005\n- Time:\n- Domain / DC:\n- Target Account:\n- Injected SID(s) + RID: (512 DA / 519 EA / cross-domain)\n- Method: (mimikatz sid::add / DSInternals / DCShadow)\n- Security Event: (4765 added / 4766 failed / 4662 DRSUAPI)\n- Detected via Group Audit or sIDHistory Sweep:\n\nNotes:` },
+  'T1546.008': { title:'T1546.008 - Accessibility Features', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Accessibility Features, T1546.008\n- Time:\n- Host:\n- Binary Targeted: (sethc / utilman / osk / Magnify / Narrator)\n- Mechanism: (binary replace / IFEO Debugger)\n- Debugger / Payload Value:\n- winlogon.exe Child Shell Observed (Y/N):\n- Triggered Pre-Auth at Logon Screen (Y/N):\n\nNotes:` },
+  'T1546.012': { title:'T1546.012 - Image File Execution Options Injection', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: IFEO Injection, T1546.012\n- Time:\n- Host:\n- Target Process:\n- Mechanism: (Debugger value / GlobalFlag + SilentProcessExit)\n- Payload / MonitorProcess Value:\n- Trigger: (on launch / on exit)\n- Real Debugger Allowlist Checked (Y/N):\n\nNotes:` },
+  'T1574.001': { title:'T1574.001 - DLL Search Order Hijacking (Priv Esc)', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: DLL Search Order Hijacking / Side-Loading, T1574.001\n- Time:\n- Host:\n- Privileged Process (loader) + Context:\n- Hijacked / Phantom DLL Name:\n- DLL Path (writable dir):\n- DLL Signed (Y/N):\n- Writable-Dir Precondition Confirmed (Y/N):\n\nNotes:` },
+  'T1484.001': { title:'T1484.001 - Domain/Tenant Policy Modification', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: GPO / Domain Trust Modification, T1484\n- Time:\n- Domain / DC:\n- Sub-Technique: (.001 GPO / .002 Domain Trust)\n- Artifact: (GptTmpl.inf / ScheduledTasks.xml / Groups.xml / TDO / federation)\n- ImmediateTaskV2 Present (Y/N):\n- Security Event: (5136 / 4706 / 4728)\n- Actor + Delegation Path:\n- Scope (hosts/domains affected):\n\nNotes:` },
+  T1611: { title:'T1611 - Escape to Host', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Escape to Host (Container Breakout), T1611\n- Time:\n- Host / Node:\n- Container / Pod ID:\n- Vector: (privileged container / host mount / docker.sock / host namespace / runtime CVE)\n- Host Resource Accessed:\n- Runtime Detection: (Falco / eBPF / k8s audit)\n- Misconfig or Exploit:\n\nNotes:` },
+  T1098: { title:'T1098 - Account Manipulation (Priv Esc)', body:`## TAG - PRIVILEGE ESCALATION\n### Technique: Account Manipulation, T1098\n- Time:\n- Host / Domain:\n- Account Manipulated:\n- Mechanism: (privileged group add / user-right assignment / AdminSDHolder ACL)\n- Group or Privilege Granted:\n- Security Event: (4728 / 4732 / 4756 / 4704 / 5136)\n- Actor:\n- Crown-Jewel Group Affected (Y/N):\n\nNotes:` },
 };
 
 // ── STATE ──
 let activeTech = 'all';
 let activeApt  = null;
+let activeOs   = null;
 let huntOpen   = false;
 let totalRows  = 0;
 let selectedRows = new Set();
@@ -123,16 +136,26 @@ function buildRow(row, techId, rowId) {
     row.indicator, row.notes, row.sysmon, row.kibana, row.powershell,
     row.registry || '', row.tools || '', row.ossdetect || '',
     row.apt.map(a => a.name + ' ' + (a.note||'')).join(' '),
-    row.cite || '', techId
+    row.cite || '', techId,
+    (row.os === 'linux') ? 'linux unix' : 'windows win'
   ].join(' ').toLowerCase();
 
   const el = document.createElement('div');
   el.className = 'ind-row';
   el.dataset.tech = techId;
   el.dataset.apt  = aptOrigins(row.apt);
+  el.dataset.os   = (row.os === 'linux') ? 'linux' : 'win';
   el.dataset.text = searchText;
   el.dataset.rowId = rowId;
   el.dataset.techId = techId;
+
+  const isLinux = (row.os === 'linux');
+  const osBadge = isLinux
+    ? '<span class="os-badge os-linux" title="Linux indicator">LINUX</span>'
+    : '<span class="os-badge os-win" title="Windows indicator">WIN</span>';
+  // OS-aware quick-tool labels: PS slot is Auditd/Shell on Linux
+  const psBtnLabel = isLinux ? 'AUD' : 'PS';
+  const psBtnTitle = isLinux ? 'Copy Auditd / Shell hunt' : 'Copy PowerShell';
 
   // ── collapsed bar ──
   const bar = document.createElement('div');
@@ -141,12 +164,13 @@ function buildRow(row, techId, rowId) {
   bar.innerHTML = `
     <input type="checkbox" class="row-check" title="Select for export">
     <button class="star-btn${isStarred ? ' starred' : ''}" title="Add to hunt">${isStarred ? '&#9733;' : '&#9734;'}</button>
+    ${osBadge}
     <span class="ind-name">${esc(row.indicator)}</span>
     <div class="apt-badges">${aptBadges}</div>
     <div class="quick-tools">
       <button class="qtool qt-y" title="Copy Sysmon">SYS</button>
       <button class="qtool qt-k" title="Copy Kibana">KQL</button>
-      <button class="qtool qt-p" title="Copy PowerShell">PS</button>
+      <button class="qtool qt-p" title="${psBtnTitle}">${psBtnLabel}</button>
     </div>
     <span class="expand-icon">&#9662;</span>`;
 
@@ -179,8 +203,8 @@ function buildRow(row, techId, rowId) {
   const tabs = [
     ['sys', 'Sysmon'],
     ['kib', 'Kibana'],
-    ['ps',  'PowerShell'],
-    ['reg', 'Registry/Artifacts'],
+    ['ps',  isLinux ? 'Auditd/Shell' : 'PowerShell'],
+    ['reg', isLinux ? 'File Artifacts' : 'Registry/Artifacts'],
     ['tool','Tools'],
     ['oss', 'OSS Detections'],
     ['not', 'Notes'],
@@ -218,10 +242,10 @@ function buildRow(row, techId, rowId) {
 
   // panels
   const panels = {
-    'sys': codePanel('l-sys', 'Sysmon Event',    row.sysmon),
+    'sys': codePanel('l-sys', isLinux ? 'Sysmon for Linux Event' : 'Sysmon Event', row.sysmon),
     'kib': codePanel('l-kib', 'Kibana KQL',      row.kibana),
-    'ps':  codePanel('l-ps',  'PowerShell Hunt',  row.powershell),
-    'reg': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.registry || '(no registry/file artifacts documented)'; return d; })(),
+    'ps':  codePanel('l-ps',  isLinux ? 'Auditd / Shell Hunt' : 'PowerShell Hunt',  row.powershell),
+    'reg': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.registry || (isLinux ? '(no file artifacts documented)' : '(no registry/file artifacts documented)'); return d; })(),
     'tool': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.tools || '(no adversary tools documented)'; return d; })(),
     'oss': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.ossdetect || '(no open-source detections documented)'; return d; })(),
     'not': (() => { const d = document.createElement('div'); d.className = 'notes-body'; d.textContent = row.notes; return d; })(),
@@ -561,10 +585,11 @@ function applyFilters() {
   document.querySelectorAll('.ind-row').forEach(row => {
     const techMatch = activeTech === 'all' || row.dataset.tech === activeTech;
     const aptMatch  = !activeApt  || row.dataset.apt.includes(activeApt);
+    const osMatch   = !activeOs   || row.dataset.os === activeOs;
     const textMatch = !terms.length || terms.every(t => row.dataset.text.includes(t));
     const aptTxt    = !aq || row.dataset.text.includes(aq);
 
-    if (techMatch && aptMatch && textMatch && aptTxt) {
+    if (techMatch && aptMatch && osMatch && textMatch && aptTxt) {
       row.classList.remove('hidden');
       visible++;
       const nameEl = row.querySelector('.ind-name');
@@ -617,6 +642,21 @@ document.querySelectorAll('.fbtn[data-apt]').forEach(btn => {
       document.querySelectorAll('.fbtn[data-apt]').forEach(b => b.className = 'fbtn');
       activeApt = key;
       btn.classList.add('apt-' + key.toLowerCase());
+    }
+    applyFilters();
+  });
+});
+
+document.querySelectorAll('.fbtn[data-os]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.os;
+    if (activeOs === key) {
+      activeOs = null;
+      btn.classList.remove('active');
+    } else {
+      document.querySelectorAll('.fbtn[data-os]').forEach(b => b.classList.remove('active'));
+      activeOs = key;
+      btn.classList.add('active');
     }
     applyFilters();
   });

@@ -198,6 +198,10 @@ main{flex:1;min-width:0}
 .apt-ir{background:rgba(63,185,80,.12);color:var(--green)}
 .apt-kp{background:rgba(188,140,255,.12);color:var(--purple)}
 .apt-mul{background:rgba(139,148,158,.12);color:var(--text2)}
+/* OS badge on the collapsed row (WIN / LINUX) */
+.os-badge{font-family:var(--mono);font-size:8px;font-weight:700;border-radius:3px;padding:1px 5px;letter-spacing:.04em;white-space:nowrap;flex-shrink:0}
+.os-badge.os-win{background:rgba(88,166,255,.15);color:var(--accent);border:1px solid rgba(88,166,255,.35)}
+.os-badge.os-linux{background:rgba(247,166,0,.13);color:#f0a020;border:1px solid rgba(247,166,0,.35)}
 .quick-tools{display:flex;gap:3px;flex-shrink:0}
 .qtool{background:var(--bg4);border:1px solid var(--border2);border-radius:3px;font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 6px;cursor:pointer;color:var(--text3);transition:all .15s}
 .qtool.qt-a:hover{border-color:var(--purple);color:var(--purple)}
