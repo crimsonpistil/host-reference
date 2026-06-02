@@ -80,11 +80,6 @@
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
-</div>
-
-<span class="section-label">Coming Soon</span>
-<div class="tactic-grid">
-
   <a href="privilege_escalation.html" class="tactic-card" data-tags="privilege escalation ta0004 uac bypass fodhelper token manipulation impersonation potato process injection hollowing thread hijack byovd vulnerable driver exploitation">
     <div class="card-id" style="color:#ffa600">TA0004</div>
     <span class="card-pill" style="background:rgba(255,166,0,.12);color:#ffa600">21 indicators · 13 techniques</span>
@@ -92,6 +87,11 @@
     <div class="card-desc">Elevating from user to admin/SYSTEM - full TA0004 coverage (Windows-relevant techniques). UAC bypass (T1548.002, 3), token manipulation incl. Potato + SID-history (T1134/.005, 3), process injection - remote-thread/hollowing/thread-hijack (T1055, 3), exploitation incl. BYOVD (T1068, 2), service registry/path/permission weaknesses (T1574.011/.005, 3), DLL search-order hijack priv-esc angle (T1574.001, 1), accessibility & IFEO triggered execution (T1546.008/.012, 2), GPO & domain-trust modification (T1484.001/.002, 2), container escape (T1611, 1), and account manipulation / AdminSDHolder (T1098, 1). 21 indicators across 13 techniques.</div>
     <div class="card-count">&#9654; Open reference</div>
   </a>
+
+</div>
+
+<span class="section-label">Coming Soon</span>
+<div class="tactic-grid">
 
   <div class="tactic-card soon" data-tags="defense evasion">
     <div class="card-id" style="color:#f85149">TA0005</div>
@@ -151,10 +151,9 @@
     </div>
 
     <div class="info-card">
-      <h3>Build status</h3>
-      <p><strong>Execution (TA0002) is complete</strong>: all 13 techniques fully built with 32 indicators total. Coverage includes scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files.</p>
-      <p><strong>Persistence (TA0003) actively expanding</strong>: 20 indicators across 9 techniques. Top 5 most-common techniques complete. Long-tail high-value techniques being added including sophisticated APT-level tradecraft. Built: T1547.001 Run Keys / Startup Folder (3), T1546.003 WMI Subscription Hunt (2), T1543.003 Service Persistence Hunt (3), T1053.005 Scheduled Task Persistence Angle (2), T1547.009 Shortcut Modification (2), T1037 Boot/Logon Init Scripts including GPO logon scripts (2), T1098 Account Manipulation - group changes and password resets (2), T1136 Create Account - local and domain (2), T1546.015 COM Hijacking - HKCU shadow and phantom/TreatAs variants (2). Cross-cited techniques from Execution are built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
-      <p><strong>Privilege Escalation (TA0004) complete</strong> (Windows-relevant techniques): 21 indicators across 13 techniques. Core: T1548.002 Bypass UAC (3), T1134 Access Token Manipulation incl. Potato pattern (2), T1055 Process Injection - remote-thread DLL/PE, hollowing, thread hijack (3), T1068 Exploitation incl. BYOVD and SeImpersonate-coercion (2). Config/hijack: T1574.011 Service Registry Permissions (1), T1574.005/.009/.010 Unquoted Path & Weak Service Permissions (2), T1574.001 DLL Search-Order Hijack priv-esc angle (1). Token/directory: T1134.005 SID-History Injection (1), T1484.001/.002 GPO & Domain-Trust Modification (2), T1098 Account Manipulation incl. AdminSDHolder (1). Triggered execution: T1546.008 Accessibility Features (1), T1546.012 IFEO Injection (1). Container: T1611 Escape to Host (1). Linux/macOS-only sub-techniques (T1548.001/.003/.004 setuid/sudo) are out of scope for this Windows host kit. Techniques shared with Persistence (T1543.003, T1546.003/.015, T1053.005, T1547.x, T1037) are covered in that tactic with persistence framing.</p>
+      <h3>Current Build Status</h3>
+      <p><strong>Execution (TA0002) and Privilege Escalation (TA0004)</strong>complete.</p>
+      <p><strong>Persistence (TA0003) </strong>actively expanding: 20 indicators across 9 techniques. Top 5 most-common techniques complete. Long-tail high-value techniques being added including sophisticated APT-level tradecraft. Cross-cited techniques from Execution are built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
       <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Privilege Escalation<br>&rarr;Defense Evasion<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 
