@@ -1215,6 +1215,409 @@ Recon/hardening tooling (defender-side use):
           { cls: "apt-mul", name: "Red Team", note: "Potato family + SharpUp/WinPEAS enumeration is standard LPE tradecraft." }
         ],
         cite: "MITRE ATT&CK T1068"
+      },
+      {
+        sub: "T1068 - Polkit pkexec Exploitation (PwnKit CVE-2021-4034)",
+        os: "linux",
+        indicator: "pkexec invoked with malformed/empty argv or unusual environment leading to a root shell; PwnKit-style exploitation of the SUID polkit pkexec binary, or pkexec spawning an unexpected child as root from a non-interactive context",
+        sysmon: `// Sysmon for Linux EID 1 (ProcessCreate)
+// pkexec is SUID-root; abuse spawns root shell from low-priv user
+
+EventID=1
+Image=*/pkexec
+// PwnKit signature: pkexec called with no/empty arguments
+// then a root shell or arbitrary binary executes
+CommandLine matches:
+  *pkexec*           (with argc=0 / empty argv = PwnKit primitive)
+ParentImage matches (any low-priv context):
+  */bash */sh */python* (exploit launcher)
+AND child of pkexec runs as uid=0
+
+// PwnKit drops a GCONV_PATH-controlled shared object;
+// watch for a new .so loaded via GCONV_PATH manipulation
+// and an unexpected directory created pre-exploit:
+EventID=11 (FileCreate)
+TargetFilename matches:
+  *GCONV_PATH=*  (in environment)
+  /tmp/*  with a .so + gconv-modules file dropped
+
+// Auditd execve where pkexec yields uid=0 from non-root auid:
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/pkexec -k pkexec_exec`,
+        kibana: `// pkexec execution - baseline then hunt anomalies
+process.name: "pkexec"
+
+// PwnKit: pkexec executed then a root shell with same session
+process.name: "pkexec"
+AND process.parent.name: ("bash" OR "sh" OR "python" OR "python3" OR "perl")
+
+// Root shell whose parent was pkexec (successful escalation)
+process.parent.name: "pkexec"
+AND user.id: "0"
+AND process.name: ("bash" OR "sh" OR "dash")
+
+// GCONV_PATH in environment (PwnKit exploitation primitive)
+process.env_vars: (*GCONV_PATH=* AND (*tmp* OR *dev/shm*))
+
+// Auditd: pkexec execve where auid != 0 but resulting uid=0
+event.module: "auditd"
+AND tags: "pkexec_exec"
+AND auditd.data.uid: "0"
+AND NOT auditd.data.auid: ("0" OR "4294967295")
+
+// pkexec error log entries (failed/abnormal invocations)
+// /var/log/auth.log: "pkexec: ... The value for environment variable
+// XAUTHORITY contains suspicious content"
+message: ("pkexec" AND ("suspicious content" OR "cannot run" OR "must be setuid"))`,
+        powershell: `#!/bin/bash
+# T1068 - PwnKit / polkit pkexec exploitation hunt
+
+echo "[*] === pkexec binary state ==="
+ls -la /usr/bin/pkexec 2>/dev/null
+echo "  package: $(dpkg -S /usr/bin/pkexec 2>/dev/null || rpm -qf /usr/bin/pkexec 2>/dev/null)"
+echo "  version: $(pkexec --version 2>/dev/null)"
+
+echo ""
+echo "[*] === polkit version (PwnKit affects all before fix) ==="
+# CVE-2021-4034 fixed: polkit 0.120-3 (Debian), 0.117-13 (RHEL8)
+dpkg -l | grep -i polkit 2>/dev/null
+rpm -qa | grep -i polkit 2>/dev/null
+
+echo ""
+echo "[*] === auth.log: pkexec abnormal invocations ==="
+grep -h "pkexec" /var/log/auth.log /var/log/secure 2>/dev/null | \\
+  grep -iE "(suspicious|cannot run|must be setuid|argv)" | tail -30
+
+echo ""
+echo "[*] === auditd: pkexec execve resulting in uid=0 from non-root ==="
+ausearch -k pkexec_exec -i 2>/dev/null | tail -40
+ausearch -m EXECVE -i 2>/dev/null | grep -B2 pkexec | tail -40
+
+echo ""
+echo "[*] === GCONV_PATH abuse artifacts in running processes ==="
+for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+  gconv=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep GCONV_PATH)
+  [ -n "$gconv" ] && echo "[FLAG] PID $pid: $gconv ($(cat /proc/$pid/comm 2>/dev/null))"
+done
+
+echo ""
+echo "[*] === Suspicious gconv-modules / .so drops in writable dirs ==="
+find /tmp /dev/shm /var/tmp -name "gconv-modules" -o -name "*.so" 2>/dev/null | \\
+  grep -vE "^/usr|^/lib" | head -20
+
+echo ""
+echo "[*] === Recently spawned root shells with unusual parents ==="
+ps -eo pid,ppid,user,comm,lstart,args 2>/dev/null | \\
+  awk '$3=="root"' | grep -E "(bash|sh|dash)" | head -30`,
+        registry: `PwnKit / polkit pkexec artifacts:
+
+Vulnerable binary:
+  /usr/bin/pkexec     - SUID-root; CVE-2021-4034 (PwnKit)
+  Affects polkit versions from 2009 until Jan 2022 fix
+  Fixed: polkit 0.120-3 (Debian), 0.117-13.el8 (RHEL)
+
+Exploitation artifacts:
+  GCONV_PATH env var pointing to attacker /tmp dir
+  /tmp/<dir>/gconv-modules     - crafted iconv config
+  /tmp/<dir>/<evil>.so         - malicious shared object
+  (PwnKit drops these to hijack iconv() via GCONV_PATH)
+
+Log evidence:
+  /var/log/auth.log (Debian/Ubuntu)
+  /var/log/secure   (RHEL/CentOS)
+  Look for pkexec lines mentioning:
+    "The value for the SHELL variable was not found"
+    "The value for environment variable [X] contains
+     suspicious content"
+  These appear when PwnKit-style exploitation runs.
+
+Process evidence:
+  Root shell (uid=0) whose parent is pkexec
+  pkexec invoked by a low-privilege user session
+  auid (login uid) != 0 but resulting euid = 0
+
+Related polkit CVE:
+  CVE-2021-3560 - polkit auth bypass (DBus race)
+    pkexec/dbus privilege grant via timed disconnect
+  Watch dbus-daemon + polkitd interaction logs
+
+Detection priority:
+  Verify polkit is patched (primary control)
+  Monitor pkexec execve where auid != 0 → uid 0`,
+        tools: `PwnKit (CVE-2021-4034) - polkit pkexec:
+  Disclosed Jan 2022 by Qualys. Memory-corruption in
+  pkexec argument handling; weaponized within hours.
+  Trivially reliable, no crash, works on default installs.
+  One of the most widely exploited Linux LPE bugs ever.
+
+Public exploit availability:
+  Dozens of public PoCs (C, Python, Go, even one-file).
+  Included in LinPEAS, linux-exploit-suggester output.
+  Metasploit module: exploit/linux/local/cve_2021_4034_pwnkit
+
+Threat actor adoption:
+  TeamTNT, 8220 Gang, and multiple cryptomining crews
+    adopted PwnKit for container-to-root and host LPE
+  Used opportunistically after initial web/SSH access
+    where pkexec was unpatched
+
+CVE-2021-3560 (polkit auth bypass):
+  Companion polkit bug; DBus timing race grants
+  privileged action. Different mechanism, same target.
+
+Related polkit-adjacent escalation:
+  pkexec is on the GTFOBins list for sudo-allowed abuse
+  separate from the memory-corruption CVE
+
+Why pkexec is high-value to attackers:
+  SUID-root by default on virtually every desktop and
+  many server Linux installs; reliable; quiet; no kernel
+  dependency (unlike kernel exploits which are version-locked)`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_pkexec_privilege_escalation.yml
+- proc_creation_lnx_cve_2021_4034_pwnkit.yml
+- file_event_lnx_pwnkit_gconv_drop.yml
+
+Elastic detection rules:
+- Potential PwnKit Exploitation (CVE-2021-4034)
+- Privilege Escalation via pkexec
+
+Auditd:
+  -a always,exit -F arch=b64 -S execve \\
+    -F path=/usr/bin/pkexec -k pkexec_exec
+  ausearch -k pkexec_exec -i | \\
+    awk '/auid=/ && !/auid=0/ && /uid=0/'
+
+Falco:
+  rule: Polkit Local Privilege Escalation (CVE-2021-4034)
+  condition: spawned_process and proc.name=pkexec
+    and proc.args = ""   (empty args = PwnKit primitive)
+
+Patch verification (primary defense):
+  Debian/Ubuntu: dpkg -l policykit-1 (need >= 0.105-31+deb11u1)
+  RHEL: rpm -q polkit (need >= 0.115-13.el8_5.1 / patched)
+
+Vulners / OpenSCAP:
+  Scan for CVE-2021-4034 presence by package version
+
+Atomic Red Team:
+  T1068 includes PwnKit simulation tests`,
+        notes: "PwnKit (CVE-2021-4034) is among the most consequential Linux local privilege escalation vulnerabilities ever disclosed: it affects the SUID-root pkexec binary present by default on nearly every Linux desktop and a large fraction of servers, it requires no special preconditions, and the exploit is trivially reliable with no crash. Disclosed by Qualys in January 2022, it was weaponized within hours and is now a standard tool in post-initial-access escalation. The exploitation primitive abuses pkexec's argument handling combined with GCONV_PATH environment manipulation to load an attacker-controlled shared object as root. The two highest-value detection signals are: a root shell whose parent process is pkexec invoked from a non-root session, and GCONV_PATH pointing to a writable directory in a process environment. Auditd execve capture comparing auid (login UID) against the resulting uid=0 is the most reliable telemetry. The primary control is patching - verify polkit is at the fixed version - but because pkexec is legitimately used, behavioral detection of the escalation pattern catches both PwnKit and the companion CVE-2021-3560 auth bypass.",
+        apt: [
+          { cls: "apt-mul", name: "TeamTNT", note: "Adopted PwnKit for container-to-host and host privilege escalation after initial cloud/container access." },
+          { cls: "apt-mul", name: "8220 Gang / cryptomining crews", note: "PwnKit used opportunistically post-access on unpatched hosts to gain root for miner deployment." },
+          { cls: "apt-mul", name: "Commodity / red team", note: "CVE-2021-4034 is in LinPEAS, linux-exploit-suggester, and Metasploit; near-universal LPE option on unpatched Linux." }
+        ],
+        cite: "MITRE ATT&CK T1068"
+      },
+      {
+        sub: "T1068 - Linux Kernel Exploitation (DirtyPipe, DirtyCOW, Looney Tunables)",
+        os: "linux",
+        indicator: "Local kernel or glibc exploit yielding root: DirtyPipe (CVE-2022-0847) overwriting read-only files, DirtyCOW (CVE-2016-5195) COW race, or Looney Tunables (CVE-2023-4911) glibc GLIBC_TUNABLES buffer overflow; signaled by unexpected root processes, modified system binaries, or anomalous syscall patterns",
+        sysmon: `// Kernel/glibc LPE is hard to catch at syscall level alone;
+// focus on the OUTCOME and the exploit's side effects.
+
+// DirtyPipe (CVE-2022-0847): overwrites read-only files via
+// splice() into a pipe. Watch for modification of files the
+// process should not be able to write (e.g. /etc/passwd by
+// a non-root process, or a SUID binary's content changing).
+EventID=11 (FileModify)
+TargetFilename matches:
+  /etc/passwd  /etc/shadow  /etc/sudoers
+  /usr/bin/su  /usr/bin/sudo  /usr/bin/passwd  (SUID binaries)
+AND modifying process is NOT root / NOT a package manager
+
+// Looney Tunables (CVE-2023-4911): GLIBC_TUNABLES env overflow
+// run via a SUID binary. Watch for the env var:
+process env contains: GLIBC_TUNABLES=glibc.* (malformed/oversized)
+
+// Auditd: any process that gains uid=0 without a known
+// escalation path (su/sudo/pkexec) - inferred root.
+-a always,exit -F arch=b64 -S setuid,setresuid -k setuid_call
+-a always,exit -F arch=b64 -S execve -k exec
+
+// DirtyCOW (CVE-2016-5195): COW race; often modifies a SUID
+// binary or /etc/passwd. Same file-modify signal as DirtyPipe.`,
+        kibana: `// Modification of sensitive files by a non-root process
+event.module: "file_integrity"
+AND file.path: (
+  "/etc/passwd" OR "/etc/shadow" OR "/etc/sudoers"
+  OR "/usr/bin/su" OR "/usr/bin/sudo" OR "/usr/bin/passwd"
+)
+AND NOT process.name: ("dpkg" OR "rpm" OR "apt" OR "yum" OR "dnf" OR "passwd" OR "usermod" OR "useradd")
+
+// GLIBC_TUNABLES in process environment (Looney Tunables)
+process.env_vars: *GLIBC_TUNABLES=glibc.*
+
+// Auditd: setuid/setresuid to 0 outside known escalation tools
+event.module: "auditd"
+AND auditd.data.syscall: ("setuid" OR "setresuid")
+AND auditd.data.arg: "0"
+AND NOT process.parent.name: ("su" OR "sudo" OR "sshd" OR "login" OR "pkexec")
+
+// New root process whose ancestry has no su/sudo/sshd
+user.id: "0"
+AND process.name: ("bash" OR "sh" OR "dash")
+AND NOT process.parent.name: ("su" OR "sudo" OR "sshd" OR "login" OR "pkexec" OR "systemd" OR "cron")
+
+// Kernel ring buffer anomalies (dmesg) - segfaults in setuid bins
+message: ("segfault" AND ("pkexec" OR "sudo" OR "su" OR "mount"))`,
+        powershell: `#!/bin/bash
+# T1068 - Kernel / glibc LPE hunt
+
+echo "[*] === Kernel version vs known LPE CVEs ==="
+uname -r
+echo "  DirtyPipe   (CVE-2022-0847): kernels 5.8 - 5.16.11/5.15.25/5.10.102"
+echo "  DirtyCOW    (CVE-2016-5195): kernels < 4.8.3 (legacy)"
+echo "  Looney Tun. (CVE-2023-4911): glibc 2.34+ (env GLIBC_TUNABLES)"
+echo "  glibc: $(ldd --version 2>/dev/null | head -1)"
+
+echo ""
+echo "[*] === Integrity check on sensitive files (DirtyPipe/COW targets) ==="
+for f in /etc/passwd /etc/shadow /etc/sudoers /usr/bin/su /usr/bin/sudo /usr/bin/passwd; do
+  [ -e "$f" ] || continue
+  echo "$f | mtime: $(stat -c '%y' "$f") | $(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+done
+echo "  (compare hashes/mtimes against known-good baseline)"
+
+echo ""
+echo "[*] === Package verification of SUID binaries ==="
+rpm -Va 2>/dev/null | grep -E "/(su|sudo|passwd|mount|pkexec)$" || \\
+dpkg --verify 2>/dev/null | grep -E "/(su|sudo|passwd|mount|pkexec)$" || \\
+  echo "  (run rpm -Va or dpkg --verify; '5' flag = checksum changed)"
+
+echo ""
+echo "[*] === GLIBC_TUNABLES abuse in running processes (Looney Tunables) ==="
+for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+  tun=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep GLIBC_TUNABLES)
+  [ -n "$tun" ] && echo "[FLAG] PID $pid ($(cat /proc/$pid/comm 2>/dev/null)): $tun"
+done
+
+echo ""
+echo "[*] === dmesg: segfaults in SUID binaries (exploit attempts) ==="
+dmesg 2>/dev/null | grep -iE "segfault.*(pkexec|sudo|su|mount|passwd)" | tail -20
+
+echo ""
+echo "[*] === Root processes with no su/sudo/sshd ancestry ==="
+ps -eo pid,ppid,user,comm,args 2>/dev/null | awk '$3=="root"' | \\
+  grep -E "(bash|sh|dash)" | head -20
+
+echo ""
+echo "[*] === Public LPE tooling artifacts in writable paths ==="
+find /tmp /dev/shm /var/tmp -type f \\( -name "*.c" -o -name "dirtypipe*" \\
+  -o -name "*exploit*" -o -name "cve-*" \\) 2>/dev/null | head -20`,
+        registry: `Linux kernel / glibc LPE artifacts:
+
+DirtyPipe (CVE-2022-0847):
+  Kernels 5.8 through 5.16.11 / 5.15.25 / 5.10.102
+  Overwrites read-only files via splice() pipe flag bug
+  Common targets:
+    /etc/passwd  (add root user / clear root password)
+    SUID binaries (overwrite to inject payload)
+  Artifact: modified /etc/passwd with anomalous mtime,
+    or a SUID binary whose hash no longer matches package
+
+DirtyCOW (CVE-2016-5195):
+  Kernels < 4.8.3 (legacy RHEL6/7, old Ubuntu)
+  Copy-on-write race; writes to read-only mappings
+  Targets: SUID binaries, /etc/passwd
+  Still relevant for legacy OT/embedded Linux
+
+Looney Tunables (CVE-2023-4911):
+  glibc 2.34+ ; GLIBC_TUNABLES env buffer overflow
+  Triggered via any SUID binary
+  Artifact: GLIBC_TUNABLES=glibc.malloc... in env;
+    malformed/oversized tunables string
+
+Netfilter / nf_tables CVEs (2022-2024):
+  Multiple kernel LPEs (CVE-2022-32250, CVE-2023-32233,
+    CVE-2024-1086). Exploit via crafted netlink messages.
+  Artifact: unusual unprivileged user namespace creation,
+    nft/netlink activity from non-admin processes
+
+General detection signals:
+  /var/log/kern.log , dmesg     - segfaults, oops, taints
+  /etc/passwd , /etc/shadow     - mtime + hash baseline
+  SUID binary integrity         - rpm -Va / dpkg --verify
+  Unexpected root shells        - ancestry without su/sudo
+
+User namespace abuse (precondition for many kernel LPEs):
+  /proc/sys/kernel/unprivileged_userns_clone (should be 0)
+  unshare -r often precedes kernel exploitation`,
+        tools: `Linux kernel LPE landscape:
+
+DirtyPipe (CVE-2022-0847):
+  Disclosed Mar 2022 by Max Kellermann. Extremely reliable,
+  no crash. Public PoCs overwrite /etc/passwd or hijack a
+  SUID binary. Trivial to use. Affects Android too.
+  Adopted by cryptomining and container-escape actors.
+
+DirtyCOW (CVE-2016-5195):
+  2016 disclosure; one of the most famous Linux LPEs.
+  Still relevant on legacy/embedded/OT Linux that is
+  rarely patched. Many public PoC variants.
+
+Looney Tunables (CVE-2023-4911):
+  Qualys, Oct 2023. glibc GLIBC_TUNABLES overflow via
+  SUID binary. Public exploits within days. Affects
+  Fedora, Ubuntu, Debian, RHEL defaults.
+
+Netfilter/nf_tables family (2022-2024):
+  CVE-2024-1086 (double-free) heavily weaponized 2024.
+  Reliable root via unprivileged user namespaces.
+  Used in container escapes and host LPE.
+
+Common enumeration → exploit tooling:
+  linux-exploit-suggester / les2: maps uname -r to CVEs
+  LinPEAS: flags kernel version + applicable exploits
+  Metasploit: many local exploit modules per CVE
+  GitHub: public PoC for nearly every modern Linux LPE
+
+Threat actor use:
+  Cryptomining crews (TeamTNT, 8220, Kinsing) chain a
+  web/SSH foothold to a kernel/pkexec LPE for root, then
+  deploy miners + persistence.
+  APT use is more targeted but documented (e.g. kernel
+  LPEs staged after initial Linux server compromise).`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_dirtypipe_passwd_modification.yml
+- proc_creation_lnx_glibc_tunables_priv_esc.yml
+- proc_creation_lnx_unshare_userns_priv_esc.yml
+
+Elastic detection rules:
+- Potential DirtyPipe Exploitation (CVE-2022-0847)
+- Potential Privilege Escalation via GLIBC_TUNABLES
+- Unprivileged User Namespace Creation
+
+Patch / version verification (primary control):
+  uname -r  → map to les2 / linux-exploit-suggester
+  rpm -q kernel / dpkg -l linux-image-*
+  rpm -q glibc / dpkg -l libc6  (Looney Tunables)
+
+Auditd:
+  -a always,exit -F arch=b64 -S setuid,setresuid -k setuid_call
+  -w /etc/passwd -p wa -k passwd_write
+  -w /etc/shadow -p wa -k shadow_write
+  ausearch -k passwd_write | grep -v "auid=0"
+
+Falco:
+  rule: Write below etc (passwd/shadow by non-root)
+  rule: Mkdir binary dirs / Modify binary dirs
+  rule: Unprivileged Delegation of Page Faults (kernel exploit hint)
+
+File integrity (AIDE / Tripwire / Wazuh syscheck):
+  /etc/passwd /etc/shadow /etc/sudoers + all SUID binaries
+  Any change outside a package-install window = critical
+
+Disable attack surface:
+  sysctl kernel.unprivileged_userns_clone=0
+  (removes precondition for many netfilter kernel LPEs)`,
+        notes: "Kernel and glibc local privilege escalation exploits are the second major Linux root path after pkexec/sudo abuse, and they are particularly relevant in environments with infrequent patching - legacy RHEL, embedded systems, and OT-adjacent Linux. Unlike pkexec abuse, kernel exploits are version-locked: the specific CVE that works depends on the exact kernel or glibc version, which is why attacker tooling (linux-exploit-suggester, LinPEAS) starts by mapping uname -r to applicable CVEs. This version-dependence is also a defender's advantage - knowing your kernel and glibc versions tells you precisely which exploits apply. The detection challenge is that the exploitation itself happens in kernel space and is hard to observe directly; the reliable signals are the outcomes and side effects: DirtyPipe and DirtyCOW typically modify /etc/passwd or overwrite a SUID binary (catch via file integrity monitoring on those targets by non-package-manager processes), Looney Tunables leaves a distinctive GLIBC_TUNABLES environment string, and most netfilter kernel LPEs require unprivileged user namespace creation (unshare -r) which can be disabled outright via sysctl. The single most valuable control beyond patching is file integrity monitoring on /etc/passwd, /etc/shadow, and all SUID binaries, combined with auditd setuid syscall capture to flag processes reaching uid=0 without traversing su/sudo/sshd.",
+        apt: [
+          { cls: "apt-mul", name: "TeamTNT / Kinsing", note: "Chain web/SSH foothold to kernel or pkexec LPE for root, then deploy cryptominers and persistence." },
+          { cls: "apt-mul", name: "8220 Gang", note: "Opportunistic kernel LPE use on unpatched cloud Linux hosts following initial access." },
+          { cls: "apt-mul", name: "Container-escape operators", note: "CVE-2024-1086 (nf_tables) and DirtyPipe used to break out of containers to host root via kernel bugs." }
+        ],
+        cite: "MITRE ATT&CK T1068"
       }
     ]
   },
@@ -2530,6 +2933,431 @@ Tracee / Tetragon (eBPF) - syscall-level escape detection`,
           { cls: "apt-mul", name: "Cryptojacking Crews", note: "Privileged-container and docker-socket escapes widely used to pivot to host for resource hijacking." }
         ],
         cite: "MITRE ATT&CK T1611"
+      },
+      {
+        sub: "T1611 - Privileged Container & Docker Socket Escape",
+        os: "linux",
+        indicator: "Container escape via --privileged flag, mounted docker.sock, host namespace sharing (--pid=host), or dangerous capabilities (CAP_SYS_ADMIN); detectable by host filesystem access from inside a container, nsenter into PID 1, or docker client activity originating from within a container",
+        sysmon: `// Sysmon for Linux EID 1 - escape primitives from inside container
+
+// nsenter into host PID 1 namespaces (classic privileged escape)
+Image=*/nsenter AND CommandLine matches:
+  *--target 1* OR *-t 1*
+  AND (*--mount* OR *-m*) AND (*--pid* OR *-p*)
+
+// Mounting host device / filesystem from inside container
+Image=*/mount AND CommandLine matches:
+  */dev/sd*  OR  */dev/nvme*  OR  */dev/vda*
+  (privileged container can mount host block devices)
+
+// Access to mounted docker socket from inside container
+EventID=1
+Image=*/docker  (docker client running INSIDE a container)
+AND a unix socket /var/run/docker.sock is mounted in
+
+// fdisk / lsblk enumerating host disks from container
+Image=(*/fdisk OR */lsblk) inside container namespace
+
+// chroot into mounted host root
+Image=*/chroot AND CommandLine matches: */mnt* OR */host*
+
+// Auditd
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/nsenter -k nsenter_exec
+-a always,exit -F arch=b64 -S mount -k mount_call`,
+        kibana: `// nsenter targeting host PID 1 (privileged container escape)
+process.name: "nsenter"
+AND process.command_line: ((*--target 1* OR *-t 1*) AND (*--mount* OR *--pid*))
+
+// docker client running inside a container (mounted socket abuse)
+process.name: "docker"
+AND container.id: *
+AND process.command_line: (*run* OR *exec* OR *-H unix*)
+
+// Host block device mount from inside container
+process.name: "mount"
+AND container.id: *
+AND process.command_line: (*/dev/sd* OR */dev/nvme* OR */dev/vda*)
+
+// chroot to mounted host root inside container
+process.name: "chroot"
+AND container.id: *
+
+// Shell whose namespace differs from container but matches host
+// (escaped process now in host mount namespace)
+process.name: ("bash" OR "sh")
+AND process.parent.name: ("nsenter" OR "chroot")
+
+// Auditd
+event.module: "auditd"
+AND tags: ("nsenter_exec" OR "mount_call")
+AND container.id: *`,
+        powershell: `#!/bin/bash
+# T1611 - Privileged container / docker socket escape hunt
+# Run on the HOST to inventory escape exposure.
+
+echo "[*] === Running containers and their privilege posture ==="
+docker ps -q 2>/dev/null | while read cid; do
+  name=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null)
+  priv=$(docker inspect --format '{{.HostConfig.Privileged}}' "$cid" 2>/dev/null)
+  pidmode=$(docker inspect --format '{{.HostConfig.PidMode}}' "$cid" 2>/dev/null)
+  caps=$(docker inspect --format '{{.HostConfig.CapAdd}}' "$cid" 2>/dev/null)
+  echo "$name | privileged=$priv | pidmode=$pidmode | capadd=$caps"
+done
+
+echo ""
+echo "[*] === Containers with docker.sock mounted (socket escape) ==="
+docker ps -q 2>/dev/null | while read cid; do
+  mounts=$(docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$cid" 2>/dev/null)
+  if echo "$mounts" | grep -q "docker.sock"; then
+    echo "[FLAG] $(docker inspect --format '{{.Name}}' "$cid") mounts docker.sock"
+  fi
+  if echo "$mounts" | grep -qE "(^| )/( |$)"; then
+    echo "[FLAG] $(docker inspect --format '{{.Name}}' "$cid") mounts host root /"
+  fi
+done
+
+echo ""
+echo "[*] === Containers sharing host namespaces ==="
+docker ps -q 2>/dev/null | while read cid; do
+  net=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$cid" 2>/dev/null)
+  ipc=$(docker inspect --format '{{.HostConfig.IpcMode}}' "$cid" 2>/dev/null)
+  [ "$net" = "host" ] && echo "[FLAG] $(docker inspect --format '{{.Name}}' "$cid"): --net=host"
+  [ "$ipc" = "host" ] && echo "[FLAG] $(docker inspect --format '{{.Name}}' "$cid"): --ipc=host"
+done
+
+echo ""
+echo "[*] === nsenter / chroot escape events (auditd) ==="
+ausearch -k nsenter_exec -i --start today 2>/dev/null | tail -20
+
+echo ""
+echo "[*] === In-container self-check (run INSIDE a container) ==="
+echo "  Capabilities:"; capsh --print 2>/dev/null | grep -i "current\\|bounding" | head -3
+echo "  docker.sock present:"; ls -la /var/run/docker.sock 2>/dev/null
+echo "  Host devices visible:"; ls /dev/sd* /dev/nvme* /dev/vda* 2>/dev/null
+echo "  /proc/1/cgroup (docker = container):"; cat /proc/1/cgroup 2>/dev/null | head -3`,
+        registry: `Container escape primitives & artifacts:
+
+Privileged container (--privileged):
+  Grants ALL capabilities + device access. Escape is trivial:
+    mount host disk → chroot, OR nsenter --target 1
+  Check: docker inspect → .HostConfig.Privileged = true
+
+Mounted docker socket (/var/run/docker.sock):
+  Container can control the host Docker daemon:
+    docker -H unix:///var/run/docker.sock run -v /:/host ...
+  Spawns a new privileged container mounting host root.
+  Check: docker inspect → .Mounts contains docker.sock
+
+Host namespace sharing:
+  --pid=host    : see + nsenter host processes
+  --net=host    : host network stack access
+  --ipc=host    : host shared memory
+  Check: .HostConfig.PidMode/NetworkMode/IpcMode = "host"
+
+Dangerous capabilities (without full --privileged):
+  CAP_SYS_ADMIN  : mount, many escape paths
+  CAP_SYS_PTRACE : ptrace host processes (with pid=host)
+  CAP_SYS_MODULE : load kernel module → full host control
+  CAP_DAC_READ_SEARCH : read any host file (Shocker attack)
+  Check: capsh --print  (from inside container)
+
+Host filesystem mounts:
+  -v /:/host  or  -v /etc:/etc  etc.
+  Check: .Mounts with Source = / or sensitive host paths
+
+In-container indicators:
+  /proc/1/cgroup            - shows docker/containerd = in container
+  /.dockerenv               - presence = Docker container
+  ls /dev/sd* /dev/nvme*    - host block devices visible = privileged
+  capsh --print             - CAP_SYS_ADMIN = escape-capable
+
+Escape execution artifacts (host-side):
+  nsenter --target 1 --mount --pid --net  (enter host ns)
+  mount /dev/sda1 /mnt && chroot /mnt
+  New container spawned via mounted docker.sock`,
+        tools: `Container escape techniques & tooling:
+
+Privileged container escape (most common):
+  --privileged grants device access; mount host disk:
+    fdisk -l ; mount /dev/sda1 /mnt ; chroot /mnt
+  Or enter host namespaces: nsenter -t 1 -m -p -n bash
+  This is the #1 misconfiguration exploited in the wild.
+
+Docker socket escape:
+  Mounted /var/run/docker.sock = host root equivalent.
+  Attacker runs a new container mounting / with full caps.
+  Extremely common in CI/CD containers and dev setups.
+
+CAP_SYS_ADMIN / capability escapes:
+  Even without --privileged, CAP_SYS_ADMIN enables mounting
+  and cgroup release_agent escape (see companion row).
+  CAP_DAC_READ_SEARCH → Shocker attack (open_by_handle_at).
+
+Tooling:
+  deepce      - container enumeration + escape automation
+  CDK         - container penetration toolkit
+  amicontained- enumerate capabilities/namespaces
+  BOtB        - break out the box; automated escape checks
+  Peirates    - Kubernetes-focused escape/lateral tool
+
+Threat actor use:
+  TeamTNT     - automated docker.sock + privileged escape
+                in cloud cryptojacking campaigns
+  Kinsing     - exposed docker API + escape to host
+  Hildegard   - Kubernetes/container escape for mining
+  Siloscape   - container escape (Windows containers)
+
+Detection-relevant fact:
+  Escape itself (nsenter/mount/chroot) is observable on the
+  HOST if the host PID namespace sees container processes,
+  or via Falco runtime rules watching container syscalls.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_nsenter_container_escape.yml
+- proc_creation_lnx_docker_socket_abuse.yml
+- proc_creation_lnx_privileged_container_mount.yml
+
+Falco (best-in-class for this technique):
+  rule: Launch Privileged Container
+  rule: Launch Sensitive Mount Container
+  rule: Change thread namespace (nsenter escape)
+  rule: Mount Launched in Privileged Container
+  rule: Container Drift Detected (new executable in container)
+  Falco is the primary runtime control for container escape.
+
+Elastic detection rules:
+- Container Escape via nsenter
+- Sensitive Host Path Mounted in Container
+- Privileged Docker Container Created
+
+Kubernetes:
+  Pod Security Admission / Pod Security Standards:
+    block privileged, hostPID, hostNetwork, hostPath mounts
+  OPA Gatekeeper / Kyverno policies to deny escape-enabling specs
+  Falco + Sysdig for runtime container escape detection
+
+Hardening / prevention (primary controls):
+  - Never run --privileged in production
+  - Never mount docker.sock into containers
+  - Drop ALL capabilities, add back only what's needed
+  - Use rootless Docker / user namespace remapping
+  - gVisor or Kata Containers for stronger isolation
+  - seccomp + AppArmor/SELinux profiles on containers
+
+docker bench security:
+  Automated CIS Docker benchmark; flags privileged
+  containers, socket mounts, dangerous capabilities.`,
+        notes: "Privileged containers and mounted Docker sockets are the two most exploited container escape paths, and both are misconfigurations rather than vulnerabilities - meaning they are entirely preventable but extremely common in real environments, especially CI/CD pipelines and developer setups. A --privileged container can escape to host root in a single command by mounting the host disk and chrooting into it, or by using nsenter to enter PID 1's namespaces. A mounted /var/run/docker.sock is functionally equivalent to giving the container host root, because the container can instruct the host Docker daemon to spawn a new container mounting the entire host filesystem. The detection strategy operates at two levels: posture (inventory containers for --privileged, socket mounts, host namespace sharing, and dangerous capabilities like CAP_SYS_ADMIN - this is a configuration audit) and runtime (Falco is the definitive tool, with built-in rules for privileged container launch, sensitive mount detection, namespace changes via nsenter, and container drift). From the host side, if the host PID namespace can see container processes, the escape commands (nsenter --target 1, mount of host devices, chroot to mounted root) are directly observable. The strongest controls are preventive: Kubernetes Pod Security Standards or OPA/Kyverno policies that simply refuse to schedule escape-enabling pod specs.",
+        apt: [
+          { cls: "apt-mul", name: "TeamTNT", note: "Automated docker.sock and privileged-container escape to host in large-scale cloud cryptojacking operations." },
+          { cls: "apt-mul", name: "Kinsing", note: "Exploits exposed Docker API and escapes privileged containers to deploy miners on the host." },
+          { cls: "apt-mul", name: "Hildegard / TeamTNT", note: "Kubernetes and container escape chains for resource hijacking documented across cloud campaigns." }
+        ],
+        cite: "MITRE ATT&CK T1611"
+      },
+      {
+        sub: "T1611 - runc / cgroups release_agent Escape (CVE-2019-5736)",
+        os: "linux",
+        indicator: "Container-to-host escape via overwriting the runc binary (CVE-2019-5736) when entering a container, or via the cgroups v1 release_agent mechanism in a CAP_SYS_ADMIN container; detectable by modification of the host runc binary or release_agent writes from a container context",
+        sysmon: `// CVE-2019-5736: malicious container overwrites host /usr/bin/runc
+// when an admin runs docker exec into it. Watch for runc binary
+// modification - it should NEVER change outside a package update.
+EventID=11 (FileModify)
+TargetFilename matches:
+  /usr/bin/runc  /usr/sbin/runc
+  /usr/bin/docker-runc
+  /var/run/docker/runtime-runc/*
+AND NOT modified by package manager (dpkg/rpm/yum/dnf)
+
+// cgroups release_agent escape (CAP_SYS_ADMIN container):
+// attacker mounts cgroup, writes a release_agent path, and
+// triggers it to execute a payload as root on the HOST.
+EventID=11 (FileModify)
+TargetFilename matches:
+  */sys/fs/cgroup/*/release_agent
+  */sys/fs/cgroup/*/notify_on_release
+
+// Mount of cgroup filesystem from inside a container
+Image=*/mount AND CommandLine matches:
+  *-t cgroup*  OR  *cgroup*release_agent*
+
+// Auditd
+-w /usr/bin/runc -p wa -k runc_modify
+-a always,exit -F arch=b64 -S mount -F fstype=cgroup -k cgroup_mount`,
+        kibana: `// runc binary modification - critical, near-zero legit cases
+event.module: "file_integrity"
+AND file.path: ("/usr/bin/runc" OR "/usr/sbin/runc" OR "/usr/bin/docker-runc")
+AND NOT process.name: ("dpkg" OR "rpm" OR "apt" OR "yum" OR "dnf")
+
+// cgroups release_agent write (escape primitive)
+event.module: "file_integrity"
+AND file.path: (*release_agent OR *notify_on_release)
+
+// cgroup mount from inside a container
+process.name: "mount"
+AND container.id: *
+AND process.command_line: (*cgroup* OR *release_agent*)
+
+// Auditd keys
+event.module: "auditd"
+AND tags: ("runc_modify" OR "cgroup_mount")
+
+// Host process spawned by release_agent trigger
+// (payload runs as root with empty/unusual parent)
+user.id: "0"
+AND process.parent.pid: "1"
+AND process.name: ("sh" OR "bash")
+AND process.command_line: (*/tmp/* OR */cmd* OR *cgroup*)`,
+        powershell: `#!/bin/bash
+# T1611 - runc / cgroups release_agent escape hunt (run on HOST)
+
+echo "[*] === runc binary integrity (CVE-2019-5736) ==="
+for r in /usr/bin/runc /usr/sbin/runc /usr/bin/docker-runc; do
+  [ -e "$r" ] || continue
+  echo "$r | mtime: $(stat -c '%y' "$r") | $(sha256sum "$r" | cut -d' ' -f1)"
+  echo "  package: $(dpkg -S "$r" 2>/dev/null || rpm -qf "$r" 2>/dev/null || echo NOT FROM PACKAGE)"
+done
+echo "  runc version: $(runc --version 2>/dev/null | head -1)"
+echo "  (CVE-2019-5736 fixed in runc 1.0-rc7+ / docker 18.09.2+)"
+
+echo ""
+echo "[*] === Package verification of runc ==="
+dpkg --verify runc 2>/dev/null | grep runc
+rpm -V runc 2>/dev/null
+rpm -V containerd.io 2>/dev/null | grep runc
+
+echo ""
+echo "[*] === cgroups release_agent contents (should be empty/default) ==="
+find /sys/fs/cgroup -name release_agent 2>/dev/null | while read f; do
+  content=$(cat "$f" 2>/dev/null)
+  if [ -n "$content" ]; then
+    echo "[FLAG] $f = $content"
+  fi
+done
+
+echo ""
+echo "[*] === auditd: runc modification + cgroup mount events ==="
+ausearch -k runc_modify -i --start today 2>/dev/null | tail -20
+ausearch -k cgroup_mount -i --start today 2>/dev/null | tail -20
+
+echo ""
+echo "[*] === Containers with CAP_SYS_ADMIN (release_agent precondition) ==="
+docker ps -q 2>/dev/null | while read cid; do
+  caps=$(docker inspect --format '{{.HostConfig.CapAdd}}' "$cid" 2>/dev/null)
+  priv=$(docker inspect --format '{{.HostConfig.Privileged}}' "$cid" 2>/dev/null)
+  if echo "$caps" | grep -qi "SYS_ADMIN" || [ "$priv" = "true" ]; then
+    echo "[FLAG] $(docker inspect --format '{{.Name}}' "$cid"): caps=$caps privileged=$priv"
+  fi
+done`,
+        registry: `runc / cgroups escape artifacts:
+
+CVE-2019-5736 (runc overwrite):
+  Vulnerable: runc < 1.0-rc7, Docker < 18.09.2
+  Mechanism: malicious container image causes the host
+    runc binary to be overwritten when an operator runs
+    docker exec / attach into the container. Next runc
+    use executes attacker code as root on the host.
+  Artifact: /usr/bin/runc modified outside a package update
+    (hash/mtime change is the definitive indicator)
+  Targets: /usr/bin/runc, /usr/sbin/runc, docker-runc
+
+cgroups v1 release_agent escape:
+  Precondition: container with CAP_SYS_ADMIN (or privileged)
+  Mechanism:
+    1. mount -t cgroup -o rdma cgroup /tmp/cgrp
+    2. echo 1 > /tmp/cgrp/x/notify_on_release
+    3. echo "/path/to/payload" > /tmp/cgrp/release_agent
+    4. trigger empty cgroup → kernel runs payload as ROOT on host
+  Artifact: release_agent file containing a host path;
+    notify_on_release set to 1; cgroup mount from container
+
+cgroups v2:
+  release_agent removed; this specific escape does not apply.
+  Check: stat -fc %T /sys/fs/cgroup  (cgroup2fs = v2)
+
+Detection priority:
+  runc binary integrity monitoring (rpm -V / AIDE) - critical
+  release_agent file monitoring across /sys/fs/cgroup
+  Inventory containers with CAP_SYS_ADMIN / privileged
+
+Related runtime CVEs to track:
+  CVE-2022-0811 (CRI-O cgroup kernel param)
+  CVE-2024-21626 (runc leaked fd / WORKDIR escape)`,
+        tools: `runc / cgroups escape in the wild:
+
+CVE-2019-5736 (runc):
+  Disclosed Feb 2019. High-impact: overwrites host runc.
+  Public PoCs immediately available. Requires an operator
+  to exec into a malicious container, or attacker control
+  of a container image + the ability to get it run.
+  Notable because it turns "docker exec into a container"
+  into host compromise.
+
+CVE-2024-21626 (runc, "Leaky Vessels"):
+  Jan 2024. WORKDIR / leaked file descriptor escape.
+  Allows container build/run to access host filesystem.
+  Public exploits; affects many runc versions.
+
+cgroups release_agent escape:
+  Not a CVE - a feature abuse requiring CAP_SYS_ADMIN.
+  Widely documented (Felix Wilhelm PoC is canonical).
+  Works on any cgroups v1 host where a container has
+  CAP_SYS_ADMIN. The classic "one-liner container escape."
+
+Tooling:
+  CDK, deepce, BOtB all automate release_agent escape
+  and check for runc-version vulnerability.
+
+Threat actor relevance:
+  These are higher-skill escapes than privileged/socket
+  misconfig, but the cgroups release_agent technique is
+  simple enough that it appears in commodity container
+  attack toolkits. CVE-2024-21626 saw rapid weaponization.
+
+Why runc integrity matters:
+  The runc binary is the single most security-critical
+  file in a container host. Any change to it outside a
+  controlled package update is a critical incident.`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_runc_binary_overwrite_cve_2019_5736.yml
+- file_event_lnx_cgroup_release_agent_write.yml
+- proc_creation_lnx_cgroup_mount_container_escape.yml
+
+Falco (built-in runtime detection):
+  rule: Modify container entrypoint / runc binary
+  rule: Write below /sys/fs/cgroup (release_agent abuse)
+  rule: Detect release_agent File Container Escapes
+  (Falco ships a dedicated release_agent escape rule)
+
+Elastic detection rules:
+- runc Binary Overwrite (CVE-2019-5736)
+- cgroups release_agent Container Escape
+
+File integrity (critical control):
+  AIDE/Tripwire/Wazuh: monitor /usr/bin/runc with sha256
+  Any change = critical, page immediately
+  rpm -V runc / dpkg --verify runc in scheduled checks
+
+Auditd:
+  -w /usr/bin/runc -p wa -k runc_modify
+  -a always,exit -F arch=b64 -S mount -F fstype=cgroup -k cgroup_mount
+  ausearch -k runc_modify | grep -v "comm=\\"dpkg\\"\\|comm=\\"rpm\\""
+
+Patch verification (primary defense):
+  runc --version  (need >= 1.1.12 for CVE-2024-21626)
+  docker --version (>= 18.09.2 for CVE-2019-5736)
+
+Prevention:
+  - Drop CAP_SYS_ADMIN from all containers (blocks release_agent)
+  - Use cgroups v2 (release_agent removed entirely)
+  - Read-only host runc via immutable bit / verified boot
+  - gVisor / Kata for runtime isolation`,
+        notes: "The runc binary overwrite (CVE-2019-5736) and the cgroups release_agent escape represent the more sophisticated tier of container escape, beyond simple privileged/socket misconfiguration. CVE-2019-5736 is notable because it weaponizes a routine administrative action: when an operator runs docker exec into a malicious container, the container overwrites the host's runc binary, and the next invocation of runc executes attacker code as root on the host. This makes runc binary integrity the single most critical file-monitoring target on any container host - the runc binary should never change except during a controlled package update, so any modification is a critical incident warranting immediate response. The cgroups v1 release_agent escape is not a CVE but a feature abuse: a container with CAP_SYS_ADMIN can mount a cgroup hierarchy, set a release_agent path pointing to an attacker payload, and trigger it to execute as root on the host when a cgroup empties. The two preventive controls that eliminate this entire class are dropping CAP_SYS_ADMIN from containers (which removes the release_agent precondition) and migrating to cgroups v2, which removed the release_agent mechanism entirely. For detection, Falco ships a dedicated release_agent escape rule, and file integrity monitoring on /usr/bin/runc with SHA-256 is the essential complement. Track CVE-2024-21626 (Leaky Vessels) as the modern runc escape requiring updated patching.",
+        apt: [
+          { cls: "apt-mul", name: "Container-escape operators", note: "CVE-2019-5736 runc overwrite and release_agent escapes appear in commodity container attack toolkits (CDK, deepce, BOtB)." },
+          { cls: "apt-mul", name: "Cryptojacking crews", note: "Container escapes chained to host access for persistent miner deployment in cloud environments." },
+          { cls: "apt-mul", name: "Leaky Vessels exploiters", note: "CVE-2024-21626 runc escape saw rapid weaponization in 2024 against container build and runtime environments." }
+        ],
+        cite: "MITRE ATT&CK T1611"
       }
     ]
   },
@@ -2664,6 +3492,1110 @@ Microsoft Defender for Identity:
           { cls: "apt-mul", name: "Red Team", note: "PowerView/BloodHound ACL and group-membership abuse is core escalation tradecraft." }
         ],
         cite: "MITRE ATT&CK T1098"
+      }
+    ]
+  },
+  {
+    id: "T1548.001",
+    name: "Abuse Elevation Control Mechanism: Setuid and Setgid",
+    desc: "SUID/SGID binary abuse and Linux capabilities for privilege escalation - GTFOBins shell-spawning via SUID binaries, attacker-planted SUID root shells, and capability abuse (cap_setuid, cap_dac_override, cap_sys_admin) invisible to standard SUID checks",
+    rows: [
+      {
+        sub: "T1548.001 - SUID/SGID Binary Abuse and GTFOBins Escalation",
+        os: "linux",
+        indicator: "Execution of a SUID/SGID binary that yields elevated privileges - either a custom/non-package SUID binary, or a standard GTFOBins-listed binary (find, awk, vim, less, env, tee) with the SUID bit set used to spawn a root shell or read/write protected files",
+        sysmon: `// Sysmon for Linux EID 1 - SUID/SGID abuse for escalation
+// The signal is euid=0 resulting from a non-root invocation.
+
+// GTFOBins shell-spawn patterns via SUID binary:
+Image=*/find  AND CommandLine matches: *-exec*/bin/sh* OR *-exec bash*
+Image=*/awk   AND CommandLine matches: *BEGIN*system* OR *system("/bin/*
+Image=(*vim OR *vi) AND CommandLine matches: *!/bin/sh* OR *:!bash*
+Image=*/less  AND CommandLine matches: *!/bin/* (shell escape from pager)
+Image=*/env   AND CommandLine matches: *env /bin/sh* OR *env bash*
+Image=*/tee   AND CommandLine matches: */etc/sudoers* OR */etc/passwd*
+Image=(*python* OR *perl) AND CommandLine matches: *-p* OR *setuid*
+
+// bash invoked with -p (preserves SUID effective UID)
+Image=*/bash AND CommandLine matches: *-p* OR *--privileged*
+
+// Auditd: execve where resulting euid=0 but auid != 0
+-a always,exit -F arch=b64 -S execve -C uid!=euid -k suid_exec
+-a always,exit -F arch=b64 -S execve -F euid=0 -k root_exec`,
+        kibana: `// GTFOBins escalation patterns
+process.name: "find"
+AND process.command_line: (*-exec* AND (*bash* OR */bin/sh*))
+
+process.name: "awk"
+AND process.command_line: (*system(* OR *BEGIN{*) AND (*bash* OR *sh*))
+
+process.name: ("vim" OR "vi" OR "less" OR "more")
+AND process.command_line: (*!/bin/* OR *shell* OR *:!*)
+
+process.name: "env"
+AND process.command_line: (*env /bin/* OR *env bash*)
+
+// bash -p preserving SUID privilege
+process.command_line: ("bash -p" OR "bash --privileged")
+
+// Auditd: euid != uid (SUID executed), resulting euid=0
+event.module: "auditd"
+AND tags: "suid_exec"
+AND auditd.data.euid: "0"
+AND NOT auditd.data.auid: ("0" OR "4294967295")
+
+// A SUID binary not from any package (high signal)
+// (enrich file events with package-membership lookup)
+event.module: "file_integrity"
+AND file.mode: ("4*")
+AND file.path: NOT (/usr/* OR /bin/* OR /sbin/*)`,
+        powershell: `#!/bin/bash
+# T1548.001 - SUID/SGID abuse hunt
+
+echo "[*] === All SUID binaries ==="
+find / -perm -4000 -type f 2>/dev/null | sort | while read f; do
+  echo "$f | owner: $(stat -c '%U' "$f") | perms: $(stat -c '%a' "$f")"
+done
+
+echo ""
+echo "[*] === All SGID binaries ==="
+find / -perm -2000 -type f 2>/dev/null | sort | head -40
+
+echo ""
+echo "[*] === SUID/SGID binaries NOT owned by package manager (HIGH SIGNAL) ==="
+find / -perm -4000 -type f 2>/dev/null | while read f; do
+  if ! (dpkg -S "$f" 2>/dev/null || rpm -qf "$f" 2>/dev/null) | grep -q .; then
+    echo "[FLAG] Non-packaged SUID: $f"; ls -la "$f"
+  fi
+done
+
+echo ""
+echo "[*] === GTFOBins-exploitable binaries with SUID set ==="
+for b in find awk nmap vim vi less more nano env tee python python3 \\
+         perl ruby lua node php cp mv dd nano sed; do
+  p=$(command -v $b 2>/dev/null); [ -z "$p" ] && continue
+  perms=$(stat -c '%a' "$p" 2>/dev/null)
+  [ "\${perms:0:1}" -ge 4 ] 2>/dev/null && echo "[FLAG] SUID GTFOBin: $p ($perms)"
+done
+
+echo ""
+echo "[*] === Baseline-deviation SUID set (compare to known-good list) ==="
+echo "  Common-legit SUID: su sudo passwd chsh chfn newgrp gpasswd"
+echo "    mount umount ping pkexec fusermount"
+echo "  Anything else = investigate"
+
+echo ""
+echo "[*] === auditd: SUID executions reaching euid=0 from non-root ==="
+ausearch -k suid_exec -i --start today 2>/dev/null | \\
+  awk '/euid=0/ && !/auid=0/' | tail -30`,
+        registry: `SUID/SGID escalation artifacts:
+
+Enumeration:
+  find / -perm -4000 -type f 2>/dev/null   (SUID)
+  find / -perm -2000 -type f 2>/dev/null   (SGID)
+  find / -perm -6000 -type f 2>/dev/null   (both)
+
+Expected-legitimate SUID binaries (baseline):
+  /usr/bin/su /usr/bin/sudo /usr/bin/passwd
+  /usr/bin/chsh /usr/bin/chfn /usr/bin/newgrp
+  /usr/bin/gpasswd /usr/bin/mount /usr/bin/umount
+  /usr/bin/pkexec /usr/bin/fusermount /bin/ping
+  (anything outside this set warrants a look)
+
+High-risk GTFOBins when SUID is set:
+  find    : find . -exec /bin/sh -p \\; -quit
+  awk     : awk 'BEGIN {system("/bin/sh")}'
+  vim/vi  : vim -c ':!/bin/sh'
+  less    : less file → !/bin/sh
+  env     : env /bin/sh
+  tee     : echo "evil::0:0::/:/bin/bash" | tee -a /etc/passwd
+  python  : python3 -c 'import os; os.setuid(0); os.system("/bin/bash")'
+  perl    : perl -e 'exec "/bin/sh";'
+  cp      : overwrite /etc/passwd or a SUID binary
+  dd      : write to protected files
+  nano    : ^R^X to run command, or write protected files
+
+Attacker-planted SUID (persistence + escalation):
+  /tmp/<name>  with 4755 perms, owner root
+  cp /bin/bash /tmp/rootbash; chmod 4755 /tmp/rootbash
+  Then: /tmp/rootbash -p  → root shell
+  Watch for: root-owned SUID binary in /tmp, /dev/shm, /home
+
+Reference: gtfobins.github.io (filter: SUID)`,
+        tools: `SUID/SGID abuse - the foundational Linux LPE path:
+
+Why it matters:
+  SUID binaries run with the file owner's privileges
+  (often root) regardless of who executes them. A SUID
+  binary that can spawn a shell or write arbitrary files
+  is an instant privilege escalation.
+
+GTFOBins (gtfobins.github.io):
+  The definitive catalog of Unix binaries abusable when
+  SUID-set or sudo-allowed. Hundreds of entries. Both red
+  and blue teams reference it constantly.
+
+Enumeration tooling:
+  LinPEAS / LinEnum   - automated SUID/SGID enumeration
+  linux-smart-enum    - SUID + GTFOBins cross-reference
+  GTFOBins lookup is built into most privesc scripts
+
+Attacker workflow:
+  1. find / -perm -4000 2>/dev/null
+  2. Cross-reference results against GTFOBins
+  3. Execute the GTFOBins escalation one-liner
+  Often automated end-to-end by LinPEAS.
+
+Persistence variant:
+  Attacker who already has root drops a SUID-root copy of
+  bash (chmod 4755 /tmp/.x) as a re-escalation backdoor.
+  cp /bin/bash /tmp/.bd; chmod +s /tmp/.bd; /tmp/.bd -p
+
+Threat actor use:
+  Rocke, 8220, TeamTNT all enumerate SUID post-access.
+  Web-shell → www-data → SUID perl/python = instant root
+  on misconfigured legacy servers. Extremely common.
+
+Note vs T1059.004 execution row:
+  Execution page covers SUID as an execution vector;
+  this row is the privilege-escalation focus - the
+  euid transition to root is the key signal here.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_susp_suid_sgid_execution.yml
+- proc_creation_lnx_gtfobins_suid_shell.yml
+- file_event_lnx_suid_binary_creation.yml
+
+Elastic detection rules:
+- Setuid/Setgid Bit Set on Binary
+- Privilege Escalation via SUID Binary
+- Potential GTFOBins Abuse
+
+osquery (find unexpected SUID):
+  SELECT path, mode, uid FROM file
+  WHERE directory IN ('/usr/bin','/usr/local/bin','/tmp')
+    AND (mode LIKE '4%' OR mode LIKE '6%');
+  suid_bin table also available
+
+Velociraptor:
+  Linux.Sys.SUID  (enumerate all SUID/SGID binaries)
+  Compare against golden baseline
+
+Auditd:
+  -a always,exit -F arch=b64 -S execve -C uid!=euid -k suid_exec
+  -a always,exit -F arch=b64 -S chmod,fchmod -F a1&04000 -k suid_set
+  (second rule catches the SETTING of a SUID bit)
+  ausearch -k suid_exec -i | awk '/euid=0/ && !/auid=0/'
+
+File integrity (AIDE/Tripwire/Wazuh):
+  Baseline all SUID/SGID binaries; alert on:
+    - new SUID binary anywhere
+    - SUID bit added to a previously-normal file
+    - SUID binary outside /usr /bin /sbin
+
+LinPEAS (attack-surface discovery):
+  ./linpeas.sh | grep -A5 "SUID"
+  Run on suspect host to see own exposure
+
+Atomic Red Team:
+  T1548.001 - tests for setuid/setgid bit abuse`,
+        notes: "SUID/SGID abuse is the foundational Linux privilege escalation technique and the first thing nearly every post-exploitation enumeration script checks. A SUID binary executes with its owner's privileges (commonly root) regardless of the invoking user, so any SUID binary capable of spawning a shell, writing arbitrary files, or reading protected files is a direct escalation path. The GTFOBins project catalogs every standard Unix binary that can be abused this way, and the list is longer than most defenders expect - find, awk, vim, less, env, tee, cp, dd, python, perl, and dozens more. The detection approach has two halves: a static posture audit (enumerate all SUID/SGID binaries and compare against a known-good baseline - the legitimate set on a stock system is small, roughly su, sudo, passwd, chsh, chfn, newgrp, gpasswd, mount, umount, pkexec, fusermount, ping, so anything outside that set deserves scrutiny, and any SUID binary outside /usr, /bin, /sbin is highly suspicious), and a behavioral signal (auditd execve capture where the effective UID becomes 0 while the audit/login UID is non-zero, which precisely identifies a SUID-to-root transition). A common attacker persistence pattern that doubles as re-escalation is dropping a SUID-root copy of bash in /tmp - watch for root-owned SUID binaries in writable directories. This row is the privilege-escalation counterpart to the SUID execution row on the Execution page; the distinguishing signal here is the euid transition to root.",
+        apt: [
+          { cls: "apt-mul", name: "TeamTNT / Rocke / 8220", note: "SUID enumeration via LinPEAS-style tooling is a standard post-access escalation step in cloud cryptojacking campaigns." },
+          { cls: "apt-mul", name: "Web-shell operators", note: "www-data context plus a SUID perl/python on legacy servers yields instant root; extremely common in web exploitation chains." },
+          { cls: "apt-mul", name: "Red team / commodity", note: "GTFOBins-based SUID escalation is automated by LinPEAS, LinEnum, and linux-smart-enumeration; near-universal first escalation attempt." }
+        ],
+        cite: "MITRE ATT&CK T1548.001"
+      },
+      {
+        sub: "T1548.001 - Linux Capabilities Abuse (cap_setuid, cap_dac_override, cap_sys_admin)",
+        os: "linux",
+        indicator: "A binary granted dangerous Linux file capabilities (via setcap) abused for privilege escalation - cap_setuid+ep on an interpreter enabling silent setuid(0), cap_dac_override for arbitrary file access, or cap_sys_admin/cap_sys_ptrace for broader system control; invisible to standard SUID checks, only visible via getcap",
+        sysmon: `// Capabilities are NOT visible in ls -la / SUID checks.
+// They are file attributes set via setcap. Two angles:
+
+// 1. setcap invocation (granting a capability) - watch the act
+EventID=1
+Image=*/setcap
+CommandLine matches:
+  *cap_setuid*  *cap_setgid*  *cap_dac_override*
+  *cap_sys_admin*  *cap_sys_ptrace*  *cap_net_raw*
+  *+ep*  *+ei*  *=ep*
+AND target binary is an interpreter (python/perl/ruby/node)
+  OR a binary in a writable/non-standard path
+
+// 2. Execution of a capability-enabled interpreter that then
+//    calls setuid(0) - the escalation moment
+Image=(*python* OR *perl OR *ruby OR *node)
+CommandLine matches: *setuid* OR *os.setuid(0)* OR *POSIX*setuid*
+
+// Auditd: capset syscall, and setcap execve
+-a always,exit -F arch=b64 -S capset -k capset_call
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/setcap -k setcap_exec
+-a always,exit -F arch=b64 -S setuid -F a0=0 -k setuid_root`,
+        kibana: `// setcap granting dangerous capability
+process.name: "setcap"
+AND process.command_line: (
+  *cap_setuid* OR *cap_setgid* OR *cap_dac_override*
+  OR *cap_sys_admin* OR *cap_sys_ptrace* OR *cap_net_admin*
+)
+
+// Interpreter calling setuid(0) (capability escalation moment)
+process.name: ("python" OR "python3" OR "perl" OR "ruby" OR "node")
+AND process.command_line: (*setuid(0)* OR *os.setuid* OR *POSIX::setuid*)
+
+// Auditd: setcap execution
+event.module: "auditd"
+AND tags: ("setcap_exec" OR "capset_call")
+
+// setuid(0) syscall from a non-root process
+event.module: "auditd"
+AND tags: "setuid_root"
+AND NOT auditd.data.auid: ("0" OR "4294967295")
+
+// File with capabilities outside expected set
+// (requires enrichment - getcap inventory fed to SIEM)
+event.module: "file_integrity"
+AND file.capabilities: (*cap_setuid* OR *cap_dac_override* OR *cap_sys_admin*)`,
+        powershell: `#!/bin/bash
+# T1548.001 - Linux capabilities abuse hunt
+
+echo "[*] === ALL file capabilities on the system ==="
+getcap -r / 2>/dev/null
+
+echo ""
+echo "[*] === DANGEROUS capabilities (escalation-enabling) ==="
+getcap -r / 2>/dev/null | grep -iE \\
+  "cap_setuid|cap_setgid|cap_dac_override|cap_dac_read_search|cap_sys_admin|cap_sys_ptrace|cap_sys_module|cap_net_admin|cap_chown|cap_fowner"
+
+echo ""
+echo "[*] === Capabilities on interpreters (highest risk) ==="
+for b in python python2 python3 perl ruby node lua php tar; do
+  p=$(command -v $b 2>/dev/null); [ -z "$p" ] && continue
+  caps=$(getcap "$p" 2>/dev/null)
+  [ -n "$caps" ] && echo "[FLAG] $caps"
+  # also resolve symlinks
+  rp=$(readlink -f "$p" 2>/dev/null)
+  caps2=$(getcap "$rp" 2>/dev/null)
+  [ -n "$caps2" ] && [ "$rp" != "$p" ] && echo "[FLAG] $caps2"
+done
+
+echo ""
+echo "[*] === Capabilities on binaries outside /usr (suspicious) ==="
+getcap -r / 2>/dev/null | grep -vE "^/usr/(bin|sbin|lib)" | grep -vE "^/(bin|sbin)"
+
+echo ""
+echo "[*] === auditd: setcap execution + setuid(0) from non-root ==="
+ausearch -k setcap_exec -i --start today 2>/dev/null | tail -20
+ausearch -k setuid_root -i --start today 2>/dev/null | awk '!/auid=0/' | tail -20
+
+echo ""
+echo "[*] === Expected-legit capability holders (baseline) ==="
+echo "  /usr/bin/ping            cap_net_raw"
+echo "  /usr/bin/mtr-packet      cap_net_raw"
+echo "  /usr/sbin/arping         cap_net_raw"
+echo "  /usr/bin/systemd-detect-virt (varies)"
+echo "  Anything with cap_setuid/cap_dac_override/cap_sys_admin = investigate"
+
+echo ""
+echo "[*] === Container capability check (run inside container) ==="
+capsh --print 2>/dev/null | grep -iE "current|bounding"
+grep CapEff /proc/self/status 2>/dev/null`,
+        registry: `Linux capabilities escalation artifacts:
+
+Enumeration (capabilities are INVISIBLE to ls/SUID checks):
+  getcap -r / 2>/dev/null        - list all file capabilities
+  getpcaps <pid>                 - capabilities of a process
+  grep Cap /proc/<pid>/status    - CapEff/CapPrm bitmasks
+  capsh --decode=<hex>           - decode a capability bitmask
+
+Dangerous capabilities and their escalation paths:
+  cap_setuid+ep   : binary can setuid(0) → root
+    python3: os.setuid(0); os.system("/bin/bash")
+  cap_dac_override+ep : bypass file permission checks
+    read /etc/shadow, write /etc/passwd
+  cap_dac_read_search+ep : read any file (Shocker-style)
+  cap_sys_admin+ep : mount, many escape paths (near-root)
+  cap_sys_ptrace+ep : ptrace any process → inject into root proc
+  cap_sys_module+ep : load kernel module → total host control
+  cap_chown+ep / cap_fowner+ep : change ownership of files
+  cap_net_admin / cap_net_raw : network manipulation
+
+Expected-legitimate capability holders (baseline):
+  /usr/bin/ping            cap_net_raw   (or SUID on some distros)
+  /usr/sbin/arping         cap_net_raw
+  /usr/bin/mtr-packet      cap_net_raw
+  (cap_setuid, cap_dac_override, cap_sys_admin on a file
+   are almost never legitimate on a normal server)
+
+Setting a capability (the attack/persistence act):
+  setcap cap_setuid+ep /usr/bin/python3
+  Then any user runs: python3 -c 'import os;os.setuid(0);os.system("/bin/sh")'
+
+Why this is stealthy:
+  find -perm -4000 does NOT show capability-enabled binaries.
+  Only getcap reveals them. Many defenders never check.
+  A cap_setuid python3 is functionally SUID-root but invisible
+  to the standard SUID hunt.`,
+        tools: `Linux capabilities abuse:
+
+The stealthy cousin of SUID:
+  Capabilities split root's power into ~40 distinct units.
+  setcap assigns specific capabilities to a binary file.
+  A binary with cap_setuid+ep can become root, but it does
+  NOT show up in find -perm -4000. This invisibility makes
+  it a favored persistence + escalation mechanism.
+
+Most dangerous for escalation:
+  cap_setuid    - direct path to root (setuid(0) + exec shell)
+  cap_dac_override / cap_dac_read_search - read/write any file
+  cap_sys_admin - the "new root"; enables mount + many escapes
+  cap_sys_ptrace - inject into privileged processes
+  cap_sys_module - load a malicious kernel module = game over
+
+Enumeration tooling:
+  LinPEAS    - dedicated capabilities section, flags dangerous ones
+  getcap -r / - the core command; attackers run it first
+  linux-smart-enumeration - capability + GTFOBins cross-ref
+
+GTFOBins has a Capabilities filter:
+  gtfobins.github.io - filter by "Capabilities" shows which
+  binaries escalate with which capability set
+
+Persistence angle:
+  An attacker with root sets cap_setuid+ep on a benign-looking
+  binary, then drops to a low-priv user. Re-escalation is one
+  command and leaves no SUID artifact. Survives many cleanups.
+
+Container relevance:
+  Container capabilities (capsh --print) determine escape
+  surface. CAP_SYS_ADMIN in a container = likely escapable.
+  See T1611 for the container escape chains these enable.
+
+Threat actor use:
+  Less common than SUID in commodity malware (because it's
+  less universally understood), but documented in targeted
+  Linux intrusions and increasingly in container attacks.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_setcap_dangerous_capability.yml
+- proc_creation_lnx_capability_priv_esc.yml
+
+Elastic detection rules:
+- File Capability Modification via setcap
+- Privilege Escalation via Linux Capabilities
+
+Auditd:
+  -a always,exit -F arch=b64 -S execve \\
+    -F path=/usr/sbin/setcap -k setcap_exec
+  -a always,exit -F arch=b64 -S capset -k capset_call
+  -a always,exit -F arch=b64 -S setuid -F a0=0 -k setuid_root
+  ausearch -k setcap_exec -i
+
+osquery:
+  SELECT * FROM process_file_events WHERE ...
+  (capability inventory typically via scheduled getcap)
+
+Velociraptor:
+  Custom VQL: execve(argv=["getcap","-r","/"]) periodically
+  Diff against baseline; alert on new dangerous caps
+
+File integrity / scheduled audit:
+  Run getcap -r / on a schedule, diff against golden baseline
+  Alert on any new file with cap_setuid, cap_dac_override,
+  cap_sys_admin, cap_sys_ptrace, cap_sys_module
+  (this is the PRIMARY detection - most tools miss capabilities)
+
+LinPEAS:
+  ./linpeas.sh | grep -A10 -i "capabilit"
+  Shows own exposure to capability-based escalation
+
+Atomic Red Team:
+  T1548.001 includes capability-based escalation tests
+
+Hardening:
+  Audit and minimize file capabilities org-wide
+  Most servers should have NO cap_setuid/cap_dac_override files`,
+        notes: "Linux capabilities are the stealthy counterpart to SUID and represent a frequently-missed escalation and persistence vector precisely because they are invisible to the standard SUID hunt (find -perm -4000). Capabilities split root's monolithic power into roughly 40 distinct units, and the setcap command assigns specific ones to a binary file. A binary with cap_setuid+ep can call setuid(0) and become root - functionally identical to SUID-root - but it does not appear in any permission-based search; only getcap -r / reveals it. This invisibility is exactly why it appeals to attackers for persistence: an attacker with root can grant cap_setuid+ep to a benign-looking binary, drop to a low-privilege account, and retain a one-command re-escalation path that survives cleanups focused on SUID binaries and cron jobs. The most dangerous capabilities for escalation are cap_setuid (direct root), cap_dac_override and cap_dac_read_search (read/write any file, including /etc/shadow and /etc/passwd), cap_sys_admin (the de facto new root, enabling mount and numerous escape paths), cap_sys_ptrace (inject into privileged processes), and cap_sys_module (load a malicious kernel module for total control). The single most important detection control is running getcap -r / on a schedule and diffing against a known-good baseline - on a normal server the legitimate capability set is tiny (typically just cap_net_raw on ping and a few network tools), so cap_setuid, cap_dac_override, or cap_sys_admin on any file is almost always worth investigating. GTFOBins includes a Capabilities filter mapping binaries to the capability needed for escalation.",
+        apt: [
+          { cls: "apt-mul", name: "Targeted Linux intrusions", note: "Capability-based escalation and persistence (cap_setuid on interpreters) documented in targeted server compromises; survives SUID-focused cleanup." },
+          { cls: "apt-mul", name: "Container attackers", note: "CAP_SYS_ADMIN and related capabilities in containers are the precondition for multiple T1611 escape chains." },
+          { cls: "apt-mul", name: "Red team / LinPEAS users", note: "getcap enumeration and GTFOBins capability cross-reference are standard in modern Linux privilege-escalation tooling." }
+        ],
+        cite: "MITRE ATT&CK T1548.001"
+      }
+    ]
+  },
+  {
+    id: "T1548.003",
+    name: "Abuse Elevation Control Mechanism: Sudo and Sudo Caching",
+    desc: "Sudo-based privilege escalation - sudoers NOPASSWD and GTFOBins misconfiguration abuse, sudo binary CVEs (Baron Samedit CVE-2021-3156, runas bypass CVE-2019-14287), and sudo credential-cache token reuse via process injection",
+    rows: [
+      {
+        sub: "T1548.003 - Sudoers Misconfiguration and NOPASSWD GTFOBins Abuse",
+        os: "linux",
+        indicator: "Abuse of an overly-permissive sudoers entry - a NOPASSWD rule for a GTFOBins-exploitable command (vim, find, less, awk, python), a wildcard or env-preserving rule, or sudo access to an editor/interpreter - to execute commands as root; preceded by sudo -l enumeration",
+        sysmon: `// Sysmon for Linux EID 1 - sudo abuse via misconfig
+
+// sudo -l enumeration (recon - what can I run as root?)
+Image=*/sudo AND CommandLine matches: *-l* OR *--list*
+
+// sudo running a GTFOBins-exploitable command
+Image=*/sudo AND CommandLine matches:
+  *sudo vim* OR *sudo vi*       (vim → :!/bin/sh)
+  *sudo find* *-exec*           (find -exec /bin/sh)
+  *sudo less* OR *sudo more*    (pager shell escape)
+  *sudo awk* *system*           (awk system())
+  *sudo python* OR *sudo perl*  (interpreter → shell)
+  *sudo nmap*                   (--interactive, old)
+  *sudo tee* */etc/*            (write protected files)
+  *sudo env*                    (env /bin/sh)
+  *sudo man*                    (pager escape)
+
+// sudo with env_keep abuse (LD_PRELOAD / PYTHONPATH passed through)
+Image=*/sudo AND environment contains LD_PRELOAD or PYTHONPATH
+
+// Auditd
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/sudo -k sudo_exec
+-w /etc/sudoers -p rwa -k sudoers
+-w /etc/sudoers.d -p rwa -k sudoers`,
+        kibana: `// sudo -l enumeration
+process.name: "sudo"
+AND process.command_line: (*-l* OR *--list*)
+
+// sudo invoking a GTFOBins-exploitable command
+process.name: "sudo"
+AND process.command_line: (
+  *vim* OR *vi * OR *find* OR *less* OR *more* OR *awk*
+  OR *python* OR *perl* OR *ruby* OR *nmap* OR *man *
+  OR *env * OR *tee * OR *ftp* OR *gdb*
+)
+
+// Shell whose parent is one of those sudo-run binaries
+process.name: ("bash" OR "sh" OR "dash")
+AND process.parent.name: ("vim" OR "vi" OR "find" OR "less" OR "awk" OR "python3" OR "perl")
+AND user.id: "0"
+
+// sudoers file modification
+event.module: "auditd"
+AND tags: "sudoers"
+AND NOT process.name: ("visudo" OR "dpkg" OR "rpm")
+
+// env_keep abuse: LD_PRELOAD/PYTHONPATH surviving into sudo
+process.name: "sudo"
+AND process.env_vars: (*LD_PRELOAD=* OR *PYTHONPATH=*)
+
+// Auditd: sudo execve resulting in root child
+event.module: "auditd"
+AND tags: "sudo_exec"
+AND auditd.data.euid: "0"
+AND auditd.data.command: (*vim* OR *find* OR *less* OR *python* OR *awk*)`,
+        powershell: `#!/bin/bash
+# T1548.003 - Sudoers misconfiguration hunt
+
+echo "[*] === /etc/sudoers + /etc/sudoers.d (full review) ==="
+cat /etc/sudoers 2>/dev/null | grep -vE "^#|^$"
+for f in /etc/sudoers.d/*; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"; cat "$f" | grep -vE "^#|^$"
+done
+
+echo ""
+echo "[*] === NOPASSWD entries (no-auth escalation) ==="
+grep -rE "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -vE "^#"
+
+echo ""
+echo "[*] === Dangerous GTFOBins commands granted via sudo ==="
+grep -rE "(vim|vi|find|less|more|awk|nano|python|perl|ruby|nmap|man|env|tee|cp|dd|ftp|gdb|tar|zip|systemctl|apt|dpkg)" \\
+  /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -vE "^#"
+
+echo ""
+echo "[*] === env_keep / SETENV (LD_PRELOAD passthrough risk) ==="
+grep -rE "(env_keep|SETENV|!env_reset)" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -vE "^#"
+
+echo ""
+echo "[*] === Wildcard sudo rules (often exploitable) ==="
+grep -rE "\\*" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -vE "^#"
+
+echo ""
+echo "[*] === Per-user sudo rights (what each account can run) ==="
+getent passwd | awk -F: '$3>=1000 && $7!~/nologin|false/{print $1}' | \\
+  while read u; do
+    out=$(sudo -l -U "$u" 2>/dev/null | grep -vE "not allowed|not in sudoers|may not|Matching")
+    [ -n "$out" ] && { echo "--- $u ---"; echo "$out"; }
+  done
+
+echo ""
+echo "[*] === auditd: sudo running editors/interpreters (today) ==="
+ausearch -k sudo_exec -i --start today 2>/dev/null | \\
+  grep -E "(vim|vi|find|less|awk|python|perl)" | tail -20
+
+echo ""
+echo "[*] === Recent sudoers modifications ==="
+ausearch -k sudoers -i --start today 2>/dev/null | tail -20
+ls -la /etc/sudoers /etc/sudoers.d/ 2>/dev/null`,
+        registry: `Sudoers misconfiguration artifacts:
+
+Configuration files:
+  /etc/sudoers                  - main policy (edit via visudo)
+  /etc/sudoers.d/*              - drop-in fragments
+  sudo -l                       - list invoking user's privileges
+  sudo -l -U <user>             - list another user's (as root)
+
+Dangerous sudoers patterns:
+  user ALL=(ALL) NOPASSWD: ALL          - full root, no password
+  user ALL=(ALL) NOPASSWD: /usr/bin/vim - GTFOBins → root shell
+  user ALL=(ALL) /usr/bin/find          - find -exec /bin/sh
+  user ALL=(ALL) /usr/bin/less          - less → !/bin/sh
+  user ALL=(ALL) /usr/bin/python3       - python → os.system
+  Defaults env_keep += "LD_PRELOAD"     - preload passthrough
+  user ALL=(ALL) /path/*                - wildcard injection
+  user ALL=(ALL) /usr/bin/systemctl     - systemctl → pager → shell
+
+GTFOBins sudo escalation one-liners:
+  sudo vim -c ':!/bin/sh'
+  sudo find . -exec /bin/sh \\; -quit
+  sudo less /etc/profile → !/bin/sh
+  sudo awk 'BEGIN {system("/bin/sh")}'
+  sudo python3 -c 'import os; os.system("/bin/sh")'
+  sudo env /bin/sh
+  echo "evil ALL=(ALL) NOPASSWD: ALL" | sudo tee -a /etc/sudoers
+
+env_keep / LD_PRELOAD abuse:
+  If sudoers has: Defaults env_keep += "LD_PRELOAD"
+  Attacker: LD_PRELOAD=/tmp/evil.so sudo <any-allowed-cmd>
+  The .so runs as root via the preload.
+
+Sudo logs:
+  /var/log/auth.log (Debian)  /var/log/secure (RHEL)
+  Records: "USER : TTY=... ; PWD=... ; USER=root ; COMMAND=..."
+  Hunt for sudo COMMAND= entries running editors/interpreters
+
+Reference: gtfobins.github.io (filter: Sudo)`,
+        tools: `Sudo misconfiguration abuse:
+
+The #1 real-world Linux LPE in CTFs and pentests:
+  Overly-permissive sudoers rules are extremely common.
+  The workflow is universal:
+    1. sudo -l        (what can I run?)
+    2. Cross-reference allowed commands with GTFOBins
+    3. Execute the escalation one-liner
+
+GTFOBins (gtfobins.github.io):
+  "Sudo" filter lists every binary that escalates to root
+  when sudo-allowed. Hundreds of entries: editors, pagers,
+  interpreters, archivers, even seemingly-harmless tools.
+
+Common dangerous grants seen in the wild:
+  systemctl, apt, dpkg, git, tar, zip, vim, find, less,
+  python, perl, awk, nmap, man, env, tee, dd, cp
+
+env_keep / LD_PRELOAD passthrough:
+  If sudoers preserves LD_PRELOAD, an attacker preloads a
+  malicious .so that runs as root via any allowed sudo command.
+
+Tooling:
+  sudo -l        - the attacker's first command
+  LinPEAS        - parses sudo -l, flags GTFOBins matches
+  sudo_killer    - dedicated sudo misconfig + CVE exploitation
+  GTFOBins lookup is built into every privesc script
+
+Threat actor use:
+  Less "APT signature," more universal opportunism. Any
+  actor with a foothold runs sudo -l. Cryptomining crews,
+  red teams, and manual intruders all exploit sudo misconfig
+  as the path of least resistance to root.
+
+Note: this row is misconfiguration abuse; the companion row
+covers sudo binary CVEs (Baron Samedit, etc.).`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_sudo_gtfobins_shell.yml
+- proc_creation_lnx_sudo_list_enumeration.yml
+- file_event_lnx_sudoers_modification.yml
+
+Elastic detection rules:
+- Sudo Command Enumeration (sudo -l)
+- Potential Sudo GTFOBins Privilege Escalation
+- Sudoers File Modification
+
+Auditd:
+  -a always,exit -F arch=b64 -S execve -F path=/usr/bin/sudo -k sudo_exec
+  -w /etc/sudoers -p rwa -k sudoers
+  -w /etc/sudoers.d -p rwa -k sudoers
+  ausearch -k sudoers | grep -v "comm=\\"visudo\\""
+
+Sudo logging (enable I/O logging for forensics):
+  Defaults log_input, log_output
+  Defaults iolog_dir="/var/log/sudo-io"
+  Captures full session of every sudo command
+
+Falco:
+  rule: Sudo Potential Privilege Escalation
+  rule: Modify Sudoers File
+  rule: Read sensitive file untrusted (sudoers)
+
+Config audit (primary control):
+  sudo -l -U <each-user> as part of scheduled audit
+  Flag NOPASSWD rules, GTFOBins commands, env_keep,
+  wildcards, and editor/interpreter grants
+  visudo -c  (syntax check)
+
+Lynis:
+  lynis audit system - flags sudoers weaknesses
+
+Atomic Red Team:
+  T1548.003 - sudo caching and sudoers abuse tests`,
+        notes: "Sudoers misconfiguration is the single most common real-world Linux privilege escalation path - more prevalent than kernel exploits or pkexec because it requires no vulnerability, just an overly-permissive policy that administrators create routinely for convenience. The attacker workflow is universal and is the first thing run after any foothold: sudo -l to enumerate allowed commands, cross-reference against GTFOBins, and execute the escalation one-liner. The danger is that many seemingly-reasonable sudo grants are exploitable: allowing a user to run vim, find, less, awk, python, systemctl, apt, git, or tar via sudo grants effective root, because all of those binaries can spawn a shell or write arbitrary files from within their privileged execution. NOPASSWD rules compound the risk by removing even the password barrier. A subtler vector is env_keep: if sudoers preserves LD_PRELOAD or PYTHONPATH, an attacker can preload a malicious shared object that executes as root through any allowed sudo command. The detection approach is primarily configuration audit - regularly enumerate each user's sudo rights (sudo -l -U), flagging NOPASSWD entries, GTFOBins-exploitable commands, wildcards, and env_keep directives - supplemented by behavioral detection of sudo invoking editors or interpreters followed by a root shell. Enabling sudo I/O logging (log_input/log_output) provides full forensic capture of every sudo session. This row covers misconfiguration abuse; the companion row addresses sudo binary CVEs.",
+        apt: [
+          { cls: "apt-mul", name: "Universal post-access", note: "sudo -l enumeration and GTFOBins escalation is run by virtually every actor with a Linux foothold; the path of least resistance to root." },
+          { cls: "apt-mul", name: "Cryptomining crews", note: "Sudo misconfiguration exploited opportunistically for root before miner deployment on compromised servers." },
+          { cls: "apt-mul", name: "Red team / LinPEAS", note: "LinPEAS and sudo_killer automate sudo -l parsing and GTFOBins matching; standard escalation tooling." }
+        ],
+        cite: "MITRE ATT&CK T1548.003"
+      },
+      {
+        sub: "T1548.003 - Sudo Binary Exploitation and Token Reuse (Baron Samedit, CVE-2019-14287)",
+        os: "linux",
+        indicator: "Exploitation of a sudo binary vulnerability for root - Baron Samedit heap overflow (CVE-2021-3156) via sudoedit -s, the runas -u#-1 user-ID bypass (CVE-2019-14287), or sudo credential-cache/token reuse by injecting into a process with a valid sudo timestamp",
+        sysmon: `// Sysmon for Linux EID 1 - sudo CVE exploitation patterns
+
+// CVE-2019-14287: sudo runas with -u#-1 / -u#4294967295
+Image=*/sudo AND CommandLine matches:
+  *-u#-1*  OR  *-u#4294967295*  OR  *--user=#-1*
+
+// Baron Samedit (CVE-2021-3156): sudoedit -s with trailing
+// backslash triggers heap overflow. Watch sudoedit -s usage.
+Image=(*/sudoedit OR */sudo) AND CommandLine matches:
+  *sudoedit -s*  OR  *-s \\*       (trailing backslash arg)
+
+// Generic: sudo crashing / segfaulting (exploit attempt)
+// dmesg / kern.log: "sudo[PID]: segfault"
+
+// Sudo token reuse: attacker injects into a process that
+// recently ran sudo (valid timestamp in /run/sudo/ts/<user>)
+// Watch ptrace into a shell with a fresh sudo timestamp.
+-a always,exit -F arch=b64 -S ptrace -k ptrace_call
+
+// Auditd
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/sudo -k sudo_exec
+-w /run/sudo/ts -p wa -k sudo_token`,
+        kibana: `// CVE-2019-14287: runas -1 / 4294967295 bypass
+process.name: "sudo"
+AND process.command_line: (*-u#-1* OR *-u#4294967295* OR *"--user=#-1"*)
+
+// Baron Samedit: sudoedit -s exploitation pattern
+process.name: ("sudoedit" OR "sudo")
+AND process.command_line: (*"sudoedit -s"* OR *"-s \\\\"*)
+
+// sudo segfault (exploit attempt) from kernel log
+message: ("sudo" AND "segfault")
+
+// sudo token reuse via ptrace into a session with valid timestamp
+event.module: "auditd"
+AND tags: "ptrace_call"
+AND process.name: ("bash" OR "sh")
+
+// sudo timestamp file manipulation
+event.module: "auditd"
+AND tags: "sudo_token"
+
+// Successful root from sudo by a user/version that shouldn't
+process.name: "sudo"
+AND user.id: "0"
+AND process.command_line: (*-u#* OR *-s*)
+
+// Version-based: alert if sudo version is known-vulnerable
+// (enrich from package inventory: sudo < 1.9.5p2 = Baron Samedit)`,
+        powershell: `#!/bin/bash
+# T1548.003 - Sudo CVE / token reuse hunt
+
+echo "[*] === Sudo version vs known CVEs ==="
+sudo --version 2>/dev/null | head -1
+echo "  Baron Samedit (CVE-2021-3156): sudo 1.8.2 - 1.8.31p2, 1.9.0 - 1.9.5p1"
+echo "    FIXED in 1.9.5p2"
+echo "  Runas bypass (CVE-2019-14287): sudo < 1.8.28"
+echo "  CVE-2023-22809 (sudoedit arbitrary file): 1.8.0 - 1.9.12p1"
+
+echo ""
+echo "[*] === Test Baron Samedit (non-destructive check) ==="
+# Vulnerable sudo returns a specific error; patched returns usage
+out=$(sudoedit -s '\\' 2>&1)
+if echo "$out" | grep -qi "malloc\\|corrupt\\|segmentation"; then
+  echo "[CRITICAL] sudo appears VULNERABLE to Baron Samedit"
+else
+  echo "[INFO] sudoedit -s test output: $out"
+fi
+
+echo ""
+echo "[*] === auth.log: sudo runas -1 bypass attempts ==="
+grep -hE "sudo.*(-u#-1|4294967295|user=#-1)" \\
+  /var/log/auth.log /var/log/secure 2>/dev/null | tail -20
+
+echo ""
+echo "[*] === kern.log/dmesg: sudo segfaults (exploit attempts) ==="
+dmesg 2>/dev/null | grep -iE "sudo.*segfault|sudoedit.*segfault" | tail -10
+grep -hi "sudo.*segfault" /var/log/kern.log 2>/dev/null | tail -10
+
+echo ""
+echo "[*] === Active sudo timestamps (token reuse opportunity) ==="
+ls -la /run/sudo/ts/ 2>/dev/null
+echo "  (a valid timestamp lets a process re-sudo without password;"
+echo "   ptrace into such a process = token reuse escalation)"
+
+echo ""
+echo "[*] === auditd: ptrace into shells (token reuse) ==="
+ausearch -k ptrace_call -i --start today 2>/dev/null | tail -20
+
+echo ""
+echo "[*] === auditd: sudo runas bypass attempts ==="
+ausearch -k sudo_exec -i --start today 2>/dev/null | \\
+  grep -E "(-u#-1|4294967295)" | tail -20`,
+        registry: `Sudo CVE / token-reuse artifacts:
+
+Baron Samedit (CVE-2021-3156):
+  Heap-based buffer overflow in sudo's command-line parsing.
+  Affects sudo 1.8.2 - 1.8.31p2 and 1.9.0 - 1.9.5p1.
+  Fixed in sudo 1.9.5p2 (Jan 2021).
+  Trigger: sudoedit -s with a trailing backslash.
+  Reliable, no-auth root. Affects default installs widely.
+  Artifact: sudo/sudoedit segfault in dmesg/kern.log;
+    sudoedit -s invocations with backslash args.
+
+CVE-2019-14287 (runas user-ID bypass):
+  sudo < 1.8.28. If a user is allowed to run a command as
+  any user EXCEPT root (e.g. user ALL=(ALL,!root) ...),
+  they can bypass with:  sudo -u#-1 <cmd>  (resolves to 0).
+  Artifact: sudo invoked with -u#-1 or -u#4294967295.
+
+CVE-2023-22809 (sudoedit arbitrary file write):
+  sudo 1.8.0 - 1.9.12p1. EDITOR/SUDO_EDITOR injection with
+  extra file argument allows editing arbitrary files as root.
+  Artifact: EDITOR env containing "-- /etc/sudoers" style args.
+
+Sudo token / timestamp reuse:
+  /run/sudo/ts/<user>   - sudo credential cache timestamp
+  When valid (default 15 min), sudo runs without re-prompting.
+  Attack: inject (ptrace) into a process owned by a user with
+    a valid timestamp, then run sudo - no password needed.
+  Tools: sudo_inject, "sudo token" exploitation.
+  Artifact: ptrace of a shell process + subsequent sudo;
+    manipulation of /run/sudo/ts/ files.
+
+Version check:
+  sudo --version   (first line shows version)
+  dpkg -l sudo / rpm -q sudo
+
+Logs:
+  /var/log/auth.log (Debian) /var/log/secure (RHEL)
+  dmesg / /var/log/kern.log  (segfaults)`,
+        tools: `Sudo binary exploitation:
+
+Baron Samedit (CVE-2021-3156):
+  Qualys, Jan 2021. One of the most impactful sudo bugs.
+  Heap overflow reachable by any local user (no sudo rights
+  required at all). Public exploits within hours. Reliable
+  root on a huge range of distros. Still found unpatched on
+  legacy and OT-adjacent systems.
+
+CVE-2019-14287 (runas bypass):
+  The "-u#-1" bug. Only relevant when a sudoers rule allows
+  running as any user except root - the bypass turns "not
+  root" into root via integer wraparound. Simple, no exploit
+  binary needed - just a sudo command-line trick.
+
+CVE-2023-22809 (sudoedit):
+  EDITOR variable injection allows editing arbitrary files
+  (like /etc/sudoers or /etc/shadow) as root via sudoedit.
+
+Sudo token reuse (not a CVE - design abuse):
+  sudo caches credentials for ~15 min in /run/sudo/ts/.
+  If an attacker controls a process owned by a user who
+  recently sudo'd, they can ptrace-inject and reuse the
+  cached token - root with no password.
+  Tooling: sudo_inject (github), "sudo token" technique.
+
+Enumeration/exploitation tooling:
+  sudo_killer     - detects vulnerable sudo + misconfig
+  LinPEAS         - flags sudo version against CVEs
+  linux-exploit-suggester - maps sudo version to CVEs
+
+Threat actor use:
+  Baron Samedit was rapidly adopted by cryptomining crews
+  and is a staple in commodity Linux LPE toolchains. Token
+  reuse is more targeted/manual but documented in hands-on
+  intrusions.
+
+Companion row: sudoers misconfiguration abuse (GTFOBins).`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_sudo_cve_2019_14287_runas_bypass.yml
+- proc_creation_lnx_sudoedit_cve_2021_3156.yml
+- proc_creation_lnx_sudo_token_reuse_ptrace.yml
+
+Elastic detection rules:
+- Sudo Privilege Escalation via -u#-1 (CVE-2019-14287)
+- Potential Baron Samedit Exploitation
+- ptrace Process Injection
+
+Patch verification (primary control):
+  sudo --version  (need >= 1.9.5p2 for Baron Samedit)
+  dpkg -l sudo / rpm -q sudo
+  Map version to CVE list
+
+Auditd:
+  -a always,exit -F arch=b64 -S execve -F path=/usr/bin/sudo -k sudo_exec
+  -a always,exit -F arch=b64 -S ptrace -k ptrace_call
+  -w /run/sudo/ts -p wa -k sudo_token
+  ausearch -k sudo_exec | grep -E "u#-1|4294967295"
+
+Disable ptrace (mitigates token reuse + injection):
+  sysctl kernel.yama.ptrace_scope=1  (or 2/3 for stricter)
+  /etc/sysctl.d/10-ptrace.conf
+
+Falco:
+  rule: Sudo Potential Privilege Escalation
+  rule: PTRACE attached to process (token reuse / injection)
+
+Sudo hardening:
+  Defaults timestamp_timeout=0   (disable credential caching;
+    eliminates token reuse entirely, at a usability cost)
+  Defaults !tty_tickets removed  (per-tty tickets reduce reuse)
+
+Lynis / OpenSCAP:
+  Flag vulnerable sudo versions and weak timestamp settings
+
+Atomic Red Team:
+  T1548.003 - includes sudo caching/token abuse tests`,
+        notes: "Sudo binary vulnerabilities complement sudoers misconfiguration as a root path, and Baron Samedit (CVE-2021-3156) is the standout: a heap-based buffer overflow in sudo's argument parsing that any local user can trigger with no sudo rights whatsoever, fixed only in sudo 1.9.5p2 (January 2021). It is reliable, leaves a segfault trace in kernel logs when exploitation is attempted, and remains unpatched on many legacy and OT-adjacent systems where sudo is rarely updated - making version verification the primary control. CVE-2019-14287 is a narrower but elegant bug: when a sudoers rule grants a user the right to run a command as any user except root (a pattern administrators sometimes use thinking it is safe), the user can specify -u#-1, which wraps around to UID 0, bypassing the restriction with nothing more than a command-line trick. Sudo token reuse is a design-level abuse rather than a CVE: sudo caches credentials for roughly 15 minutes in /run/sudo/ts/, so an attacker who controls a process owned by a user with a valid timestamp can ptrace-inject into it and run sudo without a password. The two most effective hardening controls beyond patching are setting kernel.yama.ptrace_scope to 1 or higher (which blocks the ptrace injection underlying token reuse) and setting timestamp_timeout=0 in sudoers (which disables credential caching entirely). For detection, watch for sudo invoked with -u#-1 or -u#4294967295, sudo/sudoedit segfaults in kernel logs, and ptrace of shell processes followed by sudo execution.",
+        apt: [
+          { cls: "apt-mul", name: "Cryptomining crews", note: "Baron Samedit (CVE-2021-3156) rapidly adopted for root on unpatched Linux hosts prior to miner deployment." },
+          { cls: "apt-mul", name: "Commodity Linux LPE", note: "CVE-2021-3156 and CVE-2019-14287 are staples in linux-exploit-suggester, sudo_killer, and LinPEAS output." },
+          { cls: "apt-mul", name: "Hands-on intruders", note: "Sudo token reuse via ptrace injection documented in targeted, interactive Linux intrusions where a privileged user session is present." }
+        ],
+        cite: "MITRE ATT&CK T1548.003"
+      }
+    ]
+  },
+  {
+    id: "T1574.006",
+    name: "Hijack Execution Flow: Dynamic Linker Hijacking",
+    desc: "Privilege escalation via dynamic linker abuse - LD_PRELOAD preserved through sudo env_keep, /etc/ld.so.preload injection into SUID processes, and writable RPATH/RUNPATH or library search paths; the privesc-focused counterpart to T1106 execution-side LD_PRELOAD coverage",
+    rows: [
+      {
+        sub: "T1574.006 - Dynamic Linker Hijacking for Privilege Escalation (LD_PRELOAD / LD_LIBRARY_PATH)",
+        os: "linux",
+        indicator: "Privilege escalation via dynamic linker abuse - LD_PRELOAD preserved through a sudo env_keep rule to load a malicious .so as root, a writable directory in LD_LIBRARY_PATH for a privileged binary, or /etc/ld.so.preload injection affecting SUID processes; the privesc-focused counterpart to the T1106 execution-side coverage",
+        sysmon: `// Sysmon for Linux EID 1 - linker hijack for ESCALATION
+// (privesc angle: malicious lib loaded into a PRIVILEGED process)
+
+// LD_PRELOAD surviving into a sudo/SUID context
+Image=*/sudo AND environment contains LD_PRELOAD
+// (only exploitable if sudoers has env_keep += LD_PRELOAD)
+
+// Privileged binary run with attacker-controlled LD_LIBRARY_PATH
+EventID=1 with environment LD_LIBRARY_PATH pointing to
+  /tmp /dev/shm /home/* (writable) for a root/SUID process
+
+// /etc/ld.so.preload affecting SUID binaries
+// (any .so here loads into SUID-root processes too = root code exec)
+EventID=11 (FileModify)
+TargetFilename matches: /etc/ld.so.preload
+
+// .so dropped then a SUID/sudo binary executed shortly after
+EventID=11 TargetFilename matches: */tmp/*.so OR */dev/shm/*.so
+  followed by sudo/SUID execution loading from that path
+
+// Auditd
+-w /etc/ld.so.preload -p wa -k ldso_preload
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/sudo -k sudo_exec`,
+        kibana: `// LD_PRELOAD present in a sudo invocation environment
+process.name: "sudo"
+AND process.env_vars: *LD_PRELOAD=*
+
+// Privileged process with LD_LIBRARY_PATH to a writable dir
+process.env_vars: (*LD_LIBRARY_PATH=* AND (*tmp* OR *dev/shm* OR */home/*))
+AND user.id: "0"
+
+// /etc/ld.so.preload modification (affects SUID processes)
+event.module: "file_integrity"
+AND file.path: "/etc/ld.so.preload"
+
+// .so in writable path loaded by a root process
+event.module: "auditd"
+AND auditd.data.name: (*/tmp/*.so* OR */dev/shm/*.so*)
+AND auditd.data.euid: "0"
+
+// sudoers env_keep including LD_PRELOAD/LD_LIBRARY_PATH (config risk)
+event.module: "file_integrity"
+AND file.path: (/etc/sudoers OR /etc/sudoers.d/*)
+// then content review for env_keep += "LD_PRELOAD"
+
+// Auditd preload write
+event.module: "auditd"
+AND tags: "ldso_preload" `,
+        powershell: `#!/bin/bash
+# T1574.006 - Dynamic linker hijack (privesc angle) hunt
+
+echo "[*] === sudoers env_keep for LD_* (the escalation enabler) ==="
+grep -rE "env_keep.*(LD_PRELOAD|LD_LIBRARY_PATH)" \\
+  /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -vE "^#"
+echo "  (if LD_PRELOAD is kept, any allowed sudo cmd loads attacker .so as root)"
+
+echo ""
+echo "[*] === /etc/ld.so.preload (affects SUID-root processes) ==="
+if [ -f /etc/ld.so.preload ]; then
+  echo "[CRITICAL] exists:"; cat /etc/ld.so.preload
+  echo "  mtime: $(stat -c '%y' /etc/ld.so.preload)"
+else
+  echo "[OK] does not exist"
+fi
+
+echo ""
+echo "[*] === LD_PRELOAD / LD_LIBRARY_PATH in root process environments ==="
+for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+  owner=$(stat -c '%U' /proc/$pid 2>/dev/null)
+  [ "$owner" = "root" ] || continue
+  ld=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep -E "^LD_PRELOAD=|^LD_LIBRARY_PATH=")
+  if echo "$ld" | grep -qE "(tmp|dev/shm|/home)"; then
+    echo "[FLAG] root PID $pid ($(cat /proc/$pid/comm 2>/dev/null)): $ld"
+  fi
+done
+
+echo ""
+echo "[*] === World-writable dirs in ld.so.conf search paths ==="
+cat /etc/ld.so.conf /etc/ld.so.conf.d/* 2>/dev/null | grep -vE "^#|^include" | \\
+  while read d; do
+    [ -d "$d" ] && [ -w "$d" ] && echo "[FLAG] writable lib dir in search path: $d"
+  done
+
+echo ""
+echo "[*] === .so files in writable paths (preload candidates) ==="
+find /tmp /dev/shm /var/tmp -name "*.so*" -type f 2>/dev/null | head -20
+
+echo ""
+echo "[*] === SUID binaries + their RUNPATH/RPATH (hijackable lib search) ==="
+for f in $(find / -perm -4000 -type f 2>/dev/null); do
+  rpath=$(readelf -d "$f" 2>/dev/null | grep -E "RPATH|RUNPATH")
+  [ -n "$rpath" ] && echo "$f : $rpath"
+done | head -20
+
+echo ""
+echo "[*] === auditd: ld.so.preload writes ==="
+ausearch -k ldso_preload -i --start today 2>/dev/null | tail -20`,
+        registry: `Dynamic linker hijack (privesc) artifacts:
+
+Escalation vectors (distinct from execution-side T1106):
+
+1. sudo env_keep LD_PRELOAD passthrough:
+   /etc/sudoers with: Defaults env_keep += "LD_PRELOAD"
+   Attack: LD_PRELOAD=/tmp/evil.so sudo <allowed-cmd>
+   The .so's constructor runs as root.
+   Artifact: env_keep LD_PRELOAD in sudoers; .so in /tmp.
+
+2. /etc/ld.so.preload affecting SUID binaries:
+   Any .so listed loads into EVERY process - including
+   SUID-root binaries. So a low-priv attacker who can write
+   ld.so.preload (or already has root and wants persistence)
+   gets code execution in root context.
+   Artifact: /etc/ld.so.preload exists (should not on clean host).
+
+3. Writable directory in library search path:
+   /etc/ld.so.conf.d/*.conf listing a writable dir, OR a
+   SUID binary with RPATH/RUNPATH pointing to a writable path.
+   Attacker drops a malicious lib with a name the binary loads.
+   Artifact: writable dir in ld.so.conf paths; RPATH to /tmp etc.
+
+4. RPATH/RUNPATH hijack on SUID binaries:
+   readelf -d <suid_binary> | grep RPATH
+   If RPATH is writable, drop a matching .so name there.
+
+Inspection commands:
+  ldd <binary>              - libraries a binary loads
+  readelf -d <binary>       - RPATH/RUNPATH entries
+  cat /etc/ld.so.conf.d/*   - configured search paths
+  /proc/<pid>/maps          - libs actually mapped in a process
+
+Relationship to T1106:
+  T1106 (Execution) covers LD_PRELOAD for general code exec
+  and userland rootkits (Ebury, Azazel). This row is the
+  privilege-escalation framing: loading attacker code into a
+  PRIVILEGED (root/SUID/sudo) process specifically to escalate.`,
+        tools: `Dynamic linker hijacking for escalation:
+
+The privesc-specific framing:
+  LD_PRELOAD/LD_LIBRARY_PATH are normally stripped for SUID
+  binaries (the linker ignores them for setuid programs - a
+  deliberate security measure). So the escalation paths are
+  the cases where that protection does NOT apply:
+
+  a) sudo with env_keep += LD_PRELOAD - the sudoers admin
+     explicitly preserved it, re-opening the hole. Common
+     misconfiguration. Attacker preloads .so → root.
+  b) /etc/ld.so.preload - a SYSTEM-WIDE preload file that
+     applies even to SUID binaries (it is not the LD_PRELOAD
+     env var, so the setuid protection does not strip it).
+  c) Writable RPATH/RUNPATH or ld.so.conf dir - the binary's
+     own configured search path includes a writable location.
+
+Why SUID strips LD_PRELOAD (and why these bypass it):
+  glibc ignores LD_PRELOAD/LD_LIBRARY_PATH from the environment
+  for setuid binaries. But /etc/ld.so.preload is a file, not
+  an env var, so it still applies. And sudo env_keep re-injects
+  the env var into the privileged process explicitly.
+
+Tooling:
+  LinPEAS    - checks sudo env_keep, ld.so.preload, writable
+               lib paths, and RPATH on SUID binaries
+  GTFOBins   - notes which sudo-allowed binaries pair with
+               LD_PRELOAD env_keep for escalation
+
+Threat actor use:
+  Ebury (the libssl LD_PRELOAD rootkit) is the famous example
+  of linker abuse, though primarily for credential theft and
+  persistence. The sudo env_keep LD_PRELOAD escalation is a
+  classic CTF/pentest finding and appears in real misconfigs.
+
+See T1106 (Execution) for the rootkit/code-exec framing of
+the same mechanism.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_sudo_ld_preload_env_keep.yml
+- file_event_lnx_ld_so_preload_modification.yml
+- proc_creation_lnx_ld_library_path_priv_process.yml
+
+Elastic detection rules:
+- LD_PRELOAD via Sudo env_keep
+- Modification of /etc/ld.so.preload
+- Shared Library Loaded from Writable Path by Root Process
+
+Config audit (primary controls):
+  grep -r env_keep /etc/sudoers /etc/sudoers.d/
+    → remove LD_PRELOAD / LD_LIBRARY_PATH from env_keep
+  Verify /etc/ld.so.preload does not exist
+  Audit RPATH/RUNPATH of SUID binaries (readelf -d)
+  Ensure no writable dirs in ld.so.conf paths
+
+Auditd:
+  -w /etc/ld.so.preload -p wa -k ldso_preload
+  -w /etc/sudoers -p wa -k sudoers
+  -a always,exit -F arch=b64 -S execve -F path=/usr/bin/sudo -k sudo_exec
+
+Falco:
+  rule: Modify /etc/ld.so.preload
+  rule: Sudo with preserved LD_PRELOAD environment
+
+File integrity (AIDE/Tripwire/Wazuh):
+  /etc/ld.so.preload, /etc/ld.so.conf, /etc/ld.so.conf.d/
+  /etc/sudoers, /etc/sudoers.d/  - alert on any change
+
+rkhunter / chkrootkit:
+  Both check /etc/ld.so.preload for rootkit indicators
+
+Atomic Red Team:
+  T1574.006 - dynamic linker hijacking tests`,
+        notes: "Dynamic linker hijacking for privilege escalation is the privesc-focused framing of the LD_PRELOAD mechanism covered on the Execution page under T1106, and the distinction matters because of an important security control: glibc deliberately ignores the LD_PRELOAD and LD_LIBRARY_PATH environment variables for SUID binaries, precisely to prevent trivial escalation. The escalation paths in this row are therefore the specific cases where that protection does not apply. First and most common is sudo with env_keep += LD_PRELOAD: when a sudoers rule explicitly preserves LD_PRELOAD, it re-injects the variable into the privileged process, so an attacker can preload a malicious shared object that executes as root through any allowed sudo command. Second is /etc/ld.so.preload, which is a file rather than an environment variable - the setuid protection does not strip it, so any library listed there loads into SUID-root processes, granting root-context code execution. Third is a writable directory in the library search path (via ld.so.conf or a SUID binary's RPATH/RUNPATH), where the attacker drops a library with a name the privileged binary loads. The primary controls are configuration audits: remove LD_PRELOAD and LD_LIBRARY_PATH from any sudoers env_keep directive, verify /etc/ld.so.preload does not exist, and check the RPATH/RUNPATH of SUID binaries for writable paths. This row cross-references the T1106 Execution coverage, which addresses the same mechanism from the code-execution and userland-rootkit (Ebury, Azazel) perspective.",
+        apt: [
+          { cls: "apt-ru", name: "Ebury / Windigo", note: "Canonical example of dynamic linker abuse (libssl LD_PRELOAD); primarily credential theft/persistence but demonstrates the privileged-process injection mechanism." },
+          { cls: "apt-mul", name: "Pentest / CTF-documented", note: "sudo env_keep LD_PRELOAD escalation is a classic real-world misconfiguration finding, flagged by LinPEAS and GTFOBins." },
+          { cls: "apt-mul", name: "Linux rootkit operators", note: "/etc/ld.so.preload injection used for both root-context execution and persistence across SUID and daemon processes." }
+        ],
+        cite: "MITRE ATT&CK T1574.006"
       }
     ]
   }
