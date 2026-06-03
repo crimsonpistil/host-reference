@@ -2426,5 +2426,1530 @@ Atomic Red Team:
         cite: "MITRE ATT&CK T1562.006"
       }
     ]
+  },
+  {
+    id: "T1014",
+    name: "Rootkit",
+    desc: "Concealment of processes, files, network connections, and the implant itself via three Linux rootkit classes: kernel-mode LKM modules (Diamorphine, Reptile) that hook the syscall table, userland LD_PRELOAD rootkits (Azazel, HiddenWasp) that hook libc, and eBPF rootkits (BPFDoor, Symbiote) that run in-kernel with no module. Because the hooked tools lie, detection relies on discrepancy hunting (lsmod vs /sys/module, /proc walk vs ps, /proc/net/tcp vs ss), dynamic-vs-static differential listing, bpftool program inventory, and out-of-band truth from memory forensics and the module/bpf load event.",
+    rows: [
+      {
+        sub: "T1014 - Kernel-Mode Rootkit (LKM: Diamorphine, Reptile, Adore-ng)",
+        os: "linux",
+        indicator: "A loadable kernel module that hooks the syscall table or uses ftrace to hide processes, files, directories, network connections, and itself from userspace tools (lsmod, ps, ls, ss), typically granting a magic-signal or magic-packet rootshell; the module unlinks itself from the kernel module list so it is invisible to lsmod while still resident",
+        sysmon: `// Sysmon for Linux EID 1 - LKM rootkit load
+// (Catch the LOAD: once hooks are active the rootkit hides itself,
+//  so the module-load event is the highest-value early signal.)
+
+// Module load/unload syscalls + the loader tools
+Image=(*/insmod OR */modprobe OR */kmod) CommandLine matches:
+  *.ko*  (especially from /tmp /dev/shm /home /var/tmp)
+Image=*/rmmod  (rootkits sometimes rmmod legit modules to load theirs)
+
+// Auditd - the authoritative module-operation capture
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k module_ops
+-w /sbin/insmod -p x -k kmod_tools
+-w /sbin/modprobe -p x -k kmod_tools
+-w /sbin/rmmod -p x -k kmod_tools
+-w /etc/modules -p wa -k module_persist
+-w /etc/modules-load.d/ -p wa -k module_persist
+-w /etc/modprobe.d/ -p wa -k module_persist
+
+// Kernel taint transition (loading an unsigned/out-of-tree module
+// flips taint bits - a durable side effect the rootkit cannot hide)
+// monitor /proc/sys/kernel/tainted value changes
+
+// NOTE: cross-ref persistence T1547.006 (LKM persistence) - same
+// load mechanism, here viewed through the rootkit/hiding lens.`,
+        kibana: `// Module load via loader tools from suspicious paths
+process.name: ("insmod" OR "modprobe" OR "kmod")
+AND process.command_line: (*.ko* AND (*/tmp/* OR */dev/shm/* OR */home/* OR */var/tmp/*))
+
+// Auditd module-operation syscalls
+event.module: "auditd"
+AND tags: ("module_ops" OR "kmod_tools" OR "module_persist")
+AND NOT process.name: ("systemd-udevd" OR "dkms" OR "dracut")
+
+// init_module / finit_module by a non-standard parent
+event.module: "auditd"
+AND auditd.data.syscall: ("init_module" OR "finit_module")
+AND NOT process.parent.name: ("systemd" OR "systemd-udevd" OR "kmod")
+
+// Kernel taint change (out-of-tree/unsigned module loaded)
+// (ingest /proc/sys/kernel/tainted via a periodic collector and
+//  alert on any transition, especially bits 12/13 = O/E)
+
+// The discrepancy signals (computed host-side, shipped as events):
+// - module visible in /sys/module but absent from lsmod/proc/modules
+// - a PID accessible under /proc/<pid> but missing from ps output
+// - a port in /proc/net/tcp absent from ss (rootkit hiding C2)`,
+        powershell: `#!/bin/bash
+# T1014 - LKM kernel rootkit hunt
+# Principle: a good LKM rootkit hides from lsmod, so do NOT trust
+# lsmod alone. Hunt for the DISCREPANCIES the hiding creates.
+
+echo "[*] === Kernel taint state (durable side effect of loading) ==="
+t=$(cat /proc/sys/kernel/tainted 2>/dev/null)
+echo "  /proc/sys/kernel/tainted = $t"
+echo "  (bit 12 (4096)=out-of-tree, bit 13 (8192)=unsigned module."
+echo "   nonzero on a stock signed-module host warrants explanation)"
+
+echo ""
+echo "[*] === lsmod vs /sys/module discrepancy (hidden module) ==="
+lsmod 2>/dev/null | awk 'NR>1{print $1}' | sort > /tmp/.lsmod_$$ 2>/dev/null
+ls /sys/module 2>/dev/null | sort > /tmp/.sysmod_$$ 2>/dev/null
+echo "  in /sys/module but NOT in lsmod (suspicious if a real driver):"
+comm -13 /tmp/.lsmod_$$ /tmp/.sysmod_$$ 2>/dev/null | grep -vE "^(acpi|cpu|kernel|firmware|pci|usb|mem|vt|workqueue|module|debug|rcu|block|edac|trace)" | head -20
+rm -f /tmp/.lsmod_$$ /tmp/.sysmod_$$ 2>/dev/null
+
+echo ""
+echo "[*] === Hidden PID discovery (/proc walk vs ps) ==="
+echo "  PIDs present in /proc but missing from ps (rootkit-hidden):"
+ps_pids=$(ps -eo pid --no-headers 2>/dev/null | tr -d ' ' | sort -n)
+for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do
+  echo "$ps_pids" | grep -qx "$p" || echo "[FLAG] /proc/$p exists but not in ps: comm=$(cat /proc/$p/comm 2>/dev/null)"
+done | head -20
+
+echo ""
+echo "[*] === Hidden network port discovery (/proc/net/tcp vs ss) ==="
+echo "  ports in /proc/net/tcp not shown by ss (possible C2 hiding):"
+ss_ports=$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -un)
+awk 'NR>1{print $2}' /proc/net/tcp 2>/dev/null | cut -d: -f2 | while read hx; do
+  [ -n "$hx" ] && printf "%d\\n" "0x$hx" 2>/dev/null
+done | sort -un | while read port; do
+  echo "$ss_ports" | grep -qx "$port" || echo "[FLAG] listening port $port in /proc/net/tcp but hidden from ss"
+done | head -20
+
+echo ""
+echo "[*] === Diamorphine probe (responds to magic signal 31/63/64) ==="
+echo "  (Diamorphine toggles module visibility on kill -31; do NOT"
+echo "   run blindly on prod - documented here for IR awareness)"
+echo "  manual check: dmesg | grep -i diamorphine ; look for magic gid"
+dmesg 2>/dev/null | grep -iE "diamorphine|reptile|adore|rootkit|hooking sys_call" | tail -5
+
+echo ""
+echo "[*] === .ko files in non-standard locations ==="
+find /tmp /dev/shm /var/tmp /home /root -name "*.ko" 2>/dev/null | head
+echo "  module autoload persistence:"
+cat /etc/modules /etc/modules-load.d/*.conf 2>/dev/null | grep -vE "^#|^$" | head
+
+echo ""
+echo "[*] === auditd: recent module load events ==="
+ausearch -k module_ops -i --start today 2>/dev/null | grep -ivE "comm=.(systemd-udevd|dkms|dracut)" | tail -15`,
+        registry: `LKM kernel rootkit artifacts:
+
+Mechanism:
+  A .ko module is loaded (insmod/modprobe/init_module) and then
+  hooks the syscall table or uses ftrace/kprobes to intercept
+  getdents (hide files), read of /proc (hide PIDs), tcp/udp
+  seq_show (hide ports), and the module list (hide itself).
+  Userspace tools that go through these syscalls are blinded.
+
+Known families:
+  Diamorphine - widely abused open-source LKM (signal 31 toggles
+    hiding, magic gid for rootshell); seen in cryptomining intrusions
+  Reptile     - feature-rich (hidden files/procs/ports, magic
+    packet C2 via netfilter hook); used by several crews
+  Adore-ng    - classic VFS-hooking rootkit lineage
+  Suterusu, Knark, Snakso, Rootkit-Spy - other lineages
+
+On-disk artifacts:
+  the .ko file (often staged in /tmp, /dev/shm, /var/tmp, or
+    dropped into /lib/modules/<kver>/ to look legitimate)
+  /etc/modules , /etc/modules-load.d/*.conf - boot autoload
+  /etc/modprobe.d/* - alias/options for stealthy loading
+  loader/dropper script that compiles (gcc + kernel headers) or
+    insmods the module
+
+The detection principle (do not trust hooked tools):
+  Because the rootkit hides from lsmod/ps/ls/ss, those tools lie.
+  Hunt the DISCREPANCIES the hiding creates:
+    /sys/module entry with no matching lsmod line
+    /proc/<pid> dir for a PID that ps does not list
+    a port in /proc/net/tcp that ss does not show
+    /proc/sys/kernel/tainted nonzero (out-of-tree/unsigned bits)
+  And use OUT-OF-BAND truth: memory forensics (Volatility
+  linux_check_syscall, linux_check_modules), and comparison
+  against a known-good kernel symbol table.
+
+Durable tells the rootkit cannot easily hide:
+  kernel taint flags (set at load, persist until reboot)
+  dmesg load message (if not suppressed)
+  the init_module/finit_module audit event (if shipped off-box
+    before hooks activate)
+  memory image (the module IS resident even when list-hidden)
+
+Cross-reference:
+  Persistence T1547.006 covers the SAME load mechanism from the
+  persistence angle; this row is the rootkit/hiding lens.`,
+        tools: `Kernel-mode (LKM) rootkits:
+
+The most powerful Linux rootkit class: running in ring 0, the
+module can rewrite what every userspace tool sees. Once loaded
+and hooked, ps, ls, lsmod, ss, and even find are unreliable -
+they ask the kernel, and the kernel lies. This is why naive
+host triage fails against a competent LKM rootkit.
+
+How they hide:
+  Syscall-table or ftrace hooks intercept getdents64 (files),
+  the /proc readers (PIDs), tcp4/6_seq_show (ports), and the
+  module list iterator (itself). Filenames/PIDs/ports matching
+  a magic prefix or value are filtered out of results.
+
+The hunter's response - distrust and cross-check:
+  Never conclude "clean" from lsmod/ps alone. The reliable hunts
+  are DISCREPANCY hunts and OUT-OF-BAND truth:
+    walk /proc directly and diff against ps (hidden PIDs)
+    read /proc/net/tcp and diff against ss (hidden ports)
+    diff /sys/module against lsmod (hidden module)
+    check kernel taint (load leaves bits set)
+    acquire a memory image and run Volatility's linux_check_*
+    plugins, which read kernel structures the hooks do not cover
+  And catch the LOAD: if the init_module audit event ships
+  off-box the instant it fires, you have proof of load even
+  after the rootkit hides itself.
+
+OT/ICS relevance:
+  LKM rootkits require matching kernel headers or a prebuilt .ko
+  for the exact kernel - in static OT fleets running a known
+  kernel, a single tailored .ko can be reused widely, and the
+  sparse monitoring means dwell time is long. Taint-flag and
+  module-load monitoring are cheap, high-value controls there.
+
+Threat actor use:
+  Drovorub (GRU/APT28) is a full LKM rootkit (kernel module +
+  agent + C2) documented in a 2020 NSA/FBI advisory. Mélofée
+  (China-nexus) is a Linux kernel-rootkit-bearing implant.
+  Diamorphine and Reptile are repeatedly bolted onto commodity
+  cryptomining and ELF-backdoor operations.`,
+        ossdetect: `Sigma rules:
+- lnx_auditd_kernel_module_load.yml
+- proc_creation_lnx_insmod_suspicious_path.yml
+- lnx_kernel_taint_change.yml
+
+Elastic detection rules:
+- Kernel Module Loaded via insmod/modprobe
+- Suspicious Kernel Module from Temp Directory
+
+Auditd (catch the load before hooks activate):
+  -a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k module_ops
+  -w /etc/modules -p wa -k module_persist
+  Ship off-box immediately; the load event predates the hiding.
+
+Falco:
+  rule: Linux Kernel Module Injection / insmod
+  rule: Load Kernel Module (kmod)
+  Falco's own kernel source still sees the load attempt.
+
+Dedicated rootkit scanners (best-effort, signature-based):
+  rkhunter, chkrootkit - known-family signatures + checks
+  unhide - cross-checks /proc, ps, and syscalls for hidden PIDs
+  OSSEC/Wazuh rootcheck - rootkit DB + anomaly checks
+
+Memory forensics (out-of-band truth, the strongest):
+  Volatility/Volatility3 Linux: linux_check_syscall,
+  linux_check_modules, linux_hidden_modules, linux_check_afinfo
+  AVML / LiME for acquisition. Reads kernel structures the
+  userspace hooks cannot filter.
+
+Kernel hardening / tamper-evidence:
+  module signature enforcement (CONFIG_MODULE_SIG_FORCE,
+    enforce via secure boot / lockdown=integrity)
+  monitor /proc/sys/kernel/tainted for transitions
+  kernel.modules_disabled=1 after boot (no further module loads)
+
+Tetragon / Tracee (eBPF-based runtime sensors):
+  observe init_module and the loader exec at the kernel level
+
+Atomic Red Team:
+  T1014 - rootkit / kernel module load tests`,
+        notes: "Kernel-mode LKM rootkits are the most powerful Linux rootkit class because, running in ring 0, the module rewrites what every userspace tool sees: once loaded and hooked, ps, ls, lsmod, ss, and find ask the kernel and the kernel lies, which is why naive host triage fails against a competent LKM rootkit. They hide by hooking the syscall table or using ftrace to intercept getdents64 (files), the /proc readers (PIDs), tcp_seq_show (ports), and the module-list iterator (themselves), filtering out anything matching a magic prefix or value. The hunter's response is to distrust the hooked tools and cross-check: walk /proc directly and diff against ps to find hidden PIDs, read /proc/net/tcp and diff against ss for hidden ports, diff /sys/module against lsmod for the hidden module, and check /proc/sys/kernel/tainted because loading an out-of-tree or unsigned module sets taint bits that persist until reboot and that the rootkit cannot easily hide. The strongest out-of-band truth is memory forensics, where Volatility's linux_check_syscall, linux_check_modules, and linux_hidden_modules read kernel structures the userspace hooks do not cover. The decisive early control is catching the load itself: if the init_module audit event ships off-box the instant it fires, you have proof of load even after the rootkit hides itself. This is especially relevant in OT and ICS fleets, where a single tailored .ko built for a known static kernel can be reused widely and sparse monitoring means long dwell time, making taint-flag and module-load monitoring cheap, high-value controls. This row is the rootkit/hiding lens on the same load mechanism that persistence T1547.006 covers from the persistence angle.",
+        apt: [
+          { cls: "apt-ru", name: "APT28 (Drovorub)", note: "GRU 85th GTsSS Linux LKM rootkit (kernel module plus agent and C2) documented in a 2020 NSA/FBI advisory; hides files, processes, and sockets." },
+          { cls: "apt-cn", name: "Mélofée / Winnti-adjacent", note: "China-nexus Linux implant family bearing kernel-mode rootkit components for stealthy server persistence." },
+          { cls: "apt-mul", name: "Diamorphine / Reptile users", note: "Open-source LKM rootkits repeatedly bolted onto commodity cryptomining and ELF-backdoor intrusions for process/file/port hiding." }
+        ],
+        cite: "MITRE ATT&CK T1014"
+      },
+      {
+        sub: "T1014 - Userland Rootkit (LD_PRELOAD / ld.so.preload: Azazel, Jynx, HiddenWasp)",
+        os: "linux",
+        indicator: "A shared object force-loaded into processes via /etc/ld.so.preload or the LD_PRELOAD variable that hooks libc functions (readdir/readdir64, open, stat, access, the /proc readers) to hide files, processes, and connections from any dynamically-linked tool, without touching the kernel; effective against ls/ps/netstat but bypassed by statically-linked tools",
+        sysmon: `// Sysmon for Linux EID 1 - userland rootkit (preload hooking)
+
+// The keystone artifact: /etc/ld.so.preload write/creation
+// (on most systems this file should NOT exist at all)
+Image=(*/tee OR */sed OR */cp OR */mv OR */echo) CommandLine matches:
+  */etc/ld.so.preload*
+CommandLine matches: *> /etc/ld.so.preload*  *>> /etc/ld.so.preload*
+
+// LD_PRELOAD export in shell rc / profile (per-process variant)
+Image=(*/vi OR */vim OR */nano OR */sed OR */tee) CommandLine matches:
+  *.bashrc*  *.bash_profile*  */etc/profile*  */etc/environment*
+  with content matching *LD_PRELOAD*
+
+// .so dropped into library paths or writable dirs then preloaded
+Image=(*/cp OR */mv OR */gcc) CommandLine matches:
+  *.so* in /lib /usr/lib /tmp /dev/shm /var/tmp
+
+// Auditd
+-w /etc/ld.so.preload -p wa -k ldso_preload
+-w /etc/ld.so.conf -p wa -k ldso_conf
+-w /etc/ld.so.conf.d/ -p wa -k ldso_conf
+-w /etc/environment -p wa -k env_preload
+
+// Cross-ref: execution T1106 (LD_PRELOAD injection) and privesc
+// T1574.006 (linker hijack) touch the SAME files - here it is
+// the persistent system-wide HIDING use.`,
+        kibana: `// /etc/ld.so.preload modification (the primary tell)
+event.module: "auditd"
+AND tags: "ldso_preload"
+
+process.command_line: (
+  *"/etc/ld.so.preload"* OR
+  (*LD_PRELOAD* AND (*.bashrc* OR */etc/profile* OR */etc/environment*))
+)
+
+// LD_PRELOAD present in a process environment unexpectedly
+// (collect /proc/<pid>/environ and flag LD_PRELOAD set on daemons
+//  that should never have it, e.g. sshd, cron)
+process.env: *LD_PRELOAD*
+AND process.name: ("sshd" OR "cron" OR "systemd" OR "nginx")
+
+// .so written to a library or writable path
+event.module: "file_integrity"
+AND file.extension: "so"
+AND file.path: (*/etc/ld.so.preload* OR */tmp/* OR */dev/shm/* OR */usr/lib/*)
+AND event.action: ("created" OR "updated")
+
+// Discrepancy signal: a dynamically-linked tool (ls) and a
+// statically-linked equivalent (busybox) disagree about a
+// directory's contents -> libc-level hiding in effect.`,
+        powershell: `#!/bin/bash
+# T1014 - Userland (LD_PRELOAD) rootkit hunt
+# Principle: preload rootkits hook libc, so dynamically-linked
+# tools lie. Compare them against statically-linked truth.
+
+echo "[*] === /etc/ld.so.preload (should normally be absent/empty) ==="
+if [ -s /etc/ld.so.preload ]; then
+  echo "[FLAG] /etc/ld.so.preload is present and non-empty:"
+  cat /etc/ld.so.preload
+  echo "  mtime=$(stat -c '%y' /etc/ld.so.preload 2>/dev/null)"
+  for so in $(grep -vE '^#|^$' /etc/ld.so.preload 2>/dev/null); do
+    [ -e "$so" ] && echo "    -> $so | $(stat -c '%y' "$so" 2>/dev/null)"
+  done
+else
+  echo "  absent or empty (expected baseline)"
+fi
+
+echo ""
+echo "[*] === LD_PRELOAD in shells / system env ==="
+grep -rEn "LD_PRELOAD" /etc/profile /etc/profile.d/ /etc/environment \\
+  /etc/bash.bashrc /root/.bashrc /home/*/.bashrc 2>/dev/null | grep -v "^#"
+echo "  ld.so.conf.d entries pointing at writable dirs:"
+cat /etc/ld.so.conf.d/*.conf 2>/dev/null | grep -vE '^#|^$' | while read d; do
+  [ -d "$d" ] && [ -w "$d" ] && echo "[FLAG] world/owner-writable lib dir in linker path: $d"
+done
+
+echo ""
+echo "[*] === LD_PRELOAD set in running process environments ==="
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  pre=$(tr '\\0' '\\n' < /proc/$pid/environ 2>/dev/null | grep '^LD_PRELOAD=')
+  [ -n "$pre" ] && echo "[FLAG] PID $pid ($(cat /proc/$pid/comm 2>/dev/null)): $pre"
+done | head -20
+
+echo ""
+echo "[*] === Dynamic-vs-static directory listing discrepancy ==="
+echo "  (preload hooks readdir in libc; static busybox bypasses it)"
+STATIC=""
+for cand in /bin/busybox /usr/bin/busybox; do [ -x "$cand" ] && STATIC="$cand"; done
+if [ -n "$STATIC" ]; then
+  for d in /tmp /dev/shm /etc /usr/bin; do
+    a=$(ls -a "$d" 2>/dev/null | sort)
+    b=$($STATIC ls -a "$d" 2>/dev/null | sort)
+    diff <(echo "$a") <(echo "$b") >/dev/null 2>&1 || \\
+      { echo "[FLAG] ls vs busybox ls disagree in $d:"; diff <(echo "$a") <(echo "$b") | head; }
+  done
+else
+  echo "  no static busybox available; alt: compare 'ls' to shell glob"
+  echo "  e.g.  for f in /tmp/* /tmp/.*; do echo \\\\$f; done   vs   ls -a /tmp"
+fi
+
+echo ""
+echo "[*] === Hooked libs mapped into common daemons (/proc/<pid>/maps) ==="
+for proc in sshd cron crond nginx; do
+  pid=$(pgrep -x "$proc" 2>/dev/null | head -1); [ -z "$pid" ] && continue
+  susp=$(grep -E '\\.so' /proc/$pid/maps 2>/dev/null | grep -E '/tmp/|/dev/shm/|/var/tmp/')
+  [ -n "$susp" ] && echo "[FLAG] $proc (PID $pid) maps a .so from a writable path:" && echo "$susp"
+done
+
+echo ""
+echo "[*] === auditd: ld.so.preload tampering ==="
+ausearch -k ldso_preload -i --start today 2>/dev/null | tail -10`,
+        registry: `Userland (LD_PRELOAD) rootkit artifacts:
+
+Mechanism:
+  The dynamic linker preloads a malicious .so into every
+  dynamically-linked process, overriding libc functions. Hooks
+  on readdir/readdir64 hide files; on the /proc-reading paths
+  hide processes; on connection-listing functions hide ports.
+  No kernel module needed - it is pure userspace, so it loads
+  without root-on-kernel and survives on locked-down kernels.
+
+Two load vectors:
+  /etc/ld.so.preload    - SYSTEM-WIDE, persistent, affects every
+                          dynamically-linked binary. Primary tell.
+                          (this file usually does not exist at all)
+  LD_PRELOAD variable   - per-process/per-session; set in shell
+                          rc files, /etc/environment, or wrappers
+
+Known families:
+  Azazel       - anti-debugging userland rootkit, hides via
+                 ld.so.preload, accept()/PAM creds hooks
+  Jynx / Jynx2 - classic LD_PRELOAD rootkit
+  Vlany, beurk - feature-rich userland rootkits
+  HiddenWasp   - China-linked; combined userland rootkit (.so via
+                 ld.so.preload) with a trojan and deployment script
+  (Symbiote combines LD_PRELOAD hiding with eBPF - see eBPF row)
+
+The fundamental weakness (the hunter's lever):
+  Hooks live in libc, so ONLY dynamically-linked, libc-using
+  tools are fooled. A STATICALLY-linked tool (busybox built
+  static, or a custom static binary) calls syscalls directly and
+  sees the truth. The canonical hunt: diff \`ls\` (dynamic, hooked)
+  against \`busybox ls\` (static) - any disagreement = libc hiding.
+  Shell globbing (for f in /tmp/*) can also bypass some hooks.
+
+High-signal indicators:
+  /etc/ld.so.preload exists and is non-empty
+  a .so in ld.so.preload that lives in /tmp, /dev/shm, /usr/lib
+  LD_PRELOAD set in a daemon's /proc/<pid>/environ (sshd, cron)
+  a writable directory present in /etc/ld.so.conf.d paths
+  a daemon mapping a .so from a writable path in /proc/<pid>/maps
+  dynamic-vs-static listing disagreement
+
+Cross-reference:
+  Execution T1106 and privesc T1574.006 abuse the SAME preload
+  files for injection/escalation; this row is the persistent,
+  system-wide HIDING use of the mechanism.`,
+        tools: `Userland LD_PRELOAD rootkits:
+
+The accessible cousin of the LKM rootkit. Instead of touching
+the kernel, the attacker drops a .so and registers it in
+/etc/ld.so.preload (or exports LD_PRELOAD). The linker then
+injects it into every dynamically-linked process, where it
+overrides libc calls to hide files, processes, and network
+activity. It needs no kernel headers and works on hardened,
+signed-module-only kernels - which is exactly why it is popular.
+
+Strengths and the corresponding weakness:
+  Strength: trivial to deploy, kernel-agnostic, hides from all
+  the standard (dynamically-linked) tools an analyst reaches for.
+  Weakness: it can ONLY hook libc, so anything not going through
+  libc sees through it. Statically-linked tools, direct syscalls
+  (strace of getdents), and shell builtins/globs are not fooled.
+  This asymmetry is the entire detection strategy.
+
+The reliable hunts:
+  1. Inspect /etc/ld.so.preload - on a clean system it usually
+     does not exist; any non-empty content is immediately suspect.
+  2. Dynamic-vs-static differential: ls vs busybox-static ls over
+     /tmp, /etc, /dev/shm. Disagreement = active libc hiding.
+  3. Read daemon environments (/proc/<pid>/environ) for an
+     LD_PRELOAD that should not be there, and /proc/<pid>/maps
+     for a .so loaded from a writable path.
+  4. File integrity on ld.so.preload and the linker config dirs.
+
+Why it pairs with other techniques:
+  HiddenWasp and similar implants bundle the userland rootkit
+  with a backdoor and a deployment script; Symbiote pairs
+  LD_PRELOAD hiding with an eBPF packet hook for credential
+  theft and C2. Seeing ld.so.preload tampering is rarely the
+  whole story - pivot to the dropped .so and the loader.
+
+OT/ICS relevance:
+  Because it sidesteps kernel module signing and works on old,
+  unpatched libc, the userland rootkit is well suited to legacy
+  OT Linux. ld.so.preload is a tiny, high-value FIM target there.
+
+Threat actor use:
+  HiddenWasp (China-linked) is the headline userland-rootkit
+  campaign. Azazel/Jynx lineage appears across commodity and
+  targeted Linux intrusions. The technique is decades old and
+  still effective because the standard toolset is dynamic.`,
+        ossdetect: `Sigma rules:
+- lnx_ldso_preload_modification.yml
+- file_event_lnx_shared_object_in_ldso_preload.yml
+- proc_creation_lnx_ld_preload_in_rc.yml
+
+Elastic detection rules:
+- Modification of /etc/ld.so.preload
+- LD_PRELOAD Environment Variable Set for Daemon
+
+Auditd:
+  -w /etc/ld.so.preload -p wa -k ldso_preload
+  -w /etc/ld.so.conf.d/ -p wa -k ldso_conf
+  -w /etc/environment -p wa -k env_preload
+  Tiny, high-signal watches - almost no legitimate writes.
+
+Falco:
+  rule: Write to /etc/ld.so.preload
+  rule: Modify shell configuration with LD_PRELOAD
+
+The differential check (script as a scheduled detection):
+  diff <(ls -a DIR) <(busybox ls -a DIR)  across sensitive dirs
+  any difference => libc-level directory hiding active.
+
+rkhunter / chkrootkit:
+  both specifically inspect /etc/ld.so.preload and known
+  userland-rootkit .so signatures.
+
+File integrity (FIM):
+  AIDE/Tripwire/Wazuh-syscheck on /etc/ld.so.preload,
+  /etc/ld.so.conf, /etc/ld.so.conf.d/, /etc/environment.
+  chattr +i on /etc/ld.so.preload to resist tampering.
+
+osquery:
+  SELECT * FROM file WHERE path='/etc/ld.so.preload';
+  SELECT pid,name,environ FROM processes WHERE environ LIKE '%LD_PRELOAD%';
+  SELECT * FROM process_memory_map WHERE path LIKE '/tmp/%.so';
+
+Atomic Red Team:
+  T1014 / T1574.006 - ld.so.preload abuse tests`,
+        notes: "Userland LD_PRELOAD rootkits are the accessible cousin of the LKM rootkit: instead of touching the kernel, the attacker drops a shared object and registers it in /etc/ld.so.preload (or exports LD_PRELOAD), and the dynamic linker injects it into every dynamically-linked process where it overrides libc calls to hide files, processes, and network activity. It needs no kernel headers and works on hardened signed-module-only kernels, which is exactly why it is popular, and the two vectors are the system-wide /etc/ld.so.preload (the primary tell, since that file usually does not exist on a clean system) and the per-process LD_PRELOAD variable set in shell rc files or /etc/environment. The technique's strength is that it hides from all the standard dynamically-linked tools an analyst reaches for, but its corresponding weakness defines the entire detection strategy: it can only hook libc, so statically-linked tools, direct syscalls, and shell builtins or globs see straight through it. The canonical hunt is a dynamic-versus-static differential, diffing ls against a statically-linked busybox ls over /tmp, /etc, and /dev/shm, where any disagreement indicates active libc hiding. Supporting hunts read daemon environments for an unexpected LD_PRELOAD and /proc/<pid>/maps for a .so loaded from a writable path. Because it sidesteps kernel module signing and works on old unpatched libc, the userland rootkit suits legacy OT Linux, where /etc/ld.so.preload is a tiny, high-value file integrity target best protected with chattr +i. Known families include Azazel, Jynx, Vlany, and beurk, while HiddenWasp is the headline China-linked campaign that bundles the userland rootkit with a backdoor and deployment script. This row is the persistent system-wide hiding use of the same preload files that execution T1106 and privesc T1574.006 abuse for injection and escalation.",
+        apt: [
+          { cls: "apt-cn", name: "HiddenWasp", note: "China-linked campaign combining an LD_PRELOAD userland rootkit with a trojan and deployment script for stealthy Linux persistence." },
+          { cls: "apt-mul", name: "Azazel / Jynx lineage", note: "Open-source userland rootkits using ld.so.preload to hook libc and hide files, processes, and connections; reused across intrusions." },
+          { cls: "apt-mul", name: "Symbiote", note: "Pairs LD_PRELOAD-based hiding with an eBPF hook for credential capture and C2; targeted Latin American financial sector." }
+        ],
+        cite: "MITRE ATT&CK T1014"
+      },
+      {
+        sub: "T1014 - eBPF Rootkit / Backdoor (BPFDoor, Symbiote, TripleCross)",
+        os: "linux",
+        indicator: "A malicious eBPF program attached to tracepoints, kprobes, XDP, or socket filters that intercepts syscalls and network traffic to hide activity, capture credentials, or provide magic-packet C2, all without a kernel module so lsmod and /proc/modules stay clean; the loader is often fileless (memfd) and the process name is masqueraded",
+        sysmon: `// Sysmon for Linux EID 1 - eBPF rootkit/backdoor
+// (No kernel MODULE is loaded, so LKM hunts miss it. The signal
+//  is the bpf() syscall and the loaded program inventory.)
+
+// The bpf() syscall - program load, map ops (auditd is key here)
+-a always,exit -F arch=b64 -S bpf -k bpf_ops
+-a always,exit -F arch=b64 -S perf_event_open -k perf_open
+// Capability use that BPF loading requires
+-a always,exit -F arch=b64 -S setsockopt -F a2=50 -k so_attach_bpf
+  (SO_ATTACH_BPF=50 / SO_ATTACH_FILTER=26 on raw sockets)
+
+// Loader exec (often from memfd/anon - cross-ref T1106 fileless)
+Image path matches: *memfd:*  or exe link ends in " (deleted)"
+AND the process opens raw sockets / loads bpf
+
+// BPFDoor-style: a process holding a raw packet socket (AF_PACKET)
+// with a BPF filter, listening for a magic packet
+// Detect via: processes with /proc/net/packet entries that are
+// not expected sniffers (tcpdump/dhclient/wireshark)
+
+// Auditd
+-w /sys/fs/bpf -p wa -k bpf_pin
+// monitor sysctl kernel.unprivileged_bpf_disabled (should be 1)`,
+        kibana: `// bpf() syscall activity (program load / map create)
+event.module: "auditd"
+AND tags: ("bpf_ops" OR "perf_open" OR "so_attach_bpf" OR "bpf_pin")
+AND NOT process.name: ("bpftool" OR "falco" OR "tetragon" OR "cilium-agent"
+  OR "tracee" OR "systemd" OR "tc" OR "ip")
+
+// Loader executing from memfd / deleted path that then calls bpf
+process.executable: (*"memfd:"* OR *"(deleted)"*)
+
+// Process holding an AF_PACKET raw socket that is not a known sniffer
+// (BPFDoor pattern: passive magic-packet listener)
+// enrich /proc/net/packet -> owning PID -> comm
+process.name: *  AND network.type: "packet"
+AND NOT process.name: ("tcpdump" OR "dhclient" OR "wireshark" OR "tshark")
+
+// Unexpected XDP/tc program attached to an interface
+// (collect \`ip link show\` / \`bpftool net\` and alert on programs
+//  not associated with a known CNI / firewall / loadbalancer)
+
+// The inventory-gap signal:
+// bpftool prog list shows a program whose owning process is
+// gone/hidden, or a pinned prog in /sys/fs/bpf with no legit owner.`,
+        powershell: `#!/bin/bash
+# T1014 - eBPF rootkit/backdoor hunt
+# eBPF runs in-kernel WITHOUT a module, so lsmod is clean.
+# Enumerate loaded BPF programs and passive packet listeners.
+
+echo "[*] === Loaded BPF programs (the core inventory) ==="
+if command -v bpftool >/dev/null 2>&1; then
+  bpftool prog show 2>/dev/null | grep -E "kprobe|kretprobe|tracepoint|raw_tracepoint|xdp|sched_cls|socket_filter|cgroup" | head -40
+  echo "  --- pinned BPF objects ---"
+  ls -la /sys/fs/bpf/ 2>/dev/null
+  echo "  --- BPF programs attached to interfaces (XDP/tc) ---"
+  bpftool net show 2>/dev/null | head -20
+else
+  echo "  bpftool not installed. Fallbacks:"
+  echo "  - ls /sys/fs/bpf/  (pinned programs)"
+  ls -la /sys/fs/bpf/ 2>/dev/null
+  echo "  - ip link show | grep -i xdp  (XDP on interfaces)"
+  ip link show 2>/dev/null | grep -iE "xdp|prog"
+fi
+
+echo ""
+echo "[*] === XDP programs attached to interfaces ==="
+ip -d link show 2>/dev/null | grep -iE "xdp|xdpgeneric|prog/id" | head
+
+echo ""
+echo "[*] === Passive packet listeners (BPFDoor pattern) ==="
+echo "  AF_PACKET raw sockets and their owning processes:"
+# map /proc/net/packet inode -> process fd
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  comm=$(cat /proc/$pid/comm 2>/dev/null)
+  for fd in /proc/$pid/fd/*; do
+    link=$(readlink "$fd" 2>/dev/null)
+    case "$link" in
+      socket:*)
+        # check if this socket is a packet socket via fdinfo
+        ;;
+    esac
+  done 2>/dev/null
+  # simpler: flag procs with raw socket capability that aren't known sniffers
+done
+ss -0 -p 2>/dev/null | grep -vE "tcpdump|dhclient|wpa_supplicant|chrony" | head -15
+echo "  (a non-sniffer process holding a raw/packet socket = suspect listener)"
+
+echo ""
+echo "[*] === Processes holding BPF prog/map file descriptors ==="
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  bpf=$(ls -l /proc/$pid/fd/ 2>/dev/null | grep -iE "bpf-prog|bpf-map|bpf_prog")
+  if [ -n "$bpf" ]; then
+    comm=$(cat /proc/$pid/comm 2>/dev/null)
+    case "$comm" in
+      bpftool|falco|tetragon|cilium*|tracee|systemd) ;;
+      *) echo "[FLAG] PID $pid ($comm) holds BPF fds:"; echo "$bpf" | head -3 ;;
+    esac
+  fi
+done | head -20
+
+echo ""
+echo "[*] === BPF hardening posture ==="
+echo "  kernel.unprivileged_bpf_disabled = $(sysctl -n kernel.unprivileged_bpf_disabled 2>/dev/null) (want 1 or 2)"
+echo "  net.core.bpf_jit_harden        = $(sysctl -n net.core.bpf_jit_harden 2>/dev/null)"
+echo "  BPF LSM present: $(grep -o 'bpf' /sys/kernel/security/lsm 2>/dev/null || echo 'no')"
+
+echo ""
+echo "[*] === Loaders running from deleted/memfd images (fileless) ==="
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  exe=$(readlink /proc/$pid/exe 2>/dev/null)
+  echo "$exe" | grep -qE "memfd:|\\(deleted\\)" && \\
+    echo "[FLAG] PID $pid ($(cat /proc/$pid/comm 2>/dev/null)) exe=$exe"
+done | head
+
+echo ""
+echo "[*] === auditd: bpf syscall activity ==="
+ausearch -k bpf_ops -i --start today 2>/dev/null | grep -ivE "comm=.(bpftool|falco|tetragon|cilium|tracee)" | tail -15`,
+        registry: `eBPF rootkit / backdoor artifacts:
+
+Why this is the hardest class:
+  eBPF is a legitimate, built-in kernel feature (used by Falco,
+  Cilium, Tetragon, modern EDR). A malicious eBPF program runs
+  IN-KERNEL but loads NO module - so lsmod, /proc/modules, and
+  classic LKM rootkit hunts are all clean. There is often NO
+  persistent on-disk artifact: the loader runs from memfd and
+  the program lives in kernel memory.
+
+Capabilities abused:
+  kprobes / tracepoints  - intercept/alter syscall results
+                           (hide files, processes, tamper returns)
+  XDP / tc / socket filt - inspect/redirect/drop packets at the
+                           NIC; implement magic-packet triggers
+  BPF maps               - store hidden state, config, stolen creds
+  helper abuse           - bpf_probe_write_user (tamper userspace)
+
+Known families:
+  BPFDoor (Red Menshen / DecisiveArchitect, China-nexus) - passive
+    backdoor using a BPF packet filter on a raw socket; sleeps
+    until a MAGIC PACKET arrives (no listening port to scan),
+    then spawns a shell. Masquerades its process name. Famous for
+    multi-year dwell in telco/ISP networks.
+  Symbiote - LD_PRELOAD hiding + eBPF for credential capture and
+    traffic hiding (targeted Latin American banks)
+  TripleCross, ebpfkit, boopkit, Pamspy - research/PoC eBPF
+    rootkits demonstrating syscall hooking and magic-packet C2
+
+The detection surface (since disk/LKM signals are absent):
+  bpftool prog show / map show     - enumerate ALL loaded programs;
+                                     flag types (kprobe/xdp/socket)
+                                     not owned by a known tool
+  /sys/fs/bpf/                      - pinned BPF objects
+  ip -d link show / bpftool net     - XDP/tc programs on interfaces
+  AF_PACKET raw sockets             - via ss -0 / /proc/net/packet;
+                                     a passive listener that is not
+                                     tcpdump/dhclient = BPFDoor-like
+  /proc/<pid>/fd                    - processes holding bpf-prog/map fds
+  the bpf() syscall                 - auditd -S bpf (the load event)
+  loader from memfd/(deleted)       - fileless dropper tell
+
+BPFDoor specifics worth knowing:
+  no open port (passive sniff), survives reboots via init/cron,
+  often renamed to a kernel-thread-like or system name (cross-ref
+  T1036.005), responds only to attacker-crafted magic packets -
+  so port-scan and netflow-only approaches miss it; the host-side
+  raw-socket + BPF-filter inventory is what catches it.
+
+Hardening:
+  kernel.unprivileged_bpf_disabled = 1 (or 2)
+  BPF LSM (CONFIG_BPF_LSM) + bpftool to baseline allowed programs
+  net.core.bpf_jit_harden = 2
+  the irony/risk: many EDRs ARE eBPF, so allow-listing must
+  distinguish defender programs from intruder programs.`,
+        tools: `eBPF rootkits and backdoors:
+
+The most modern and most evasive Linux rootkit class. eBPF lets
+unprivileged-ish code run safely in the kernel, and defenders
+love it (Falco, Tetragon, Cilium, many EDRs are eBPF). Attackers
+realized the same primitive hides activity and backdoors hosts
+with NO kernel module and often NO disk artifact - defeating
+every LKM-oriented hunt at once.
+
+What makes it so hard:
+  - lsmod/proc/modules are clean (no module loaded)
+  - the loader can run from memfd and self-delete (fileless)
+  - the program lives in kernel memory, attached to a kprobe,
+    tracepoint, XDP hook, or socket filter
+  - BPFDoor specifically opens NO listening port: it passively
+    sniffs with a BPF filter and wakes on a magic packet, so
+    nmap and netstat show nothing to find
+
+The detection inversion:
+  Since the usual artifacts are absent, you hunt the eBPF
+  subsystem directly. bpftool prog show / map show / net show
+  enumerate everything loaded; the question becomes "is this
+  program owned by a tool I deployed?" Baseline your legitimate
+  eBPF (the EDR, the CNI) and treat unexplained kprobe/socket/
+  xdp programs as suspect. For BPFDoor-class backdoors, the
+  host-side tell is a process holding an AF_PACKET raw socket
+  with a BPF filter that is NOT a known sniffer - found via
+  ss -0 / /proc/net/packet, not via port scanning.
+
+Catch the load:
+  Auditing the bpf() syscall records program loads as they
+  happen. Shipped off-box, that event survives the fileless
+  loader's self-deletion and the program's in-memory residence.
+
+OT/ICS relevance (high):
+  eBPF backdoors are portless and quiet - ideal for the long,
+  low-noise dwell that OT-targeting actors prefer, and they sit
+  below the application layer where ICS monitoring rarely looks.
+  BPFDoor's documented multi-year telco dwell is the cautionary
+  case. Baselining loaded BPF programs on critical Linux hosts,
+  and disabling unprivileged BPF, are proportionate controls.
+
+Threat actor use:
+  BPFDoor (China-nexus, Red Menshen) is the defining example -
+  years of stealthy access to telecommunications and ISP Linux
+  servers via magic-packet eBPF C2. Symbiote paired eBPF with
+  LD_PRELOAD against financial targets. A growing PoC ecosystem
+  (TripleCross, ebpfkit) lowers the bar for the technique.`,
+        ossdetect: `Sigma rules:
+- lnx_auditd_bpf_syscall_load.yml
+- proc_creation_lnx_bpfdoor_packet_listener.yml
+- lnx_unexpected_xdp_program_attach.yml
+
+Elastic detection rules:
+- eBPF Program Loaded via bpf() Syscall
+- Suspicious AF_PACKET Raw Socket (passive backdoor)
+- BPFDoor Magic Packet Listener Behavior
+
+Auditd (the load event - primary, since disk signals are absent):
+  -a always,exit -F arch=b64 -S bpf -k bpf_ops
+  -w /sys/fs/bpf -p wa -k bpf_pin
+  Exclude known loaders (bpftool/falco/tetragon/cilium/tracee).
+
+bpftool (the core enumeration tool):
+  bpftool prog show     - all loaded programs + types + owner pid
+  bpftool map show      - all maps
+  bpftool net show      - XDP/tc attachments per interface
+  Baseline legitimate programs; alert on unexplained ones.
+
+Falco / Tetragon / Tracee (eBPF defenders watching eBPF):
+  Falco: rule for bpf() program load and raw-socket creation
+  Tetragon/Tracee observe bpf() and socket attach at kernel level
+  (allow-list the defender's own programs to avoid self-flagging)
+
+BPFDoor-specific detection:
+  hunt AF_PACKET sockets held by non-sniffer processes
+  (ss -0 -p ; /proc/net/packet) - the portless listener tell
+  community BPFDoor scanners / YARA for the loader
+
+Hardening / posture:
+  sysctl kernel.unprivileged_bpf_disabled=1 (or 2)
+  net.core.bpf_jit_harden=2
+  enable BPF LSM and baseline allowed programs
+  monitor for new pinned objects in /sys/fs/bpf
+
+osquery (limited native eBPF visibility - augment with bpftool):
+  SELECT pid,name FROM processes WHERE ...;  (correlate raw-socket holders)
+
+Atomic Red Team / PoC harnesses:
+  TripleCross, ebpfkit provide test programs for validating
+  bpf-load detections in a lab`,
+        notes: "eBPF rootkits and backdoors are the most modern and most evasive Linux rootkit class because eBPF is a legitimate built-in kernel feature that defenders themselves rely on (Falco, Tetragon, Cilium, and many EDRs are eBPF), and attackers realized the same primitive hides activity and backdoors hosts with no kernel module and often no disk artifact, defeating every LKM-oriented hunt at once. What makes it so hard is that lsmod and /proc/modules stay clean, the loader can run from memfd and self-delete to be fileless, and the program lives in kernel memory attached to a kprobe, tracepoint, XDP hook, or socket filter. The defining example, BPFDoor, opens no listening port at all: it passively sniffs with a BPF filter on a raw socket and wakes only on an attacker-crafted magic packet, so nmap, netstat, and netflow-only approaches show nothing to find, which is how it achieved documented multi-year dwell in telecommunications and ISP networks. The detection strategy inverts the usual approach: since the customary artifacts are absent, you hunt the eBPF subsystem directly with bpftool prog show, map show, and net show to enumerate everything loaded, then ask whether each program is owned by a tool you deployed, baselining the legitimate eBPF (the EDR, the CNI) and treating unexplained kprobe, socket-filter, or XDP programs as suspect. For BPFDoor-class backdoors the host-side tell is a process holding an AF_PACKET raw socket with a BPF filter that is not a known sniffer, found via ss -0 or /proc/net/packet rather than port scanning. The decisive early control is auditing the bpf() syscall so program loads are recorded as they happen and, shipped off-box, survive the fileless loader's self-deletion. This class is especially relevant to OT and ICS because portless, quiet backdoors are ideal for the long low-noise dwell that OT-targeting actors prefer and they sit below the application layer where ICS monitoring rarely looks, making baselining of loaded BPF programs and disabling unprivileged BPF proportionate controls. BPFDoor often masquerades its process name, cross-referencing T1036.005.",
+        apt: [
+          { cls: "apt-cn", name: "BPFDoor (Red Menshen)", note: "China-nexus passive eBPF backdoor using a BPF packet filter and magic-packet C2 with no open port; multi-year stealthy dwell in telco and ISP Linux servers." },
+          { cls: "apt-mul", name: "Symbiote", note: "Combines eBPF traffic hiding and credential capture with LD_PRELOAD-based concealment; targeted Latin American financial institutions." },
+          { cls: "apt-mul", name: "TripleCross / ebpfkit (PoC)", note: "Research eBPF rootkits demonstrating syscall hooking, userspace tampering via bpf_probe_write_user, and magic-packet C2; lower the bar for the technique." }
+        ],
+        cite: "MITRE ATT&CK T1014"
+      }
+    ]
+  },
+  {
+    id: "T1036.005",
+    name: "Masquerading: Match Legitimate Name or Location",
+    desc: "Disguising a malicious process or binary by name and location: a userland process masquerading as a kernel thread ([kworker], [kthreadd]) via argv[0]/prctl, and a payload named like a system daemon (sshd, crond) or planted in a trusted path (/usr/bin, /usr/sbin). Detection is structural, not heuristic: genuine kernel threads have ppid 2 and no exe/cmdline/maps, real daemons run from canonical paths, and system binaries are package-owned, so any violation is the tell.",
+    rows: [
+      {
+        sub: "T1036.005 - Masquerade as Kernel Thread (fake [kworker], argv[0]/prctl spoof)",
+        os: "linux",
+        indicator: "A userland malicious process disguised as a kernel thread by adopting a bracketed name such as [kworker/0:1], [kthreadd], [ksoftirqd/0], [migration/0], or [kswapd0], achieved via argv[0] rewriting or prctl(PR_SET_NAME) so it blends into ps/top output among the genuine kernel workers an analyst skips over",
+        sysmon: `// Sysmon for Linux EID 1 - kernel-thread masquerade
+// (The name is forged, so do NOT hunt by name. Hunt by the
+//  STRUCTURAL impossibility: kernel threads have no userspace exe.)
+
+// Catch the underlying exec from a writable path BEFORE the rename
+Image matches: */tmp/*  */dev/shm/*  */var/tmp/*  */home/*
+  whose process later presents a bracketed [kthread-like] comm
+
+// prctl(PR_SET_NAME) renaming (if syscall auditing enabled)
+-a always,exit -F arch=b64 -S prctl -k prctl_rename
+  (high volume - scope to suspicious parents or use Falco instead)
+
+// The reliable detection is computed host-side and emitted as an
+// event: a process whose comm matches a kernel-thread pattern
+// (^\\[.*\\]$ or kworker/kthreadd/ksoftirqd/migration/kswapd)
+// BUT has a non-empty /proc/<pid>/exe AND ppid != 2.
+
+// Auditd execve from writable dirs (the dropper/loader)
+-a always,exit -F arch=b64 -S execve -F dir=/tmp -k exec_tmp
+-a always,exit -F arch=b64 -S execve -F dir=/dev/shm -k exec_shm`,
+        kibana: `// The structural contradiction (primary detection):
+// process named like a kernel thread but backed by a real file
+process.name: ("kworker*" OR "kthreadd" OR "ksoftirqd*" OR "migration*"
+  OR "kswapd*" OR "kdevtmpfs*" OR "rcu_*" OR "watchdog*")
+AND process.executable: *           // genuine kthreads have NONE
+AND process.parent.pid: (not 2)     // genuine kthreads have ppid 2
+
+// Bracketed comm with a real executable mapping
+process.name: /\\[.*\\]/
+AND process.executable: (*/tmp/* OR */dev/shm/* OR */home/* OR */usr/* OR */var/*)
+
+// Loader exec from writable path that then "becomes" a kthread name
+event.module: "auditd"
+AND tags: ("exec_tmp" OR "exec_shm")
+
+// Enrichment fields to collect per process (drive the rule):
+// - process.executable (readlink /proc/<pid>/exe) : kthread = empty
+// - process.command_line (/proc/<pid>/cmdline)    : kthread = empty
+// - process.parent.pid                            : kthread = 2
+// - has memory maps (/proc/<pid>/maps)            : kthread = empty
+// Any kernel-thread-named process failing these = masquerade.`,
+        powershell: `#!/bin/bash
+# T1036.005 - Kernel-thread masquerade hunt
+# STRUCTURAL truth: genuine kernel threads (a) are children of
+# PID 2 (kthreadd), (b) have an EMPTY /proc/<pid>/exe, (c) have an
+# EMPTY /proc/<pid>/cmdline, (d) have NO memory maps. A process
+# with a kernel-thread name that fails ANY of these is fake.
+
+echo "[*] === Processes with kernel-thread-style names, verified ==="
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  comm=$(cat /proc/$pid/comm 2>/dev/null)
+  # does the name look like a kernel thread?
+  case "$comm" in
+    kworker*|kthreadd|ksoftirqd*|migration*|kswapd*|kdevtmpfs*|rcu_*|watchdog*|kcompactd*|khugepaged|kintegrityd*|\\[*\\]*)
+      ppid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null)
+      exe=$(readlink /proc/$pid/exe 2>/dev/null)
+      cmdline=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null)
+      maps=$(head -1 /proc/$pid/maps 2>/dev/null)
+      fake=0
+      [ -n "$exe" ] && fake=1
+      [ -n "$cmdline" ] && fake=1
+      [ -n "$maps" ] && fake=1
+      [ "$ppid" != "2" ] && [ "$pid" != "2" ] && fake=1
+      if [ "$fake" = "1" ]; then
+        echo "[FLAG] PID $pid comm='$comm' is NOT a real kernel thread:"
+        echo "    ppid=$ppid (real kthread ppid=2)"
+        echo "    exe=$exe (real kthread: empty)"
+        echo "    cmdline='$cmdline' (real kthread: empty)"
+        echo "    has_maps=$([ -n "$maps" ] && echo yes || echo no) (real kthread: no)"
+        [ -n "$exe" ] && echo "    -> recover/inspect: $exe"
+      fi
+      ;;
+  esac
+done
+
+echo ""
+echo "[*] === Quick triage: any [bracketed] proc with a real exe ==="
+ps -eo pid,ppid,comm 2>/dev/null | awk '$3 ~ /^\\[/ {print}' | while read p pp c; do
+  ex=$(readlink /proc/$p/exe 2>/dev/null)
+  [ -n "$ex" ] && echo "[FLAG] PID $p ($c) ppid=$pp has executable: $ex"
+done
+
+echo ""
+echo "[*] === argv[0] vs real executable basename mismatch ==="
+echo "  (process advertises one name in ps but exe basename differs)"
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  comm=$(cat /proc/$pid/comm 2>/dev/null)
+  exe=$(readlink /proc/$pid/exe 2>/dev/null)
+  [ -z "$exe" ] && continue
+  base=$(basename "$exe" 2>/dev/null | sed 's/ (deleted)//')
+  # flag obvious kernel-ish comm with a normal-file exe
+  case "$comm" in
+    kworker*|kthreadd|ksoftirqd*|kswapd*|migration*)
+      echo "[FLAG] PID $pid comm='$comm' but exe basename='$base' path=$exe" ;;
+  esac
+done | head
+
+echo ""
+echo "[*] === Reference: a sample of GENUINE kernel threads (for comparison) ==="
+ps -eo pid,ppid,comm 2>/dev/null | awk '$2==2 {print}' | head -8
+echo "  (note: all genuine ones have ppid=2 and empty exe/cmdline)"
+
+echo ""
+echo "[*] === auditd: execs from writable dirs (loaders) ==="
+ausearch -k exec_tmp -i --start today 2>/dev/null | tail -8
+ausearch -k exec_shm -i --start today 2>/dev/null | tail -8`,
+        registry: `Kernel-thread masquerade artifacts:
+
+The trick:
+  A normal userland malware process sets its displayed name to
+  look like a kernel worker thread - [kworker/0:2], [kthreadd],
+  [ksoftirqd/1], [migration/0], [kswapd0], [kdevtmpfs] - because
+  analysts scanning ps/top mentally filter out the dozens of
+  legitimate bracketed kernel threads and never look closer.
+  Achieved by overwriting argv[0] or calling prctl(PR_SET_NAME).
+
+The structural truth that defeats it (memorize this):
+  GENUINE kernel threads have four properties no userland process
+  can fake without actually being a kernel thread:
+    1. Parent PID = 2 (all kthreads are children of kthreadd/PID2;
+       kthreadd itself is child of PID 0)
+    2. /proc/<pid>/exe is EMPTY (no backing executable file)
+    3. /proc/<pid>/cmdline is EMPTY (kernel threads have no argv)
+    4. /proc/<pid>/maps is EMPTY (no userspace memory mappings)
+  A process presenting a kernel-thread name that has a real exe
+  link, a non-empty cmdline, memory maps, OR a parent other than
+  PID 2 is DEFINITIVELY a masquerading userland process. There is
+  no false positive here - it is a structural impossibility.
+
+High-signal indicators:
+  any [bracketed] process whose /proc/<pid>/exe resolves to a file
+  a "kworker"/"kswapd"-named process with ppid != 2
+  such a process with a backing file in /tmp, /dev/shm, /home
+  argv[0] (comm) not matching the real executable basename
+  the backing file is the actual artifact - recover via
+    cp /proc/<pid>/exe for analysis (works even if path deleted)
+
+Common offenders:
+  cryptominers (XMRig variants) renamed to [kworker] or kthreadd
+  Kinsing's miner dropped as "kdevtmpfsi" (mimics kdevtmpfs)
+  BPFDoor and various ELF backdoors adopt kernel-thread-ish names
+  generic ELF implants using prctl to hide in plain sight
+
+Cross-reference:
+  T1014 eBPF/LKM rootkits often pair with this naming to make the
+  malicious userland component blend in; T1036.005 (binary name/
+  location) is the on-disk sibling of this in-memory disguise.`,
+        tools: `Masquerading as a kernel thread:
+
+One of the highest-return, lowest-effort disguises on Linux, and
+correspondingly one of the most RELIABLE to detect once you know
+the structural tell. The attacker renames a userland process to
+look like a kernel worker - [kworker/...], [kthreadd], [kswapd0] -
+exploiting the fact that ps/top list many genuine bracketed
+kernel threads that analysts habitually ignore.
+
+Why it works on humans, fails on structure:
+  To a person skimming ps output, one more [kworker] is invisible.
+  But kernel threads are not normal processes: they have no
+  userspace executable, no command line, no memory maps, and are
+  all children of PID 2 (kthreadd). A userland process can copy
+  the NAME (argv[0] / prctl PR_SET_NAME) but cannot copy these
+  structural properties without actually being a kernel thread.
+  So the hunt is deterministic: enumerate every process whose
+  name looks like a kernel thread, then check exe/cmdline/maps/
+  ppid. Any that have a real exe or ppid != 2 are fake. Zero
+  false positives - it is a kernel invariant, not a heuristic.
+
+The payoff beyond detection:
+  The masquerading process has a real /proc/<pid>/exe, so you can
+  immediately recover the malware for analysis with a single
+  cp /proc/<pid>/exe - even if the on-disk file was deleted
+  (cross-ref T1070.004). The disguise that hides it from a glance
+  is also the thread that unravels it.
+
+OT/ICS relevance:
+  On OT Linux where an analyst may do hands-on ps triage rather
+  than rely on rich EDR, the [kworker] disguise is exactly the
+  kind of thing a quick look misses - so encoding the structural
+  check (a tiny script or osquery query) as a scheduled hunt is
+  high value. Cryptominers hitting exposed OT-adjacent Linux
+  commonly use this name.
+
+Threat actor use:
+  Pervasive in Linux cryptomining (XMRig/Kinsing/TeamTNT rename
+  to kernel-thread-like names; Kinsing's kdevtmpfsi literally
+  mimics kdevtmpfs). Adopted by ELF backdoors and BPFDoor-class
+  implants to blend the userland component into process listings.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_process_masquerade_kernel_thread.yml
+- lnx_fake_kworker_with_executable.yml
+
+Elastic detection rules:
+- Process Masquerading as Kernel Worker Thread
+- Userland Process with Kernel Thread Name
+
+Falco (well suited to this - has the process context):
+  rule: Userland process masquerading as kernel thread
+    condition: proc name matches kthread pattern AND proc.exe exists
+  Falco sees exe/ppid directly, so this is a clean, low-FP rule.
+
+The structural check as a scheduled hunt (deterministic):
+  for each pid: if comm ~ kthread-pattern AND
+    (readlink /proc/pid/exe nonempty OR ppid != 2 OR cmdline nonempty)
+    => masquerade. No tuning needed; it is a kernel invariant.
+
+osquery:
+  SELECT p.pid, p.name, p.path, p.parent
+  FROM processes p
+  WHERE (p.name LIKE 'kworker%' OR p.name LIKE 'k%d'
+         OR p.name LIKE '[%]')
+    AND p.path != '';        -- real path on a kthread name = fake
+  (kernel threads return empty path; a non-empty path is the tell)
+
+Memory forensics:
+  Volatility linux_pslist vs linux_psaux - the masquerade shows a
+  userland process with a real task_struct exe where a kthread
+  would have none.
+
+YARA / static:
+  scan the recovered /proc/<pid>/exe (miner/backdoor signatures)
+
+Atomic Red Team:
+  T1036.005 - masquerade process name tests (prctl/argv0)`,
+        notes: "Masquerading as a kernel thread is one of the highest-return, lowest-effort disguises on Linux and, once the structural tell is known, one of the most reliable to detect. The attacker renames a userland process to look like a kernel worker such as [kworker/0:2], [kthreadd], [ksoftirqd/1], or [kswapd0] via argv[0] rewriting or prctl(PR_SET_NAME), exploiting the fact that ps and top list dozens of genuine bracketed kernel threads that analysts habitually skip. The trick works on humans but fails on structure, because genuine kernel threads have four properties a userland process cannot fake without actually being a kernel thread: their parent PID is 2 (all kthreads are children of kthreadd), their /proc/<pid>/exe is empty (no backing executable), their /proc/<pid>/cmdline is empty (no argv), and their /proc/<pid>/maps is empty (no userspace memory). A process presenting a kernel-thread name that has a real exe link, a non-empty cmdline, memory maps, or a parent other than PID 2 is definitively a masquerade, and this is a kernel invariant rather than a heuristic, so the detection has zero false positives. The payoff extends beyond detection: the masquerading process has a real /proc/<pid>/exe, so the malware can be recovered for analysis with a single cp /proc/<pid>/exe even if the on-disk file was deleted, meaning the disguise that hides it from a glance is also the thread that unravels it. This matters on OT Linux where an analyst may do hands-on ps triage rather than rely on rich EDR, making the structural check (a tiny script or osquery query) a high-value scheduled hunt. The technique is pervasive in Linux cryptomining, where XMRig, Kinsing, and TeamTNT rename to kernel-thread-like names (Kinsing's kdevtmpfsi literally mimics kdevtmpfs), and it is adopted by ELF backdoors and BPFDoor-class implants to blend the userland component into process listings.",
+        apt: [
+          { cls: "apt-mul", name: "Kinsing", note: "Miner dropped as kdevtmpfsi to mimic the genuine kdevtmpfs kernel thread; pervasive on exposed Linux servers." },
+          { cls: "apt-mul", name: "TeamTNT / XMRig crews", note: "Cryptomining payloads renamed to [kworker], kswapd0, and similar kernel-thread names to evade casual ps review." },
+          { cls: "apt-cn", name: "BPFDoor", note: "Masquerades its userland component with kernel-thread-like or system process names to blend into process listings during long dwell." }
+        ],
+        cite: "MITRE ATT&CK T1036.005"
+      },
+      {
+        sub: "T1036.005 - Match Legitimate Name or Location (system-binary impersonation)",
+        os: "linux",
+        indicator: "A malicious binary given the name of a legitimate system tool (sshd, cron, systemd, dbus-daemon, nginx, agetty) or planted in a trusted directory (/usr/bin, /usr/sbin, /lib) so it blends into the filesystem and process list; may add trailing spaces, unicode homoglyphs, or case changes (crond vs cron) to evade exact-name review",
+        sysmon: `// Sysmon for Linux EID 1 - binary name/location masquerade
+
+// A system-daemon-named process running from the WRONG path
+// (real sshd is /usr/sbin/sshd; an "sshd" elsewhere is fake)
+Image matches: */tmp/sshd  */dev/shm/*  ./systemd  */var/tmp/*
+  with comm in (sshd, cron, crond, systemd, dbus-daemon, nginx,
+                agetty, udevd, rsyslogd)
+
+// New binary created in a system dir by a NON-package process
+Image=(*/cp OR */mv OR */curl OR */wget OR */gcc) target in
+  /usr/bin /usr/sbin /usr/local/bin /lib /bin
+  with parent = shell (not dpkg/rpm/apt)
+
+// Filenames with evasion tricks
+CommandLine matches:
+  *"systemd "*  (trailing space)   *"crond"* near */tmp*
+  unicode/homoglyph variants of system tool names
+
+// Auditd - new executables in system dirs + exec provenance
+-w /usr/bin -p wa -k sysdir_write
+-w /usr/sbin -p wa -k sysdir_write
+-w /usr/local/bin -p wa -k sysdir_write
+-a always,exit -F arch=b64 -S execve -k exec`,
+        kibana: `// Daemon-named process from an unexpected path
+process.name: ("sshd" OR "cron" OR "crond" OR "systemd" OR "dbus-daemon"
+  OR "nginx" OR "agetty" OR "udevd" OR "rsyslogd" OR "init")
+AND NOT process.executable: ("/usr/sbin/*" OR "/usr/bin/*" OR "/sbin/*"
+  OR "/lib/systemd/*" OR "/usr/lib/systemd/*")
+// i.e. a system-daemon name running from /tmp, /home, /dev/shm, cwd
+
+// New file in a system bin dir not attributable to a package mgr
+event.module: "auditd"
+AND tags: "sysdir_write"
+AND NOT process.name: ("dpkg" OR "rpm" OR "yum" OR "dnf" OR "apt"
+  OR "apt-get" OR "pip" OR "pip3")
+
+// Daemon-named process whose PARENT is a shell (not systemd/init)
+process.name: ("sshd" OR "cron" OR "systemd" OR "nginx")
+AND process.parent.name: ("bash" OR "sh" OR "zsh" OR "python*")
+
+// Enrichment to drive package-ownership verification:
+// for each process.executable in a system dir, check whether it
+// is owned by a package (rpm -qf / dpkg -S). Not-owned = suspect.`,
+        powershell: `#!/bin/bash
+# T1036.005 - Binary name/location masquerade hunt
+# Two pillars: (1) PATH expectation - a daemon name from the wrong
+# path is fake; (2) PACKAGE ownership - a system binary owned by no
+# package is suspect.
+
+echo "[*] === Daemon-named processes running from unexpected paths ==="
+for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+  comm=$(cat /proc/$pid/comm 2>/dev/null)
+  exe=$(readlink /proc/$pid/exe 2>/dev/null)
+  [ -z "$exe" ] && continue
+  case "$comm" in
+    sshd|cron|crond|systemd|dbus-daemon|nginx|agetty|udevd|rsyslogd|init|httpd|mysqld)
+      case "$exe" in
+        /usr/sbin/*|/usr/bin/*|/sbin/*|/bin/*|/lib/systemd/*|/usr/lib/systemd/*|/usr/libexec/*) ;;
+        *) echo "[FLAG] '$comm' (PID $pid) runs from unexpected path: $exe" ;;
+      esac
+      ;;
+  esac
+done
+
+echo ""
+echo "[*] === Daemon-named processes whose parent is a shell ==="
+ps -eo pid,ppid,comm 2>/dev/null | while read p pp c; do
+  case "$c" in
+    sshd|cron|crond|systemd|nginx|dbus-daemon)
+      pc=$(cat /proc/$pp/comm 2>/dev/null)
+      case "$pc" in
+        bash|sh|zsh|dash|python*|perl) echo "[FLAG] $c (PID $p) parent is shell '$pc' (PID $pp)" ;;
+      esac ;;
+  esac
+done
+
+echo ""
+echo "[*] === System-dir binaries NOT owned by any package ==="
+echo "  (planted-in-trusted-path trick; RHEL rpm / Debian dpkg)"
+HAVE_RPM=$(command -v rpm 2>/dev/null); HAVE_DPKG=$(command -v dpkg 2>/dev/null)
+for d in /usr/bin /usr/sbin /usr/local/bin /bin /sbin; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    if [ -n "$HAVE_RPM" ]; then
+      rpm -qf "$f" >/dev/null 2>&1 || echo "[FLAG] not owned by rpm: $f"
+    elif [ -n "$HAVE_DPKG" ]; then
+      dpkg -S "$f" >/dev/null 2>&1 || echo "[FLAG] not owned by dpkg: $f"
+    fi
+  done
+done 2>/dev/null | grep -vE "/usr/local/bin" | head -25
+echo "  (note: /usr/local/bin legitimately holds non-packaged admin tools - review, do not assume malice)"
+
+echo ""
+echo "[*] === Filenames with trailing spaces / odd chars in bin dirs ==="
+for d in /usr/bin /usr/sbin /tmp /dev/shm /usr/local/bin; do
+  [ -d "$d" ] || continue
+  ls -1 "$d" 2>/dev/null | grep -nE ' $|[^[:print:]]' && echo "    ^ in $d"
+done | head
+# also detect lookalikes via cat -A on a listing
+ls -1A /tmp /dev/shm 2>/dev/null | cat -A 2>/dev/null | grep -E '\\$$' | grep -vE '^\\$$' | head
+
+echo ""
+echo "[*] === Duplicate system-binary names across the filesystem ==="
+for n in sshd systemd crond nginx; do
+  cnt=$(find / -xdev -name "$n" -type f 2>/dev/null | head -10)
+  multi=$(echo "$cnt" | grep -c .)
+  [ "$multi" -gt 1 ] && { echo "[FLAG] multiple '$n' binaries:"; echo "$cnt"; }
+done
+
+echo ""
+echo "[*] === auditd: writes into system bin dirs by non-package processes ==="
+ausearch -k sysdir_write -i --start today 2>/dev/null | grep -ivE "comm=.(dpkg|rpm|yum|dnf|apt)" | tail -15`,
+        registry: `Binary name / location masquerade artifacts:
+
+Two complementary tricks:
+  NAME:     give the payload the name of a trusted system tool
+            (sshd, crond, systemd, dbus-daemon, nginx, agetty) so
+            it blends into ps and casual file listings.
+  LOCATION: place the payload in a trusted directory (/usr/bin,
+            /usr/sbin, /lib, /usr/local/bin) so its PATH looks
+            legitimate even if the name is novel.
+  Often combined, sometimes with evasion garnishes: a trailing
+  space ("systemd "), unicode homoglyphs, or case changes.
+
+The two structural defenses:
+  1. PATH EXPECTATION - each real daemon has a canonical path
+     (sshd -> /usr/sbin/sshd, systemd -> /lib/systemd/systemd).
+     A process with that NAME running from /tmp, /home, /dev/shm,
+     or the cwd is fake regardless of how right the name looks.
+  2. PACKAGE OWNERSHIP - on RHEL/Debian, legitimate system
+     binaries are owned by a package. rpm -qf / dpkg -S on a
+     binary in /usr/bin or /usr/sbin should return a package.
+     A system-named (or any) executable in those dirs owned by
+     NO package is a strong red flag. (Caveat: /usr/local/bin
+     legitimately holds admin-installed, non-packaged tools.)
+
+High-signal indicators:
+  a daemon-named process whose exe is outside its canonical path
+  a daemon-named process whose parent is a shell, not systemd/init
+  a binary in /usr/bin or /usr/sbin not owned by any package
+  multiple binaries sharing a system name across the filesystem
+  filenames with trailing spaces, non-printable chars, homoglyphs
+  a new file written into a system bin dir by a non-package process
+  mtime of a "system" binary inconsistent with the package (T1070.006)
+
+Recovery / verification:
+  rpm -Va / debsums -c            - flag changed/unowned binaries
+  readlink /proc/<pid>/exe        - the true path of a running fake
+  hash the binary vs the distro's known-good package hash
+  file/strings the binary - a "sshd" that is actually a miner or
+    a statically-linked Go/Rust ELF is obviously not the real sshd
+
+Cross-reference:
+  T1036.005 kernel-thread row = the in-memory naming disguise;
+  this row = the on-disk name/location disguise. T1036.004 applies
+  the same idea to systemd/cron entries. Timestomp (T1070.006) is
+  frequently applied to the planted binary to complete the blend.`,
+        tools: `Matching a legitimate name or location:
+
+This masquerade preys on analyst trust in familiar names and
+trusted paths. A binary called sshd, or one sitting in /usr/sbin,
+reads as "system" to a tired responder. The countermeasures are
+not heuristic - they are two hard expectations the real system
+always satisfies and the fake usually cannot.
+
+Expectation 1 - canonical path:
+  Every core daemon ships at a known location. The genuine sshd
+  is /usr/sbin/sshd; systemd is /lib/systemd/systemd; cron lives
+  at /usr/sbin/cron or /usr/sbin/crond. A process bearing one of
+  these names whose /proc/<pid>/exe points anywhere else - /tmp,
+  /home, /dev/shm, a working directory - is fake, full stop. This
+  alone catches the lazy majority of name masquerades.
+
+Expectation 2 - package provenance:
+  Distribution package managers know which file belongs to which
+  package. rpm -qf <path> or dpkg -S <path> on a binary in a
+  system directory should name an owning package. An executable
+  in /usr/bin or /usr/sbin owned by NOTHING is anomalous. Run
+  rpm -Va / debsums to sweep for unowned or modified binaries.
+  (Temper with judgement: /usr/local/bin is the sanctioned home
+  for admin-installed tools that no package owns - expected there,
+  suspicious in /usr/bin.)
+
+The garnish tricks:
+  Trailing spaces, unicode look-alikes, and case flips ("crond"
+  vs "cron", a Cyrillic homoglyph) defeat naive exact-string
+  review. Listing with cat -A (shows trailing $), and normalizing
+  names, surfaces them. These are most common in /tmp and /dev/shm.
+
+Why it pairs with timestomping:
+  A planted binary in /usr/bin still has a tell: its mtime. So
+  name/location masquerade is routinely finished with a touch -r
+  (T1070.006) to clone a neighbor binary's timestamp. Checking
+  both ownership AND time exposes the pairing.
+
+Threat actor use:
+  Renaming ELF implants to system-daemon names and dropping them
+  into system paths is standard across commodity and targeted
+  Linux intrusions; Kobalos and various backdoors choose blendy
+  names, and miners frequently impersonate system services.`,
+        ossdetect: `Sigma rules:
+- proc_creation_lnx_system_binary_wrong_path.yml
+- proc_creation_lnx_daemon_name_shell_parent.yml
+- file_event_lnx_new_binary_in_system_dir.yml
+
+Elastic detection rules:
+- System Binary Executed from Unusual Location
+- Masquerading System Daemon (name vs path mismatch)
+- New Unowned Executable in System Directory
+
+Auditd:
+  -w /usr/bin -p wa -k sysdir_write
+  -w /usr/sbin -p wa -k sysdir_write
+  -w /usr/local/bin -p wa -k sysdir_write
+  -a always,exit -F arch=b64 -S execve -k exec
+  Correlate execve image path against the canonical daemon paths.
+
+Package verification (the provenance control):
+  rpm -Va    (RHEL) - flags modified/missing/unowned package files
+  debsums -c (Debian) - verifies installed-file checksums
+  Schedule periodically; alert on unowned binaries in system dirs.
+
+Falco:
+  rule: Run system-named binary from unexpected path
+  rule: Program run with disallowed name from /tmp or /dev/shm
+  rule: Write below system binary directory by non-package process
+
+osquery (path + provenance):
+  SELECT pid,name,path,parent FROM processes
+    WHERE name IN ('sshd','cron','systemd','nginx')
+      AND path NOT LIKE '/usr/sbin/%' AND path NOT LIKE '/lib/%';
+  SELECT * FROM rpm_package_files / deb_packages joins to find
+    system-dir files with no package owner.
+
+File integrity (FIM):
+  AIDE/Tripwire/Wazuh on /usr/bin, /usr/sbin, /bin, /sbin, /lib -
+  alert on new/changed binaries; pairs with mtime checks (T1070.006).
+
+Atomic Red Team:
+  T1036.005 - match legitimate name or location tests`,
+        notes: "Matching a legitimate name or location preys on analyst trust in familiar names and trusted paths: a binary called sshd, or one sitting in /usr/sbin, reads as system to a tired responder, and the trick is often combined, sometimes with garnishes like a trailing space, unicode homoglyphs, or case changes such as crond versus cron. The countermeasures are not heuristic but two hard expectations the real system always satisfies and the fake usually cannot. The first is canonical path: every core daemon ships at a known location (genuine sshd is /usr/sbin/sshd, systemd is /lib/systemd/systemd, cron is /usr/sbin/cron or crond), so a process bearing one of these names whose /proc/<pid>/exe points anywhere else such as /tmp, /home, /dev/shm, or a working directory is fake, full stop, and this alone catches the lazy majority of name masquerades. The second is package provenance: distribution package managers know which file belongs to which package, so rpm -qf or dpkg -S on a binary in a system directory should name an owning package, and an executable in /usr/bin or /usr/sbin owned by nothing is anomalous, with rpm -Va and debsums sweeping for unowned or modified binaries. A judgement caveat is that /usr/local/bin is the sanctioned home for admin-installed tools that no package owns, expected there but suspicious in /usr/bin. Supporting tells include a daemon-named process whose parent is a shell rather than systemd or init, multiple binaries sharing a system name across the filesystem, and the garnish tricks surfaced by listing with cat -A. Because a planted binary in /usr/bin still has an mtime tell, name/location masquerade is routinely finished with a touch -r to clone a neighbor binary's timestamp (T1070.006), so checking both ownership and time exposes the pairing. This is the on-disk sibling of the in-memory kernel-thread disguise, and T1036.004 applies the same idea to systemd and cron entries.",
+        apt: [
+          { cls: "apt-mul", name: "ELF backdoor operators", note: "Implants renamed to system-daemon names (sshd, crond, dbus-daemon) and dropped into system paths to blend into process and file listings." },
+          { cls: "apt-mul", name: "Cryptomining crews", note: "Miners impersonate system services by name and location, frequently paired with timestomping of the planted binary." },
+          { cls: "apt-mul", name: "Kobalos", note: "Linux/Unix backdoor using blend-in naming as part of its stealth against high-performance computing and server targets." }
+        ],
+        cite: "MITRE ATT&CK T1036.005"
+      }
+    ]
+  },
+  {
+    id: "T1036.004",
+    name: "Masquerading: Masquerade Task or Service",
+    desc: "Naming a persistence service, timer, or cron job to imitate a legitimate system component (systemd-update, dbus-org-helper) so it blends into the service and scheduled-task inventory. The unit name is attacker-controlled and carries no trust value, so detection judges the ExecStart/command path and package provenance of the backing binary rather than the name. Cross-references persistence T1543.002 and T1053.003 through the masquerading lens.",
+    rows: [
+      {
+        sub: "T1036.004 - Masquerade Task or Service (systemd unit / cron named to blend)",
+        os: "linux",
+        indicator: "A persistence service, timer, or cron job given a legitimate-sounding name (systemd-update, dbus-org-helper, network-manager-dispatch, kworker-timer) to evade review of the service and scheduled-task inventory, while its ExecStart or command points to a payload in a writable or non-standard path",
+        sysmon: `// Sysmon for Linux EID 1 - task/service masquerade
+// (The artifact is a unit/cron file; the masquerade is the NAME.
+//  Detection = legit-sounding name + illegitimate ExecStart/owner.
+//  Cross-ref persistence T1543.002 (systemd) / T1053.003 (cron).)
+
+// New/modified systemd unit with a system-ish name
+Image=(*/cp OR */mv OR */tee OR */vi OR */vim OR */nano OR */systemctl)
+  target in /etc/systemd/system /usr/lib/systemd/system
+            ~/.config/systemd/user /run/systemd/system
+  with a name like systemd-* dbus-* network-* udev-* (mimicry)
+
+// New cron entry with an innocuous name but odd payload
+Image=*/crontab CommandLine matches: *-e*  (interactive edit)
+target in /etc/cron.d /etc/cron.daily /var/spool/cron
+
+// Auditd
+-w /etc/systemd/system -p wa -k systemd_unit
+-w /usr/lib/systemd/system -p wa -k systemd_unit
+-w /etc/cron.d -p wa -k cron_change
+-w /etc/cron.daily -p wa -k cron_change
+-w /var/spool/cron -p wa -k cron_change`,
+        kibana: `// New systemd unit whose ExecStart is in a writable/odd path
+// despite a legitimate-sounding unit name
+event.module: "auditd"
+AND tags: "systemd_unit"
+AND NOT process.name: ("dpkg" OR "rpm" OR "yum" OR "dnf" OR "apt" OR "apt-get")
+
+// cron changes outside package management
+event.module: "auditd"
+AND tags: "cron_change"
+AND NOT process.name: ("dpkg" OR "rpm" OR "cron" OR "crontab")
+
+// Service spawning a child from a writable path (runtime tell):
+// a "systemd-*" or system-sounding unit whose process executes
+// /tmp, /dev/shm, /home, /var/tmp
+process.parent.name: ("systemd")
+AND process.executable: (*/tmp/* OR */dev/shm/* OR */home/* OR */var/tmp/*)
+
+// Enrichment to drive review:
+// for each unit in /etc/systemd/system, collect ExecStart path
+// and whether the unit file + ExecStart binary are package-owned.
+// legit-name + unowned-or-writable ExecStart = masquerade.`,
+        powershell: `#!/bin/bash
+# T1036.004 - Task/service masquerade hunt
+# A service NAME can be anything; judge by its ExecStart path and
+# package ownership, not by how official the name sounds.
+
+echo "[*] === systemd units with ExecStart in writable/odd paths ==="
+for u in /etc/systemd/system/*.service /usr/lib/systemd/system/*.service \\
+         /run/systemd/system/*.service ~/.config/systemd/user/*.service; do
+  [ -f "$u" ] || continue
+  es=$(grep -E "^ExecStart=" "$u" 2>/dev/null | head -1 | sed 's/^ExecStart=//;s/^[@+!-]*//')
+  binpath=$(echo "$es" | awk '{print $1}')
+  case "$binpath" in
+    /tmp/*|/dev/shm/*|/home/*|/var/tmp/*|/root/*|*/.*)
+      echo "[FLAG] $u"
+      echo "    name looks like: $(basename "$u")"
+      echo "    ExecStart -> $es" ;;
+  esac
+done
+
+echo ""
+echo "[*] === systemd unit FILES not owned by a package ==="
+HAVE_RPM=$(command -v rpm 2>/dev/null); HAVE_DPKG=$(command -v dpkg 2>/dev/null)
+for u in /etc/systemd/system/*.service /usr/lib/systemd/system/*.service; do
+  [ -f "$u" ] || continue
+  owned=1
+  if [ -n "$HAVE_RPM" ]; then rpm -qf "$u" >/dev/null 2>&1 || owned=0
+  elif [ -n "$HAVE_DPKG" ]; then dpkg -S "$u" >/dev/null 2>&1 || owned=0; fi
+  # /etc/systemd/system legitimately holds admin units + symlinks
+  if [ "$owned" = "0" ] && [ ! -L "$u" ]; then
+    es=$(grep -E "^ExecStart=" "$u" 2>/dev/null | head -1)
+    echo "  unowned unit (review): $u  | $es"
+  fi
+done | head -25
+echo "  (admin-created units are legitimately unowned - judge by ExecStart)"
+
+echo ""
+echo "[*] === Lookalike / mimicry unit names ==="
+ls /etc/systemd/system/*.service /usr/lib/systemd/system/*.service 2>/dev/null | \\
+  xargs -n1 basename 2>/dev/null | \\
+  grep -iE "systemd-[a-z]*helper|dbus-?org|network-?manager-?[a-z]+|udev-?[a-z]+|kworker|kthread|kernel-?update|sys-?update" | \\
+  sort -u
+echo "  (compare against the real unit list; near-miss names are suspect)"
+
+echo ""
+echo "[*] === Recently created/modified units + timers ==="
+find /etc/systemd/system /usr/lib/systemd/system -name "*.service" -o -name "*.timer" 2>/dev/null | \\
+  xargs ls -lt 2>/dev/null | head -10
+
+echo ""
+echo "[*] === cron entries with odd payloads under blendy names ==="
+for c in /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/* /var/spool/cron/* /var/spool/cron/crontabs/*; do
+  [ -f "$c" ] || continue
+  hit=$(grep -nE "/tmp/|/dev/shm/|curl|wget|base64|/var/tmp/|\\| *(ba)?sh" "$c" 2>/dev/null)
+  [ -n "$hit" ] && { echo "[FLAG] $c:"; echo "$hit" | head -3; }
+done
+
+echo ""
+echo "[*] === auditd: unit/cron writes outside package management ==="
+ausearch -k systemd_unit -i --start today 2>/dev/null | grep -ivE "comm=.(dpkg|rpm|yum|dnf|apt)" | tail -10
+ausearch -k cron_change -i --start today 2>/dev/null | grep -ivE "comm=.(dpkg|rpm)" | tail -10`,
+        registry: `Task / service masquerade artifacts:
+
+The idea:
+  Persistence via systemd unit, timer, or cron is going to appear
+  in an inventory. To survive review, the attacker NAMES the entry
+  to look like a legitimate system service - systemd-update,
+  dbus-org-helper, network-manager-dispatch, kernel-update.timer -
+  so an analyst scanning systemctl or /etc/cron.d glides past it.
+
+The artifacts (same files as persistence, different lens):
+  systemd units:
+    /etc/systemd/system/*.service|*.timer   (admin/attacker units)
+    /usr/lib/systemd/system/*               (package units - mimic targets)
+    ~/.config/systemd/user/*                (user-scope persistence)
+    /run/systemd/system/*                   (runtime/transient)
+  cron:
+    /etc/cron.d/* , /etc/cron.{daily,hourly,weekly}/*
+    /var/spool/cron/* , /var/spool/cron/crontabs/*
+
+The detection principle (judge the target, not the name):
+  A unit's NAME is attacker-controlled and meaningless for trust.
+  Judge by:
+    ExecStart PATH - a system-sounding unit whose ExecStart runs
+      from /tmp, /dev/shm, /home, /var/tmp, or a hidden dir is
+      malicious regardless of name
+    PACKAGE OWNERSHIP - package-shipped units are owned by their
+      package (rpm -qf/dpkg -S). An unowned, non-symlink unit in
+      /usr/lib/systemd/system is suspect (admin units legitimately
+      live in /etc/systemd/system, so weight that dir by ExecStart)
+    BACKING BINARY - is the ExecStart binary itself package-owned
+      and in a canonical path? (chains to T1036.005)
+
+High-signal indicators:
+  a legit-sounding unit/timer with ExecStart in a writable path
+  an unowned unit file in a package directory (/usr/lib/systemd)
+  near-miss mimicry names (systemd-helperd, dbus-daemon-helper)
+  Restart=always + ExecStart in /tmp (resilient malicious service)
+  a cron entry under an innocuous name invoking curl|bash/base64
+  recently-created unit on a host with no recent legitimate change
+
+Cross-reference:
+  Persistence T1543.002 (systemd service) and T1053.003 (cron)
+  cover the persistence mechanics; this row is the masquerading
+  lens - the naming choice that hides those mechanics from review.
+  The ExecStart binary is often itself name/location-masqueraded
+  (T1036.005) and timestomped (T1070.006).`,
+        tools: `Masquerading a task or service:
+
+Scheduled persistence is inevitably going to show up in an
+inventory - systemctl list-units, the contents of /etc/cron.d.
+So the attacker's evasion is not to hide the entry but to make
+it boring: a name that blends into the dozens of legitimate
+system services, so the reviewer's eye slides over it.
+
+Why naming-based hiding fails to the right check:
+  The unit or cron NAME is fully attacker-controlled and carries
+  zero trust value. The trustworthy signals are the TARGET and
+  the PROVENANCE:
+    - ExecStart / the cron command: where does it actually run?
+      A "systemd-update.service" whose ExecStart is /tmp/.x is
+      malicious no matter how plausible the name.
+    - Package ownership: is the unit file shipped by a package?
+      Is the ExecStart binary package-owned and in a canonical
+      path? Unowned units in package directories, or ExecStart
+      pointing at unowned binaries, are the real tells.
+  So the hunt ignores the name entirely and evaluates the target.
+
+The judgement nuance:
+  Admin-created systemd units legitimately live in
+  /etc/systemd/system and are NOT package-owned - that is normal,
+  not malicious. The discriminator there is the ExecStart path
+  and binary provenance, not ownership of the unit file itself.
+  In /usr/lib/systemd/system (the package directory), by contrast,
+  an unowned non-symlink unit is genuinely anomalous.
+
+The full masquerade chain:
+  A polished implant combines all three T1036 rows: a service
+  named to blend (T1036.004), whose ExecStart binary is named
+  like and placed like a system tool (T1036.005), with that
+  binary's timestamp cloned from a neighbor (T1070.006). Pulling
+  any one thread - ExecStart path, package ownership, or ctime
+  mismatch - unravels the set.
+
+OT/ICS relevance:
+  OT Linux services are typically a small, stable, well-known set.
+  That makes a masqueraded extra service relatively easy to spot
+  against a tight baseline - maintain an allow-list of expected
+  units and alert on any addition, judged by ExecStart.
+
+Threat actor use:
+  Naming systemd services and cron jobs to imitate system
+  components is routine in Linux persistence - cryptomining crews
+  (Kinsing, TeamTNT) and targeted operators alike create
+  system-sounding units pointing at their payloads.`,
+        ossdetect: `Sigma rules:
+- file_event_lnx_systemd_unit_masquerade_name.yml
+- proc_creation_lnx_systemd_execstart_writable_path.yml
+- file_event_lnx_cron_masquerade_payload.yml
+
+Elastic detection rules:
+- Systemd Service with Suspicious ExecStart Path
+- Unowned Systemd Unit in Package Directory
+- Cron Job with Suspicious Command under Benign Name
+
+Auditd (same watches as persistence, read with the masquerade lens):
+  -w /etc/systemd/system -p wa -k systemd_unit
+  -w /usr/lib/systemd/system -p wa -k systemd_unit
+  -w /etc/cron.d -p wa -k cron_change
+  -w /var/spool/cron -p wa -k cron_change
+  Exclude package managers; alert on shell-parented writes.
+
+Falco:
+  rule: Create/modify systemd unit (non-package process)
+  rule: Schedule cron job writing to suspicious path
+  rule: Systemd service runs binary from writable directory
+
+The provenance check (scheduled hunt):
+  for each unit: extract ExecStart binary; verify it is
+  package-owned and in a canonical path; flag writable-path or
+  unowned ExecStart. Ignore the unit NAME entirely.
+
+osquery:
+  SELECT * FROM systemd_units;          (name, fragment_path)
+  SELECT * FROM crontab;                (command, path)
+  Join ExecStart/command targets to package ownership; baseline
+  the expected unit set and diff.
+
+File integrity (FIM):
+  AIDE/Tripwire/Wazuh on /etc/systemd/system, /usr/lib/systemd/
+  system, /etc/cron.*, /var/spool/cron - alert on new entries;
+  pair with an allow-list of expected units.
+
+Atomic Red Team:
+  T1036.004 - masquerade task or service tests`,
+        notes: "Masquerading a task or service accepts that scheduled persistence will appear in an inventory and instead makes the entry boring: a systemd unit, timer, or cron job named to blend into the dozens of legitimate system services (systemd-update, dbus-org-helper, network-manager-dispatch, kernel-update.timer) so a reviewer scanning systemctl or /etc/cron.d glides past it. Naming-based hiding fails to the right check because the unit or cron name is fully attacker-controlled and carries zero trust value, while the trustworthy signals are the target and the provenance: the ExecStart or cron command (a systemd-update.service whose ExecStart is /tmp/.x is malicious no matter how plausible the name) and package ownership (whether the unit file is shipped by a package and whether the ExecStart binary is package-owned and in a canonical path). So the hunt ignores the name entirely and evaluates the target. An important judgement nuance is that admin-created systemd units legitimately live in /etc/systemd/system and are not package-owned, which is normal rather than malicious, so the discriminator there is the ExecStart path and binary provenance rather than ownership of the unit file itself, whereas in the package directory /usr/lib/systemd/system an unowned non-symlink unit is genuinely anomalous. A polished implant combines all three T1036 rows: a service named to blend (T1036.004) whose ExecStart binary is named and placed like a system tool (T1036.005) with that binary's timestamp cloned from a neighbor (T1070.006), so pulling any one thread (ExecStart path, package ownership, or ctime mismatch) unravels the set. This is especially tractable in OT Linux, where services are typically a small, stable, well-known set, making a masqueraded extra service relatively easy to spot against a tight allow-list of expected units. The technique is routine in Linux persistence, used by cryptomining crews like Kinsing and TeamTNT and by targeted operators alike. This row is the masquerading lens on the same artifacts that persistence T1543.002 and T1053.003 cover mechanically.",
+        apt: [
+          { cls: "apt-mul", name: "Kinsing", note: "Creates system-sounding systemd services and cron entries pointing at miner and loader payloads to survive inventory review." },
+          { cls: "apt-mul", name: "TeamTNT", note: "Names persistence units and cron jobs to imitate legitimate system components while ExecStart targets payloads in writable paths." },
+          { cls: "apt-mul", name: "Targeted Linux operators", note: "Service/timer naming chosen to blend into the system unit set, chained with binary name/location masquerade and timestomping." }
+        ],
+        cite: "MITRE ATT&CK T1036.004"
+      }
+    ]
   }
 ];
