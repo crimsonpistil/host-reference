@@ -88,16 +88,16 @@
     <div class="card-count">&#9654; Open reference</div>
   </a>
 
+  <a href="defense_evasion.html" class="tactic-card" data-tags="defense evasion ta0005 indicator removal clear command history bash_history log clearing var log journal wtmp utmp btmp lastlog login record tampering timestomp ctime file deletion shred self-delete proc impair defenses auditd auditctl selinux apparmor setenforce firewall iptables nftables ufw firewalld disable security tools edr falco wazuh osquery clamav cloud agent aegis aliyundun yunjing indicator blocking rsyslog syslog log forwarding suppression">
+    <div class="card-id" style="color:#f85149">TA0005</div>
+    <span class="card-pill" style="background:rgba(248,81,73,.12);color:#f85149">10 indicators · 8 techniques · LINUX</span>
+    <div class="card-name">Defense Evasion</div>
+    <div class="card-desc">Subverting and blinding host defenses and removing evidence of intrusion. Linux tranche 1 (10): T1070 Indicator Removal - .003 clear command history (HISTFILE manipulation, history -c, symlink to /dev/null, kill -9 of the shell), .002 clear system logs plus utmp/wtmp/btmp/lastlog login-record tampering, .006 timestomp (the ctime-vs-mtime tell), .004 file deletion plus /proc self-delete recovery. T1562 Impair Defenses - .012 disable the Linux audit system (the keystone evasion and EPS-gap detection), .001 disable security agents plus SELinux/AppArmor plus the Alibaba/Tencent cloud-agent uninstall TTP, .004 disable or flush the host firewall (baselining out Docker/k8s churn), .006 indicator blocking (log-forwarding suppression and ingestion-gap detection). Windows coverage and a second Linux pass (T1014 Rootkit, T1036 Masquerading) are planned. 10 indicators total - filter by OS in the header.</div>
+    <div class="card-count">&#9654; Open reference</div>
+  </a>
+
 </div>
 <div class="tactic-grid">
-
-  <div class="tactic-card soon" data-tags="defense evasion">
-    <div class="card-id" style="color:#f85149">TA0005</div>
-    <span class="card-pill" style="background:rgba(248,81,73,.12);color:#f85149">Planned</span>
-    <div class="card-name">Defense Evasion</div>
-    <div class="card-desc">Process injection (CreateRemoteThread, APC, PE injection), parent PID spoofing, unsigned drivers, LOLBin abuse.</div>
-    <div class="card-count">Coming soon</div>
-  </div>
 
   <div class="tactic-card soon" data-tags="credential access">
     <div class="card-id" style="color:#ff7b72">TA0006</div>
@@ -149,11 +149,10 @@
     </div>
 
     <div class="info-card">
-      <h3>Build status</h3>
-      <p><strong>Execution (TA0002) complete</strong>: 44 indicators across 18 techniques, Windows and Linux. Windows (32) covers scripting interpreters (PowerShell, cmd, VBScript, JScript), WMI (local/remote/persistence), scheduled tasks, service execution, signed binary proxy execution (mshta, rundll32, regsvr32), Native API injection, DLL side-loading and search-order hijacking, and user-executed malicious files. Linux (12) covers T1059.004 Unix shell (curl|bash, reverse shells, service-spawned shells, HISTFILE/IFS obfuscation, SUID interpreters), T1059.006 Python (reverse shells, pty.spawn, sitecustomize/PYTHONSTARTUP), T1106 fileless and LD_PRELOAD execution, T1053.003 cron, T1059 Perl one-liners, and T1059.012 container shells.</p>
-      <p><strong>Persistence (TA0003)</strong>: 28 indicators across 16 techniques, Windows and Linux. Windows (20): T1547.001 Run Keys / Startup Folder (3), T1546.003 WMI Subscription Hunt (2), T1543.003 Service Persistence Hunt (3), T1053.005 Scheduled Task Persistence Angle (2), T1547.009 Shortcut Modification (2), T1037 Boot/Logon Init Scripts including GPO logon scripts (2), T1098 Account Manipulation - group changes and password resets (2), T1136 Create Account - local and domain (2), T1546.015 COM Hijacking - HKCU shadow and phantom/TreatAs variants (2). Linux (8): T1053.003 cron jobs (2), T1543.002 systemd service units (1), T1546.004 Unix shell rc/profile (1), T1098.004 SSH authorized_keys (1), T1547.006 kernel modules / LKM (1), T1556.003 PAM backdoor (1), T1037.004 RC init scripts (1). Cross-cited techniques from Execution are built with persistence-hunting-specific indicators rather than duplicating Execution coverage.</p>
-      <p><strong>Privilege Escalation (TA0004) complete</strong>: 30 indicators across 16 techniques, Windows and Linux. Windows (21) - Core: T1548.002 Bypass UAC (3), T1134 Access Token Manipulation incl. Potato pattern (2), T1055 Process Injection - remote-thread DLL/PE, hollowing, thread hijack (3), T1068 Exploitation incl. BYOVD and SeImpersonate-coercion (2). Config/hijack: T1574.011 Service Registry Permissions (1), T1574.005/.009/.010 Unquoted Path & Weak Service Permissions (2), T1574.001 DLL Search-Order Hijack priv-esc angle (1). Token/directory: T1134.005 SID-History Injection (1), T1484.001/.002 GPO & Domain-Trust Modification (2), T1098 Account Manipulation incl. AdminSDHolder (1). Triggered execution: T1546.008 Accessibility Features (1), T1546.012 IFEO Injection (1). Container: T1611 Escape to Host (1). Linux (9): T1548.001 setuid/setgid + GTFOBins + Linux capabilities (2), T1548.003 sudo misconfig + sudo CVEs incl. Baron Samedit and the runas bypass (2), T1068 pkexec PwnKit + kernel exploits DirtyPipe/DirtyCOW/Looney Tunables (2), T1611 privileged container / docker.sock / runc / cgroups release_agent escape (2), T1574.006 dynamic linker hijack via LD_PRELOAD and ld.so.preload (1). The Linux T1574.006 work cross-references the LD_PRELOAD execution coverage in TA0002. Techniques shared with Persistence (T1543.003, T1546.003/.015, T1053.005, T1547.x, T1037) are covered in that tactic with persistence framing.</p>
-      <p>Tactic build order: <br>&rarr;Execution <br>&rarr;Persistence <br>&rarr;Privilege Escalation<br>&rarr;Defense Evasion<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
+      <h3>Current Build Status</h3>
+      <p><strong>Execution (TA0002)</strong>, <strong>Persistence (TA0003)</strong>, and <strong>Privilege Escalation (TA0004)</strong> complete.</p>
+      <p><strong>Defense Evasion (TA0005) in progress</strong>: 10 indicators across 8 sub-techniques, Linux-focused build first.</p>
+      <p>Upcoming tactic build order: <br>&rarr;Defense Evasion<br>&rarr;Credential Access<br>&rarr;Discovery<br>then completionist coverage of the rest.</p>
     </div>
 
   </div>
